@@ -1,47 +1,52 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::{Message, QueueId, Status, spool::SmtpSpool};
+use crate::queue::{Recipient, spool::LOCK_EXPIRY};
+use ahash::AHashMap;
+use common::{
+    Inner,
+    config::smtp::queue::{QueueExpiry, QueueName},
+    core::BuildServer,
+    ipc::{QueueEvent, QueueEventStatus},
+};
+use rand::{Rng, seq::SliceRandom};
 use std::{
+    collections::hash_map::Entry,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
-
-use ahash::{AHashMap, AHashSet};
-use common::{
-    Inner,
-    core::BuildServer,
-    ipc::{QueueEvent, QueueEventStatus},
-    listener::limiter::ConcurrencyLimiter,
-};
-use rand::seq::SliceRandom;
 use store::write::now;
 use tokio::sync::mpsc;
 
-use super::{
-    Message, QueueId, Status,
-    spool::{QUEUE_REFRESH, SmtpSpool},
-};
-
 pub struct Queue {
     pub core: Arc<Inner>,
-    pub on_hold: AHashMap<QueueId, OnHold>,
+    pub locked_messages: LockedMessages,
+    pub stats: AHashMap<QueueName, QueueStats>,
     pub next_wake_up: Instant,
     pub rx: mpsc::Receiver<QueueEvent>,
 }
 
 #[derive(Debug)]
-pub enum OnHold {
-    InFlight,
-    ConcurrencyLimited {
-        limiters: Vec<ConcurrencyLimiter>,
-        next_due: Option<u64>,
-    },
-    Locked {
-        until: u64,
-    },
+pub struct QueueStats {
+    pub in_flight: usize,
+    pub max_in_flight: usize,
+    pub last_warning: Instant,
+}
+
+#[derive(Debug)]
+pub struct LockedMessages {
+    pub locked: AHashMap<(QueueId, QueueName), LockedMessage>,
+    pub revision: u64,
+}
+
+#[derive(Debug)]
+pub struct LockedMessage {
+    pub expires: u64,
+    pub revision: u64,
 }
 
 impl SpawnQueue for mpsc::Receiver<QueueEvent> {
@@ -52,14 +57,14 @@ impl SpawnQueue for mpsc::Receiver<QueueEvent> {
     }
 }
 
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const BACK_PRESSURE_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 impl Queue {
     pub fn new(core: Arc<Inner>, rx: mpsc::Receiver<QueueEvent>) -> Self {
         Queue {
             core,
-            on_hold: AHashMap::with_capacity(128),
+            locked_messages: LockedMessages::default(),
+            stats: AHashMap::new(),
             next_wake_up: Instant::now(),
             rx,
         }
@@ -67,10 +72,6 @@ impl Queue {
 
     pub async fn start(&mut self) {
         let mut is_paused = false;
-        let mut next_cleanup = Instant::now() + CLEANUP_INTERVAL;
-        let mut last_backpressure_warning = Instant::now() - BACK_PRESSURE_WARN_INTERVAL;
-        let mut in_flight_count = 0;
-        let mut has_back_pressure = false;
 
         loop {
             let refresh_queue = match tokio::time::timeout(
@@ -79,25 +80,37 @@ impl Queue {
             )
             .await
             {
-                Ok(Some(QueueEvent::WorkerDone { queue_id, status })) => {
-                    in_flight_count -= 1;
+                Ok(Some(QueueEvent::WorkerDone {
+                    queue_id,
+                    queue_name,
+                    status,
+                })) => {
+                    let queue_stats = self.stats.get_mut(&queue_name).unwrap();
+                    queue_stats.in_flight -= 1;
 
                     match status {
                         QueueEventStatus::Completed => {
-                            self.on_hold.remove(&queue_id);
-                            !self.on_hold.is_empty() || has_back_pressure
+                            self.locked_messages.locked.remove(&(queue_id, queue_name));
+                            !self.locked_messages.locked.is_empty() || !queue_stats.has_capacity()
                         }
-                        QueueEventStatus::Locked { until } => {
-                            let due_in = Instant::now() + Duration::from_secs(until - now());
+                        QueueEventStatus::Locked => {
+                            let expires = LOCK_EXPIRY + rand::rng().random_range(5..10);
+                            let due_in = Instant::now() + Duration::from_secs(expires);
                             if due_in < self.next_wake_up {
                                 self.next_wake_up = due_in;
                             }
 
-                            self.on_hold.insert(queue_id, OnHold::Locked { until });
-                            self.on_hold.len() > 1 || has_back_pressure
+                            self.locked_messages.locked.insert(
+                                (queue_id, queue_name),
+                                LockedMessage {
+                                    expires: now() + expires,
+                                    revision: self.locked_messages.revision,
+                                },
+                            );
+                            self.locked_messages.locked.len() > 1 || !queue_stats.has_capacity()
                         }
                         QueueEventStatus::Deferred => {
-                            self.on_hold.remove(&queue_id);
+                            self.locked_messages.locked.remove(&(queue_id, queue_name));
                             true
                         }
                     }
@@ -111,6 +124,18 @@ impl Queue {
                     is_paused = paused;
                     false
                 }
+                Ok(Some(QueueEvent::ReloadSettings)) => {
+                    let server = self.core.build_server();
+                    for (name, settings) in &server.core.smtp.queue.virtual_queues {
+                        if let Some(stats) = self.stats.get_mut(name) {
+                            stats.max_in_flight = settings.threads;
+                        } else {
+                            self.stats.insert(*name, QueueStats::new(settings.threads));
+                        }
+                    }
+
+                    false
+                }
                 Err(_) => true,
                 Ok(Some(QueueEvent::Stop)) | Ok(None) => {
                     break;
@@ -120,145 +145,58 @@ impl Queue {
             if !is_paused {
                 // Deliver scheduled messages
                 if refresh_queue || self.next_wake_up <= Instant::now() {
-                    // If the number of in-flight messages is greater than the maximum allowed, skip the queue
-                    let server = self.core.build_server();
-                    let max_in_flight = server.core.smtp.queue.max_threads;
-                    has_back_pressure = in_flight_count >= max_in_flight;
-                    if has_back_pressure {
-                        self.next_wake_up = Instant::now() + Duration::from_secs(QUEUE_REFRESH);
-
-                        if last_backpressure_warning.elapsed() >= BACK_PRESSURE_WARN_INTERVAL {
-                            let queue_events = server.next_event().await;
-                            last_backpressure_warning = Instant::now();
-                            trc::event!(
-                                Queue(trc::QueueEvent::BackPressure),
-                                Reason =
-                                    "Queue outbound processing capacity for this node exceeded.",
-                                Total = queue_events.len(),
-                                Details = self
-                                    .on_hold
-                                    .values()
-                                    .fold([0, 0, 0], |mut acc, v| {
-                                        match v {
-                                            OnHold::InFlight => acc[0] += 1,
-                                            OnHold::ConcurrencyLimited { .. } => acc[1] += 1,
-                                            OnHold::Locked { .. } => acc[2] += 1,
-                                        }
-                                        acc
-                                    })
-                                    .into_iter()
-                                    .map(trc::Value::from)
-                                    .collect::<Vec<_>>(),
-                                Limit = max_in_flight,
-                            );
-                        }
-                        continue;
-                    }
-
                     // Process queue events
-                    let now = now();
-                    let mut next_wake_up = QUEUE_REFRESH;
-                    let mut queue_events = server.next_event().await;
+                    let server = self.core.build_server();
+                    let mut queue_events = server.next_event(self).await;
 
-                    if queue_events.len() > 5 {
-                        queue_events.shuffle(&mut rand::rng());
+                    if queue_events.messages.len() > 3 {
+                        queue_events.messages.shuffle(&mut rand::rng());
                     }
 
-                    for queue_event in &queue_events {
-                        if queue_event.due <= now {
-                            // Enforce global concurrency limits
-                            if in_flight_count >= max_in_flight {
-                                has_back_pressure = true;
-                                if last_backpressure_warning.elapsed()
-                                    >= BACK_PRESSURE_WARN_INTERVAL
-                                {
-                                    last_backpressure_warning = Instant::now();
-                                    trc::event!(
-                                        Queue(trc::QueueEvent::BackPressure),
-                                        Reason = "Queue outbound processing capacity for this node exceeded.",
-                                        Total = queue_events.len(),
-                                        Details = self
-                                            .on_hold
-                                            .values()
-                                            .fold([0, 0, 0], |mut acc, v| {
-                                                match v {
-                                                    OnHold::InFlight => acc[0] += 1,
-                                                    OnHold::ConcurrencyLimited { .. } => {
-                                                        acc[1] += 1
-                                                    }
-                                                    OnHold::Locked { .. } => acc[2] += 1,
-                                                }
-                                                acc
-                                            })
-                                            .into_iter()
-                                            .map(trc::Value::from)
-                                            .collect::<Vec<_>>(),
-                                        Limit = max_in_flight,
-                                    );
-                                }
-                                break;
+                    for queue_event in &queue_events.messages {
+                        // Fetch queue stats
+                        let stats = match self.stats.get_mut(&queue_event.queue_name) {
+                            Some(stats) => stats,
+                            None => {
+                                let queue_config =
+                                    server.get_virtual_queue_or_default(&queue_event.queue_name);
+                                self.stats.insert(
+                                    queue_event.queue_name,
+                                    QueueStats::new(queue_config.threads),
+                                );
+                                self.stats.get_mut(&queue_event.queue_name).unwrap()
                             }
+                        };
 
-                            // Check if the message is still on hold
-                            if let Some(on_hold) = self.on_hold.get(&queue_event.queue_id) {
-                                match on_hold {
-                                    OnHold::Locked { until } => {
-                                        if *until > now {
-                                            let due_in = *until - now;
-                                            if due_in < next_wake_up {
-                                                next_wake_up = due_in;
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                    OnHold::ConcurrencyLimited { limiters, next_due } => {
-                                        if !(limiters.iter().any(|l| {
-                                            l.concurrent.load(Ordering::Relaxed) < l.max_concurrent
-                                        }) || next_due.is_some_and(|due| due <= now))
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                    OnHold::InFlight => continue,
-                                }
-
-                                self.on_hold.remove(&queue_event.queue_id);
-                            }
-
+                        // Enforce concurrency limits
+                        if stats.has_capacity() {
                             // Deliver message
-                            in_flight_count += 1;
-                            self.on_hold.insert(queue_event.queue_id, OnHold::InFlight);
+                            stats.in_flight += 1;
                             queue_event.try_deliver(server.clone());
                         } else {
-                            let due_in = queue_event.due - now;
-                            if due_in < next_wake_up {
-                                next_wake_up = due_in;
+                            if stats.last_warning.elapsed() >= BACK_PRESSURE_WARN_INTERVAL {
+                                stats.last_warning = Instant::now();
+                                trc::event!(
+                                    Queue(trc::QueueEvent::BackPressure),
+                                    Reason = "Processing capacity for this queue exceeded.",
+                                    QueueName = queue_event.queue_name.to_string(),
+                                    Limit = stats.max_in_flight,
+                                );
                             }
+                            self.locked_messages
+                                .locked
+                                .remove(&(queue_event.queue_id, queue_event.queue_name));
                         }
                     }
 
                     // Remove expired locks
-                    let now = Instant::now();
-                    if next_cleanup <= now {
-                        next_cleanup = now + CLEANUP_INTERVAL;
+                    let now = now();
+                    self.locked_messages.locked.retain(|_, locked| {
+                        locked.expires > now && locked.revision == self.locked_messages.revision
+                    });
 
-                        if !self.on_hold.is_empty() {
-                            let active_queue_ids = queue_events
-                                .into_iter()
-                                .map(|e| e.queue_id)
-                                .collect::<AHashSet<_>>();
-                            let now = store::write::now();
-                            self.on_hold.retain(|queue_id, status| match status {
-                                OnHold::InFlight => true,
-                                OnHold::Locked { until } => *until > now,
-                                OnHold::ConcurrencyLimited { .. } => {
-                                    active_queue_ids.contains(queue_id)
-                                }
-                            });
-                        }
-                    }
-
-                    self.next_wake_up = now + Duration::from_secs(next_wake_up);
+                    self.next_wake_up = Instant::now()
+                        + Duration::from_secs(queue_events.next_refresh.saturating_sub(now));
                 }
             } else {
                 // Queue is paused
@@ -269,114 +207,160 @@ impl Queue {
 }
 
 impl Message {
-    pub fn next_event(&self) -> Option<u64> {
-        let mut next_event = now();
-        let mut has_events = false;
-
-        for domain in &self.domains {
-            if matches!(
-                domain.status,
-                Status::Scheduled | Status::TemporaryFailure(_)
-            ) {
-                if !has_events || domain.retry.due < next_event {
-                    next_event = domain.retry.due;
-                    has_events = true;
-                }
-                if domain.notify.due < next_event {
-                    next_event = domain.notify.due;
-                }
-                if domain.expires < next_event {
-                    next_event = domain.expires;
-                }
-            }
-        }
-
-        if has_events { next_event.into() } else { None }
-    }
-
-    pub fn next_delivery_event(&self) -> u64 {
-        let mut next_delivery = now();
-
-        for (pos, domain) in self
-            .domains
-            .iter()
-            .filter(|d| matches!(d.status, Status::Scheduled | Status::TemporaryFailure(_)))
-            .enumerate()
-        {
-            if pos == 0 || domain.retry.due < next_delivery {
-                next_delivery = domain.retry.due;
-            }
-        }
-
-        next_delivery
-    }
-
-    pub fn next_dsn(&self) -> u64 {
-        let mut next_dsn = now();
-
-        for (pos, domain) in self
-            .domains
-            .iter()
-            .filter(|d| matches!(d.status, Status::Scheduled | Status::TemporaryFailure(_)))
-            .enumerate()
-        {
-            if pos == 0 || domain.notify.due < next_dsn {
-                next_dsn = domain.notify.due;
-            }
-        }
-
-        next_dsn
-    }
-
-    pub fn expires(&self) -> u64 {
-        let mut expires = now();
-
-        for (pos, domain) in self
-            .domains
-            .iter()
-            .filter(|d| matches!(d.status, Status::Scheduled | Status::TemporaryFailure(_)))
-            .enumerate()
-        {
-            if pos == 0 || domain.expires < expires {
-                expires = domain.expires;
-            }
-        }
-
-        expires
-    }
-
-    pub fn next_event_after(&self, instant: u64) -> Option<u64> {
+    pub fn next_event(&self, queue: Option<QueueName>) -> Option<u64> {
         let mut next_event = None;
 
-        for domain in &self.domains {
-            if matches!(
-                domain.status,
-                Status::Scheduled | Status::TemporaryFailure(_)
-            ) {
-                if domain.retry.due > instant
-                    && next_event.as_ref().is_none_or(|ne| domain.retry.due.lt(ne))
-                {
-                    next_event = domain.retry.due.into();
+        for rcpt in &self.recipients {
+            if matches!(rcpt.status, Status::Scheduled | Status::TemporaryFailure(_))
+                && queue.is_none_or(|q| rcpt.queue == q)
+            {
+                let mut earlier_event = std::cmp::min(rcpt.retry.due, rcpt.notify.due);
+
+                if let Some(expires) = rcpt.expiration_time(self.created) {
+                    earlier_event = std::cmp::min(earlier_event, expires);
                 }
-                if domain.notify.due > instant
-                    && next_event
-                        .as_ref()
-                        .is_none_or(|ne| domain.notify.due.lt(ne))
-                {
-                    next_event = domain.notify.due.into();
-                }
-                if domain.expires > instant
-                    && next_event.as_ref().is_none_or(|ne| domain.expires.lt(ne))
-                {
-                    next_event = domain.expires.into();
+
+                if let Some(next_event) = &mut next_event {
+                    if earlier_event < *next_event {
+                        *next_event = earlier_event;
+                    }
+                } else {
+                    next_event = Some(earlier_event);
                 }
             }
         }
 
         next_event
     }
+
+    pub fn next_delivery_event(&self, queue: Option<QueueName>) -> Option<u64> {
+        let mut next_delivery = None;
+
+        for rcpt in self.recipients.iter().filter(|rcpt| {
+            matches!(rcpt.status, Status::Scheduled | Status::TemporaryFailure(_))
+                && queue.is_none_or(|q| rcpt.queue == q)
+        }) {
+            if let Some(next_delivery) = &mut next_delivery {
+                if rcpt.retry.due < *next_delivery {
+                    *next_delivery = rcpt.retry.due;
+                }
+            } else {
+                next_delivery = Some(rcpt.retry.due);
+            }
+        }
+
+        next_delivery
+    }
+
+    pub fn next_dsn(&self, queue: Option<QueueName>) -> Option<u64> {
+        let mut next_dsn = None;
+
+        for rcpt in self.recipients.iter().filter(|rcpt| {
+            matches!(rcpt.status, Status::Scheduled | Status::TemporaryFailure(_))
+                && queue.is_none_or(|q| rcpt.queue == q)
+        }) {
+            if let Some(next_dsn) = &mut next_dsn {
+                if rcpt.notify.due < *next_dsn {
+                    *next_dsn = rcpt.notify.due;
+                }
+            } else {
+                next_dsn = Some(rcpt.notify.due);
+            }
+        }
+
+        next_dsn
+    }
+
+    pub fn expires(&self, queue: Option<QueueName>) -> Option<u64> {
+        let mut expires = None;
+
+        for rcpt in self.recipients.iter().filter(|d| {
+            matches!(d.status, Status::Scheduled | Status::TemporaryFailure(_))
+                && queue.is_none_or(|q| d.queue == q)
+        }) {
+            if let Some(rcpt_expires) = rcpt.expiration_time(self.created) {
+                if let Some(expires) = &mut expires {
+                    if rcpt_expires > *expires {
+                        *expires = rcpt_expires;
+                    }
+                } else {
+                    expires = Some(rcpt_expires)
+                }
+            }
+        }
+
+        expires
+    }
+
+    pub fn next_events(&self) -> AHashMap<QueueName, u64> {
+        let mut next_events = AHashMap::new();
+
+        for rcpt in &self.recipients {
+            if matches!(rcpt.status, Status::Scheduled | Status::TemporaryFailure(_)) {
+                let mut earlier_event = std::cmp::min(rcpt.retry.due, rcpt.notify.due);
+
+                if let Some(expires) = rcpt.expiration_time(self.created) {
+                    earlier_event = std::cmp::min(earlier_event, expires);
+                }
+
+                match next_events.entry(rcpt.queue) {
+                    Entry::Occupied(mut entry) => {
+                        let entry = entry.get_mut();
+                        if earlier_event < *entry {
+                            *entry = earlier_event;
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(earlier_event);
+                    }
+                }
+            }
+        }
+
+        next_events
+    }
+}
+
+impl Recipient {
+    pub fn expiration_time(&self, created: u64) -> Option<u64> {
+        match self.expires {
+            QueueExpiry::Duration(time) => Some(created + time),
+            QueueExpiry::Count(_) => None,
+        }
+    }
+
+    pub fn is_expired(&self, created: u64, now: u64) -> bool {
+        match self.expires {
+            QueueExpiry::Duration(time) => created + time <= now,
+            QueueExpiry::Count(count) => self.retry.inner >= count,
+        }
+    }
 }
 
 pub trait SpawnQueue {
     fn spawn(self, core: Arc<Inner>);
+}
+
+impl QueueStats {
+    fn new(max_in_flight: usize) -> Self {
+        QueueStats {
+            in_flight: 0,
+            max_in_flight,
+            last_warning: Instant::now() - BACK_PRESSURE_WARN_INTERVAL,
+        }
+    }
+
+    #[inline]
+    pub fn has_capacity(&self) -> bool {
+        self.in_flight < self.max_in_flight
+    }
+}
+
+impl Default for LockedMessages {
+    fn default() -> Self {
+        LockedMessages {
+            locked: AHashMap::with_capacity(128),
+            revision: 0,
+        }
+    }
 }

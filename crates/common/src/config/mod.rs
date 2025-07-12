@@ -1,34 +1,33 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
-
-use std::{str::FromStr, sync::Arc};
-
-use arc_swap::ArcSwap;
-use base64::{engine::general_purpose, Engine};
-use directory::{Directories, Directory};
-use hyper::{
-    header::{HeaderName, HeaderValue, AUTHORIZATION},
-    HeaderMap,
-};
-use ring::signature::{EcdsaKeyPair, RsaKeyPair};
-use spamfilter::SpamFilterConfig;
-use store::{BlobBackend, BlobStore, FtsStore, InMemoryStore, Store, Stores};
-use telemetry::Metrics;
-use utils::config::{utils::AsKey, Config};
-
-use crate::{
-    auth::oauth::config::OAuthConfig, expr::*, listener::tls::AcmeProviders,
-    manager::config::ConfigManager, Core, Network, Security,
-};
 
 use self::{
     imap::ImapConfig, jmap::settings::JmapConfig, scripts::Scripting, smtp::SmtpConfig,
     storage::Storage,
 };
+use crate::{
+    Core, Network, Security, auth::oauth::config::OAuthConfig, expr::*,
+    listener::tls::AcmeProviders, manager::config::ConfigManager,
+};
+use arc_swap::ArcSwap;
+use base64::{Engine, engine::general_purpose};
+use directory::{Directories, Directory};
+use groupware::GroupwareConfig;
+use hyper::{
+    HeaderMap,
+    header::{AUTHORIZATION, HeaderName, HeaderValue},
+};
+use ring::signature::{EcdsaKeyPair, RsaKeyPair};
+use spamfilter::SpamFilterConfig;
+use std::{str::FromStr, sync::Arc};
+use store::{BlobBackend, BlobStore, FtsStore, InMemoryStore, Store, Stores};
+use telemetry::Metrics;
+use utils::config::{Config, utils::AsKey};
 
+pub mod groupware;
 pub mod imap;
 pub mod inner;
 pub mod jmap;
@@ -75,7 +74,7 @@ impl Core {
         let is_enterprise = false;
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
         #[cfg(feature = "enterprise")]
         let enterprise =
@@ -137,6 +136,21 @@ impl Core {
                 }
             })
             .unwrap_or_default();
+        let pubsub = config
+            .value("cluster.coordinator")
+            .map(|id| id.to_string())
+            .and_then(|id| {
+                if let Some(store) = stores.pubsub_stores.get(&id) {
+                    store.clone().into()
+                } else {
+                    config.new_parse_error(
+                        "cluster.coordinator",
+                        format!("Coordinator backend {id:?} not found"),
+                    );
+                    None
+                }
+            })
+            .unwrap_or_default();
         let mut directories =
             Directories::parse(config, &stores, data.clone(), is_enterprise).await;
         let directory = config
@@ -186,11 +200,13 @@ impl Core {
             acme: AcmeProviders::parse(config),
             metrics: Metrics::parse(config),
             spam: SpamFilterConfig::parse(config).await,
+            groupware: GroupwareConfig::parse(config),
             storage: Storage {
                 data,
                 blob,
                 fts,
                 lookup,
+                pubsub,
                 directory,
                 directories: directories.directories,
                 purge_schedules: stores.purge_schedules,

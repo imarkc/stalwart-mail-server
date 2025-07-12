@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use deadpool::{
-    managed::{Manager, Pool},
     Runtime,
+    managed::{Manager, Pool},
 };
 use std::{sync::Arc, time::Duration};
 use store::{Store, Stores};
@@ -15,11 +15,11 @@ use utils::config::Config;
 use ahash::AHashMap;
 
 use crate::{
+    Directories, Directory, DirectoryInner,
     backend::{
         imap::ImapDirectory, ldap::LdapDirectory, memory::MemoryDirectory, oidc::OpenIdDirectory,
         smtp::SmtpDirectory, sql::SqlDirectory,
     },
-    Directories, Directory, DirectoryInner,
 };
 
 use super::cache::CachedDirectory;
@@ -33,11 +33,7 @@ impl Directories {
     ) -> Self {
         let mut directories = AHashMap::new();
 
-        for id in config
-            .sub_keys("directory", ".type")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id in config.sub_keys("directory", ".type") {
             // Parse directory
             let id = id.as_str();
             #[cfg(feature = "test_mode")]

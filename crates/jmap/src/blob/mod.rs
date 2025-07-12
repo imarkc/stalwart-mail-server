@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -20,10 +20,4 @@ pub struct UploadResponse {
     #[serde(rename(serialize = "type"))]
     c_type: String,
     size: usize,
-}
-
-pub struct DownloadResponse {
-    pub filename: String,
-    pub content_type: String,
-    pub blob: Vec<u8>,
 }

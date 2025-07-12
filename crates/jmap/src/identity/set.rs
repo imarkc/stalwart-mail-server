@@ -1,24 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::Server;
-use directory::{backend::internal::PrincipalField, QueryBy};
+use common::{Server, storage::index::ObjectIndexBuilder};
+use directory::QueryBy;
+use email::identity::{EmailAddress, Identity};
 use jmap_proto::{
     error::set::SetError,
     method::set::{RequestArguments, SetRequest, SetResponse},
-    object::Object,
     response::references::EvalObjectReferences,
     types::{
-        collection::Collection,
+        collection::{Collection, SyncCollection},
         property::Property,
+        state::State,
         value::{MaybePatchValue, Value},
     },
 };
 use std::future::Future;
-use store::write::{log::ChangeLogBuilder, BatchBuilder, F_CLEAR, F_VALUE};
+use store::write::BatchBuilder;
 use trc::AddContext;
 use utils::sanitize_email;
 
@@ -35,7 +36,7 @@ impl IdentitySet for Server {
         mut request: SetRequest<RequestArguments>,
     ) -> trc::Result<SetResponse> {
         let account_id = request.account_id.document_id();
-        let mut identity_ids = self
+        let identity_ids = self
             .get_document_ids(account_id, Collection::Identity)
             .await?
             .unwrap_or_default();
@@ -43,36 +44,26 @@ impl IdentitySet for Server {
         let will_destroy = request.unwrap_destroy();
 
         // Process creates
-        let mut changes = ChangeLogBuilder::new();
+        let mut batch = BatchBuilder::new();
         'create: for (id, object) in request.unwrap_create() {
-            let mut identity = Object::with_capacity(object.properties.len());
+            let mut identity = Identity::default();
 
-            for (property, value) in object.properties {
-                match response
-                    .eval_object_references(value)
-                    .and_then(|value| validate_identity_value(&property, value, None))
-                {
-                    Ok(Value::Null) => (),
-                    Ok(value) => {
-                        identity.set(property, value);
-                    }
-                    Err(err) => {
-                        response.not_created.append(id, err);
-                        continue 'create;
-                    }
+            for (property, value) in object.0 {
+                if let Err(err) = response.eval_object_references(value).and_then(|value| {
+                    validate_identity_value(&property, value, &mut identity, true)
+                }) {
+                    response.not_created.append(id, err);
+                    continue 'create;
                 }
             }
 
             // Validate email address
-            if let Value::Text(email) = identity.get(&Property::Email) {
-                if !self
-                    .core
-                    .storage
-                    .directory
+            if !identity.email.is_empty() {
+                if self
+                    .directory()
                     .query(QueryBy::Id(account_id), false)
                     .await?
-                    .unwrap_or_default()
-                    .has_str_value(PrincipalField::Emails, email)
+                    .is_none_or(|p| !p.emails.iter().any(|e| e == &identity.email))
                 {
                     response.not_created.append(
                         id,
@@ -95,19 +86,18 @@ impl IdentitySet for Server {
             }
 
             // Insert record
-            let mut batch = BatchBuilder::new();
+            let document_id = self
+                .store()
+                .assign_document_ids(account_id, Collection::Identity, 1)
+                .await
+                .caused_by(trc::location!())?;
             batch
                 .with_account_id(account_id)
                 .with_collection(Collection::Identity)
-                .create_document()
-                .value(Property::Value, identity, F_VALUE);
-            let document_id = self
-                .store()
-                .write_expect_id(batch)
-                .await
-                .caused_by(trc::location!())?;
-            identity_ids.insert(document_id);
-            changes.log_insert(Collection::Identity, document_id);
+                .create_document(document_id)
+                .custom(ObjectIndexBuilder::<(), _>::new().with_changes(identity))
+                .caused_by(trc::location!())?
+                .commit_point();
             response.created(id, document_id);
         }
 
@@ -121,51 +111,43 @@ impl IdentitySet for Server {
 
             // Obtain identity
             let document_id = id.document_id();
-            let mut identity = if let Some(identity) = self
-                .get_property::<Object<Value>>(
-                    account_id,
-                    Collection::Identity,
-                    document_id,
-                    Property::Value,
-                )
+            let identity_ = if let Some(identity_) = self
+                .get_archive(account_id, Collection::Identity, document_id)
                 .await?
             {
-                identity
+                identity_
             } else {
                 response.not_updated.append(id, SetError::not_found());
                 continue 'update;
             };
+            let identity = identity_
+                .to_unarchived::<Identity>()
+                .caused_by(trc::location!())?;
+            let mut new_identity = identity
+                .deserialize::<Identity>()
+                .caused_by(trc::location!())?;
 
-            for (property, value) in object.properties {
-                match response
-                    .eval_object_references(value)
-                    .and_then(|value| validate_identity_value(&property, value, Some(&identity)))
-                {
-                    Ok(Value::Null) => {
-                        identity.remove(&property);
-                    }
-                    Ok(value) => {
-                        identity.set(property, value);
-                    }
-                    Err(err) => {
-                        response.not_updated.append(id, err);
-                        continue 'update;
-                    }
-                };
+            for (property, value) in object.0 {
+                if let Err(err) = response.eval_object_references(value).and_then(|value| {
+                    validate_identity_value(&property, value, &mut new_identity, false)
+                }) {
+                    response.not_updated.append(id, err);
+                    continue 'update;
+                }
             }
 
             // Update record
-            let mut batch = BatchBuilder::new();
             batch
                 .with_account_id(account_id)
                 .with_collection(Collection::Identity)
                 .update_document(document_id)
-                .value(Property::Value, identity, F_VALUE);
-            self.store()
-                .write(batch)
-                .await
-                .caused_by(trc::location!())?;
-            changes.log_update(Collection::Identity, document_id);
+                .custom(
+                    ObjectIndexBuilder::new()
+                        .with_current(identity)
+                        .with_changes(new_identity),
+                )
+                .caused_by(trc::location!())?
+                .commit_point();
             response.updated.append(id, None);
         }
 
@@ -174,17 +156,13 @@ impl IdentitySet for Server {
             let document_id = id.document_id();
             if identity_ids.contains(document_id) {
                 // Update record
-                let mut batch = BatchBuilder::new();
                 batch
                     .with_account_id(account_id)
                     .with_collection(Collection::Identity)
                     .delete_document(document_id)
-                    .value(Property::Value, (), F_VALUE | F_CLEAR);
-                self.store()
-                    .write(batch)
-                    .await
-                    .caused_by(trc::location!())?;
-                changes.log_delete(Collection::Identity, document_id);
+                    .clear(Property::Value)
+                    .log_item_delete(SyncCollection::Identity, None)
+                    .commit_point();
                 response.destroyed.push(id);
             } else {
                 response.not_destroyed.append(id, SetError::not_found());
@@ -192,8 +170,14 @@ impl IdentitySet for Server {
         }
 
         // Write changes
-        if !changes.is_empty() {
-            response.new_state = Some(self.commit_changes(account_id, changes).await?.into());
+        if !batch.is_empty() {
+            let change_id = self
+                .commit_batch(batch)
+                .await
+                .and_then(|ids| ids.last_change_id(account_id))
+                .caused_by(trc::location!())?;
+
+            response.new_state = State::Exact(change_id).into();
         }
 
         Ok(response)
@@ -203,35 +187,50 @@ impl IdentitySet for Server {
 fn validate_identity_value(
     property: &Property,
     value: MaybePatchValue,
-    current: Option<&Object<Value>>,
-) -> Result<Value, SetError> {
-    Ok(match (property, value) {
+    identity: &mut Identity,
+    is_create: bool,
+) -> Result<(), SetError> {
+    match (property, value) {
         (Property::Name, MaybePatchValue::Value(Value::Text(value))) if value.len() < 255 => {
-            Value::Text(value)
+            identity.name = value;
         }
         (Property::Email, MaybePatchValue::Value(Value::Text(value)))
-            if current.is_none() && value.len() < 255 =>
+            if is_create && value.len() < 255 =>
         {
-            Value::Text(sanitize_email(&value).ok_or_else(|| {
+            identity.email = sanitize_email(&value).ok_or_else(|| {
                 SetError::invalid_properties()
                     .with_property(Property::Email)
                     .with_description("Invalid e-mail address.")
-            })?)
+            })?;
         }
-        (
-            Property::TextSignature | Property::HtmlSignature,
-            MaybePatchValue::Value(Value::Text(value)),
-        ) if value.len() < 2048 => Value::Text(value),
+        (Property::TextSignature, MaybePatchValue::Value(Value::Text(value)))
+            if value.len() < 2048 =>
+        {
+            identity.text_signature = value;
+        }
+        (Property::HtmlSignature, MaybePatchValue::Value(Value::Text(value)))
+            if value.len() < 2048 =>
+        {
+            identity.html_signature = value;
+        }
         (Property::ReplyTo | Property::Bcc, MaybePatchValue::Value(Value::List(value))) => {
-            for addr in &value {
+            let mut addresses = Vec::with_capacity(value.len());
+            for addr in value {
+                let mut address = EmailAddress {
+                    name: None,
+                    email: "".into(),
+                };
                 let mut is_valid = false;
                 if let Value::Object(obj) = addr {
-                    for (key, value) in &obj.properties {
+                    for (key, value) in obj.0 {
                         match (key, value) {
                             (Property::Email, Value::Text(value)) if value.len() < 255 => {
-                                is_valid = true
+                                is_valid = true;
+                                address.email = value;
                             }
-                            (Property::Name, Value::Text(value)) if value.len() < 255 => (),
+                            (Property::Name, Value::Text(value)) if value.len() < 255 => {
+                                address.name = Some(value);
+                            }
                             (Property::Name, Value::Null) => (),
                             _ => {
                                 is_valid = false;
@@ -241,28 +240,42 @@ fn validate_identity_value(
                     }
                 }
 
-                if !is_valid {
+                if is_valid && !address.email.is_empty() {
+                    addresses.push(address);
+                } else {
                     return Err(SetError::invalid_properties()
                         .with_property(property.clone())
                         .with_description("Invalid e-mail address object."));
                 }
             }
 
-            Value::List(value)
+            match property {
+                Property::ReplyTo => {
+                    identity.reply_to = Some(addresses);
+                }
+                Property::Bcc => {
+                    identity.bcc = Some(addresses);
+                }
+                _ => unreachable!(),
+            }
         }
-        (
-            Property::Name
-            | Property::TextSignature
-            | Property::HtmlSignature
-            | Property::ReplyTo
-            | Property::Bcc,
-            MaybePatchValue::Value(Value::Null),
-        ) => Value::Null,
-
+        (Property::Name, MaybePatchValue::Value(Value::Null)) => {
+            identity.name.clear();
+        }
+        (Property::TextSignature, MaybePatchValue::Value(Value::Null)) => {
+            identity.text_signature.clear();
+        }
+        (Property::HtmlSignature, MaybePatchValue::Value(Value::Null)) => {
+            identity.html_signature.clear();
+        }
+        (Property::ReplyTo, MaybePatchValue::Value(Value::Null)) => identity.reply_to = None,
+        (Property::Bcc, MaybePatchValue::Value(Value::Null)) => identity.bcc = None,
         (property, _) => {
             return Err(SetError::invalid_properties()
                 .with_property(property.clone())
                 .with_description("Field could not be set."));
         }
-    })
+    }
+
+    Ok(())
 }

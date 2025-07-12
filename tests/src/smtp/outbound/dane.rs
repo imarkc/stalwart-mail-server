@@ -1,9 +1,36 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::smtp::{
+    DnsCache, TestSMTP,
+    inbound::{TestMessage, TestQueueEvent, TestReportingEvent},
+    session::{TestSession, VerifyResponse},
+};
+use common::{
+    Core,
+    config::{
+        server::ServerProtocol,
+        smtp::resolver::{DnssecResolver, Resolvers, Tlsa, TlsaEntry},
+    },
+    ipc::PolicyType,
+};
+use mail_auth::{
+    MX, MessageAuthenticator,
+    common::parse::TxtRecordParser,
+    hickory_resolver::{
+        TokioResolver,
+        config::{ResolverConfig, ResolverOpts},
+        name_server::TokioConnectionProvider,
+    },
+    mta_sts::{ReportUri, TlsRpt},
+    report::tlsrpt::ResultType,
+};
+use rustls_pki_types::CertificateDer;
+use smtp::outbound::dane::{dnssec::TlsaLookup, verify::TlsaVerify};
+use smtp::queue::{Error, ErrorDetails, Status};
 use std::{
     collections::BTreeSet,
     fs::{self, File},
@@ -14,34 +41,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{
-    config::{
-        server::ServerProtocol,
-        smtp::resolver::{DnssecResolver, Resolvers, Tlsa, TlsaEntry},
-    },
-    ipc::PolicyType,
-    Core,
-};
-use mail_auth::{
-    common::parse::TxtRecordParser,
-    hickory_resolver::{
-        config::{ResolverConfig, ResolverOpts},
-        AsyncResolver,
-    },
-    mta_sts::{ReportUri, TlsRpt},
-    report::tlsrpt::ResultType,
-    MessageAuthenticator, MX,
-};
-use rustls_pki_types::CertificateDer;
-
-use crate::smtp::{
-    inbound::{TestMessage, TestQueueEvent, TestReportingEvent},
-    session::{TestSession, VerifyResponse},
-    DnsCache, TestSMTP,
-};
-use smtp::outbound::dane::{dnssec::TlsaLookup, verify::TlsaVerify};
-use smtp::queue::{Error, ErrorDetails, Status};
-
 const LOCAL: &str = r#"
 [session.rcpt]
 relay = true
@@ -49,7 +48,7 @@ relay = true
 [report.tls.aggregate]
 send = "weekly"
 
-[queue.outbound.tls]
+[queue.tls.default]
 dane = "require"
 starttls = "require"
 
@@ -107,7 +106,7 @@ async fn dane_verify() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -125,7 +124,8 @@ async fn dane_verify() {
         .read_lines(&local.queue_receiver)
         .await
         .assert_contains("<bill@foobar.org> (DANE failed to authenticate")
-        .assert_contains("No TLSA records found");
+        .assert_contains("No TLSA reco=")
+        .assert_contains("rds found");
     local.queue_receiver.read_event().await.assert_done();
     local.queue_receiver.assert_no_events();
 
@@ -177,7 +177,8 @@ async fn dane_verify() {
         .read_lines(&local.queue_receiver)
         .await
         .assert_contains("<bill@foobar.org> (DANE failed to authenticate")
-        .assert_contains("No matching certificates found");
+        .assert_contains("No matching ")
+        .assert_contains("certificates found");
     local.queue_receiver.read_event().await.assert_done();
     local.queue_receiver.assert_no_events();
 
@@ -244,7 +245,9 @@ async fn dane_test() {
     core.smtp.resolvers = Resolvers {
         dns: MessageAuthenticator::new_cloudflare().unwrap(),
         dnssec: DnssecResolver {
-            resolver: AsyncResolver::tokio(conf, opts),
+            resolver: TokioResolver::builder_with_config(conf, TokioConnectionProvider::default())
+                .with_options(opts)
+                .build(),
         },
     };
     let r = TestSMTP::from_core(core).build_smtp();
@@ -340,10 +343,10 @@ async fn dane_test() {
         certs.remove(0);
         assert_eq!(
             tlsa.verify(0, &host, Some(&certs)),
-            Err(Status::PermanentFailure(Error::DaneError(ErrorDetails {
-                entity: host.to_string(),
-                details: "No matching certificates found in TLSA records".to_string()
-            })))
+            Err(Status::PermanentFailure(ErrorDetails {
+                entity: host,
+                details: Error::DaneError("No matching certificates found in TLSA records".into())
+            }))
         );
     }
 }

@@ -1,36 +1,33 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::server::tls::{build_self_signed_cert, parse_certificates};
+use crate::{
+    CacheSwap, Caches, Data, DavResource, DavResources, MailboxCache, MessageStoreCache,
+    MessageUidCache, TlsConnectors,
+    auth::{AccessToken, roles::RolePermissions},
+    config::smtp::resolver::{Policy, Tlsa},
+    listener::blocked::BlockedIps,
+    manager::webadmin::WebAdminManager,
+};
+use ahash::{AHashMap, AHashSet};
+use arc_swap::ArcSwap;
+use mail_auth::{MX, Parameters, Txt};
+use mail_send::smtp::tls::build_tls_connector;
+use nlp::bayes::{TokenHash, Weights};
+use parking_lot::RwLock;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
 };
-
-use ahash::{AHashMap, AHashSet};
-use arc_swap::ArcSwap;
-use mail_auth::{Parameters, Txt, MX};
-use mail_send::smtp::tls::build_tls_connector;
-use nlp::bayes::{TokenHash, Weights};
-use parking_lot::RwLock;
 use utils::{
     cache::{Cache, CacheWithTtl},
     config::Config,
     snowflake::SnowflakeIdGenerator,
 };
-
-use crate::{
-    auth::{roles::RolePermissions, AccessToken},
-    config::smtp::resolver::{Policy, Tlsa},
-    listener::blocked::BlockedIps,
-    manager::webadmin::WebAdminManager,
-    Account, AccountId, Caches, Data, Mailbox, MailboxId, MailboxState, NextMailboxState, Threads,
-    TlsConnectors,
-};
-
-use super::server::tls::{build_self_signed_cert, parse_certificates};
 
 impl Data {
     pub fn parse(config: &mut Config) -> Self {
@@ -42,11 +39,14 @@ impl Data {
             subject_names.insert("localhost".to_string());
         }
 
-        // Parse id generator
-        let id_generator = config
+        // Build and test snowflake id generator
+        let node_id = config
             .property::<u64>("cluster.node-id")
-            .map(SnowflakeIdGenerator::with_node_id)
-            .unwrap_or_default();
+            .unwrap_or_else(store::rand::random);
+        let id_generator = SnowflakeIdGenerator::with_node_id(node_id);
+        if !id_generator.is_valid() {
+            panic!("Invalid system time, panicking to avoid data corruption");
+        }
 
         Data {
             tls_certificates: ArcSwap::from_pointee(certificates),
@@ -60,7 +60,6 @@ impl Data {
             .ok()
             .map(Arc::new),
             blocked_ips: RwLock::new(BlockedIps::parse(config).blocked_ip_addresses),
-            blocked_ips_version: 0.into(),
             jmap_id_gen: id_generator.clone(),
             queue_id_gen: id_generator.clone(),
             span_id_gen: id_generator,
@@ -69,7 +68,6 @@ impl Data {
                 .value("webadmin.path")
                 .map(|path| WebAdminManager::new(path.into()))
                 .unwrap_or_default(),
-            config_version: 0.into(),
             logos: Default::default(),
             smtp_connectors: TlsConnectors::default(),
             asn_geo_data: Default::default(),
@@ -79,6 +77,7 @@ impl Data {
 
 impl Caches {
     pub fn parse(config: &mut Config) -> Self {
+        const MB_50: u64 = 50 * 1024 * 1024;
         const MB_10: u64 = 10 * 1024 * 1024;
         const MB_5: u64 = 5 * 1024 * 1024;
         const MB_1: u64 = 1024 * 1024;
@@ -102,28 +101,42 @@ impl Caches {
                 MB_5,
                 std::mem::size_of::<RolePermissions>() as u64,
             ),
-            account: Cache::from_config(
+            messages: Cache::from_config(
                 config,
-                "account",
-                MB_10,
-                (std::mem::size_of::<AccountId>()
-                    + std::mem::size_of::<Account>()
-                    + (15 * (std::mem::size_of::<Mailbox>() + 60))) as u64,
+                "message",
+                MB_50,
+                (std::mem::size_of::<u32>()
+                    + std::mem::size_of::<CacheSwap<MessageStoreCache>>()
+                    + (1024 * std::mem::size_of::<MessageUidCache>())
+                    + (15 * (std::mem::size_of::<MailboxCache>() + 60))) as u64,
             ),
-            mailbox: Cache::from_config(
+            files: Cache::from_config(
                 config,
-                "mailbox",
+                "files",
                 MB_10,
-                (std::mem::size_of::<MailboxId>()
-                    + std::mem::size_of::<MailboxState>()
-                    + std::mem::size_of::<NextMailboxState>()
-                    + (1024 * std::mem::size_of::<u64>())) as u64,
+                (std::mem::size_of::<DavResources>() + (500 * std::mem::size_of::<DavResource>()))
+                    as u64,
             ),
-            threads: Cache::from_config(
+            events: Cache::from_config(
                 config,
-                "thread",
+                "events",
                 MB_10,
-                (std::mem::size_of::<Threads>() + (500 * std::mem::size_of::<u64>())) as u64,
+                (std::mem::size_of::<DavResources>() + (500 * std::mem::size_of::<DavResource>()))
+                    as u64,
+            ),
+            contacts: Cache::from_config(
+                config,
+                "contacts",
+                MB_10,
+                (std::mem::size_of::<DavResources>() + (500 * std::mem::size_of::<DavResource>()))
+                    as u64,
+            ),
+            scheduling: Cache::from_config(
+                config,
+                "scheduling",
+                MB_1,
+                (std::mem::size_of::<DavResources>() + (500 * std::mem::size_of::<DavResource>()))
+                    as u64,
             ),
             bayes: CacheWithTtl::from_config(
                 config,
@@ -213,13 +226,11 @@ impl Default for Data {
             tls_certificates: Default::default(),
             tls_self_signed_cert: Default::default(),
             blocked_ips: Default::default(),
-            blocked_ips_version: 0.into(),
             jmap_id_gen: Default::default(),
             queue_id_gen: Default::default(),
             span_id_gen: Default::default(),
             queue_status: true.into(),
             webadmin: Default::default(),
-            config_version: Default::default(),
             logos: Default::default(),
             smtp_connectors: Default::default(),
             asn_geo_data: Default::default(),

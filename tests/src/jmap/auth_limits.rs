@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -55,7 +55,7 @@ pub async fn test(params: &mut JMAPTest) {
     assert!(matches!(
         Client::new()
             .credentials(Credentials::basic("jdoe@example.com", "abcde"))
-            .accept_invalid_certs(true)
+            .accept_invalid_certs(true) .follow_redirects(["127.0.0.1"])
             .connect("https://127.0.0.1:8899")
             .await,
         Err(jmap_client::Error::Problem(err)) if err.status() == Some(401)));
@@ -85,6 +85,7 @@ pub async fn test(params: &mut JMAPTest) {
                 &format!("brute_force{}", n),
             ))
             .accept_invalid_certs(true)
+            .follow_redirects(["127.0.0.1"])
             .connect("https://127.0.0.1:8899")
             .await
         {
@@ -145,6 +146,7 @@ pub async fn test(params: &mut JMAPTest) {
         Client::new()
             .credentials(Credentials::basic("jdoe@example.com", "12345"))
             .accept_invalid_certs(true)
+            .follow_redirects(["127.0.0.1"])
             .connect("https://127.0.0.1:8899")
             .await
             .unwrap();
@@ -154,6 +156,7 @@ pub async fn test(params: &mut JMAPTest) {
     let client = Client::new()
         .credentials(Credentials::basic("jdoe@example.com", "12345"))
         .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
         .connect("https://127.0.0.1:8899")
         .await
         .unwrap();
@@ -173,10 +176,12 @@ pub async fn test(params: &mut JMAPTest) {
             .size(),
         5000000
     );
-    assert!(client
-        .upload(None, vec![b'A'; 5000001], None)
-        .await
-        .is_err());
+    assert!(
+        client
+            .upload(None, vec![b'A'; 5000001], None)
+            .await
+            .is_err()
+    );
 
     // Users should be allowed to create identities only
     // using email addresses associated to their principal

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,15 +7,15 @@
 use std::{borrow::Cow, future::Future};
 
 use common::{
-    config::spamfilter::{Element, IpResolver, Location},
     Server,
+    config::spamfilter::{Element, IpResolver, Location},
 };
 use mail_auth::IprevResult;
 use mail_parser::{HeaderName, HeaderValue, Host};
 use nlp::tokenizers::types::TokenType;
 use store::ahash::AHashSet;
 
-use crate::{modules::dnsbl::check_dnsbl, IpParts, SpamFilterContext, TextPart};
+use crate::{IpParts, SpamFilterContext, TextPart, modules::dnsbl::check_dnsbl};
 
 use super::ElementLocation;
 
@@ -58,6 +58,7 @@ impl SpamFilterAnalyzeIp for Server {
 
         // Obtain IP addresses from the message body
         for (part_id, part) in ctx.output.text_parts.iter().enumerate() {
+            let part_id = part_id as u32;
             let is_body = ctx.input.message.text_body.contains(&part_id)
                 || ctx.input.message.html_body.contains(&part_id);
             match part {

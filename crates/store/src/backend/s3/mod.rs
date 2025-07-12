@@ -1,19 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{fmt::Display, io::Write, ops::Range, time::Duration};
 
-use s3::{creds::Credentials, Bucket, Region};
+use s3::{Bucket, Region, creds::Credentials};
 use utils::{
     codec::base32_custom::Base32Writer,
-    config::{utils::AsKey, Config},
+    config::{Config, utils::AsKey},
 };
 
 pub struct S3Store {
-    bucket: Bucket,
+    bucket: Box<Bucket>,
     prefix: Option<String>,
     max_retries: u32,
 }
@@ -109,7 +109,7 @@ impl S3Store {
                 code => {
                     return Err(trc::StoreEvent::S3Error
                         .reason(String::from_utf8_lossy(response.as_slice()))
-                        .ctx(trc::Key::Code, code))
+                        .ctx(trc::Key::Code, code));
                 }
             }
         }
@@ -139,7 +139,7 @@ impl S3Store {
                 code => {
                     return Err(trc::StoreEvent::S3Error
                         .reason(String::from_utf8_lossy(response.as_slice()))
-                        .ctx(trc::Key::Code, code))
+                        .ctx(trc::Key::Code, code));
                 }
             }
         }
@@ -170,7 +170,7 @@ impl S3Store {
                 code => {
                     return Err(trc::StoreEvent::S3Error
                         .reason(String::from_utf8_lossy(response.as_slice()))
-                        .ctx(trc::Key::Code, code))
+                        .ctx(trc::Key::Code, code));
                 }
             }
         }
@@ -179,7 +179,7 @@ impl S3Store {
     fn build_key(&self, key: &[u8]) -> String {
         if let Some(prefix) = &self.prefix {
             let mut writer =
-                Base32Writer::with_raw_capacity(prefix.len() + ((key.len() + 3) / 4 * 5));
+                Base32Writer::with_raw_capacity(prefix.len() + (key.len().div_ceil(4) * 5));
             writer.push_string(prefix);
             writer.write_all(key).unwrap();
             writer.finalize()

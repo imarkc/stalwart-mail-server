@@ -1,8 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+
+#![warn(clippy::large_futures)]
 
 use core::cache::CachedDirectory;
 use std::{fmt::Debug, sync::Arc};
@@ -10,12 +12,12 @@ use std::{fmt::Debug, sync::Arc};
 use ahash::AHashMap;
 use backend::{
     imap::{ImapDirectory, ImapError},
-    internal::{PrincipalField, PrincipalValue},
     ldap::LdapDirectory,
     memory::MemoryDirectory,
     smtp::SmtpDirectory,
     sql::SqlDirectory,
 };
+
 use deadpool::managed::PoolError;
 use ldap3::LdapError;
 use mail_send::Credentials;
@@ -31,15 +33,63 @@ pub struct Directory {
     pub cache: Option<CachedDirectory>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
-    pub(crate) id: u32,
-    pub(crate) typ: Type,
-
-    pub(crate) fields: AHashMap<PrincipalField, PrincipalValue>,
+    pub id: u32,
+    pub typ: Type,
+    pub name: String,
+    pub description: Option<String>,
+    pub secrets: Vec<String>,
+    pub emails: Vec<String>,
+    pub quota: Option<u64>,
+    pub tenant: Option<u32>,
+    pub data: Vec<PrincipalData>,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
+pub enum PrincipalData {
+    MemberOf(Vec<u32>),
+    Roles(Vec<u32>),
+    Lists(Vec<u32>),
+    Permissions(Vec<PermissionGrant>),
+    Picture(String),
+    ExternalMembers(Vec<String>),
+    Urls(Vec<String>),
+    PrincipalQuota(Vec<PrincipalQuota>),
+    Locale(String),
+}
+
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalQuota {
+    pub quota: u64,
+    pub typ: Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberOf {
+    pub principal_id: u32,
+    pub typ: Type,
+}
+
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct PermissionGrant {
+    pub permission: Permission,
+    pub grant: bool,
+}
+
+#[derive(
+    rkyv::Archive,
+    rkyv::Deserialize,
+    rkyv::Serialize,
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum Type {
     #[default]
@@ -56,10 +106,19 @@ pub enum Type {
     OauthClient = 11,
 }
 
-pub const MAX_TYPE_ID: usize = 11;
-
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, EnumMethods,
+    rkyv::Archive,
+    rkyv::Deserialize,
+    rkyv::Serialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    EnumMethods,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum Permission {
@@ -266,6 +325,58 @@ pub enum Permission {
     AiModelInteract,
     Troubleshoot,
     SpamFilterClassify,
+
+    // WebDAV permissions
+    DavSyncCollection,
+    DavExpandProperty,
+
+    DavPrincipalAcl,
+    DavPrincipalList,
+    DavPrincipalMatch,
+    DavPrincipalSearch,
+    DavPrincipalSearchPropSet,
+
+    DavFilePropFind,
+    DavFilePropPatch,
+    DavFileGet,
+    DavFileMkCol,
+    DavFileDelete,
+    DavFilePut,
+    DavFileCopy,
+    DavFileMove,
+    DavFileLock,
+    DavFileAcl,
+
+    DavCardPropFind,
+    DavCardPropPatch,
+    DavCardGet,
+    DavCardMkCol,
+    DavCardDelete,
+    DavCardPut,
+    DavCardCopy,
+    DavCardMove,
+    DavCardLock,
+    DavCardAcl,
+    DavCardQuery,
+    DavCardMultiGet,
+
+    DavCalPropFind,
+    DavCalPropPatch,
+    DavCalGet,
+    DavCalMkCol,
+    DavCalDelete,
+    DavCalPut,
+    DavCalCopy,
+    DavCalMove,
+    DavCalLock,
+    DavCalAcl,
+    DavCalQuery,
+    DavCalMultiGet,
+    DavCalFreeBusyQuery,
+
+    CalendarAlarms,
+    CalendarSchedulingSend,
+    CalendarSchedulingReceive,
     // WARNING: add new ids at the end (TODO: use static ids)
 }
 
@@ -372,6 +483,24 @@ impl IntoError for LdapError {
                 .reason(self)
         } else {
             trc::StoreEvent::LdapError.reason(self)
+        }
+    }
+}
+
+impl From<&ArchivedType> for Type {
+    fn from(archived: &ArchivedType) -> Self {
+        match archived {
+            ArchivedType::Individual => Type::Individual,
+            ArchivedType::Group => Type::Group,
+            ArchivedType::Resource => Type::Resource,
+            ArchivedType::Location => Type::Location,
+            ArchivedType::List => Type::List,
+            ArchivedType::Other => Type::Other,
+            ArchivedType::Domain => Type::Domain,
+            ArchivedType::Tenant => Type::Tenant,
+            ArchivedType::Role => Type::Role,
+            ArchivedType::ApiKey => Type::ApiKey,
+            ArchivedType::OauthClient => Type::OauthClient,
         }
     }
 }

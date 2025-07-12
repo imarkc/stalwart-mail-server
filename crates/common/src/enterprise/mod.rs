@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: LicenseRef-SEL
  *
@@ -17,18 +17,19 @@ pub mod undelete;
 use std::{sync::Arc, time::Duration};
 
 use ahash::{AHashMap, AHashSet};
-use directory::{
-    backend::internal::{lookup::DirectoryStore, PrincipalField},
-    QueryBy, Type,
-};
+
+use directory::{QueryBy, Type, backend::internal::lookup::DirectoryStore};
 use license::LicenseKey;
 use llm::AiApiConfig;
 use mail_parser::DateTime;
 use store::Store;
 use trc::{AddContext, EventType, MetricType};
-use utils::{config::cron::SimpleCron, HttpLimitResponse};
+use utils::{HttpLimitResponse, config::cron::SimpleCron, template::Template};
 
-use crate::{expr::Expression, manager::webadmin::Resource, Core, Server};
+use crate::{
+    Core, Server, config::groupware::CalendarTemplateVariable, expr::Expression,
+    manager::webadmin::Resource,
+};
 
 #[derive(Clone)]
 pub struct Enterprise {
@@ -40,6 +41,9 @@ pub struct Enterprise {
     pub metrics_alerts: Vec<MetricAlert>,
     pub ai_apis: AHashMap<String, Arc<AiApiConfig>>,
     pub spam_filter_llm: Option<SpamFilterLlmConfig>,
+    pub template_calendar_alarm: Option<Template<CalendarTemplateVariable>>,
+    pub template_scheduling_email: Option<Template<CalendarTemplateVariable>>,
+    pub template_scheduling_web: Option<Template<CalendarTemplateVariable>>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +121,7 @@ impl Server {
     // Any attempt to modify, bypass, or disable this license validation mechanism
     // constitutes a severe violation of the Stalwart Enterprise License Agreement.
     // Such actions may result in immediate termination of your license, legal action,
-    // and substantial financial penalties. Stalwart Labs Ltd. actively monitors for
+    // and substantial financial penalties. Stalwart Labs LLC actively monitors for
     // unauthorized modifications and will pursue all available legal remedies against
     // violators to the fullest extent of the law, including but not limited to claims
     // for copyright infringement, breach of contract, and fraud.
@@ -166,21 +170,18 @@ impl Server {
                     .caused_by(trc::location!())?
                     .filter(|p| p.typ() == Type::Domain)
                 {
-                    if let Some(logo) = principal
-                        .take_str(PrincipalField::Picture)
-                        .filter(|l| l.starts_with("http"))
-                    {
-                        logo.into()
-                    } else if let Some(tenant_id) = principal.get_int(PrincipalField::Tenant) {
+                    if let Some(logo) = principal.picture_mut().filter(|l| l.starts_with("http")) {
+                        std::mem::take(logo).into()
+                    } else if let Some(tenant_id) = principal.tenant {
                         if let Some(logo) = self
                             .store()
-                            .query(QueryBy::Id(tenant_id as u32), false)
+                            .query(QueryBy::Id(tenant_id), false)
                             .await
                             .caused_by(trc::location!())?
-                            .and_then(|mut p| p.take_str(PrincipalField::Picture))
+                            .and_then(|mut p| p.picture_mut().map(std::mem::take))
                             .filter(|l| l.starts_with("http"))
                         {
-                            logo.into()
+                            logo.clone().into()
                         } else {
                             self.default_logo_url()
                         }
@@ -193,7 +194,7 @@ impl Server {
 
                 let mut logo = None;
                 if let Some(logo_url) = logo_url {
-                    let response = reqwest::get(&logo_url).await.map_err(|err| {
+                    let response = reqwest::get(logo_url.as_str()).await.map_err(|err| {
                         trc::ResourceEvent::DownloadExternal
                             .into_err()
                             .details("Failed to download logo")
@@ -242,6 +243,6 @@ impl Server {
         self.core
             .enterprise
             .as_ref()
-            .and_then(|e| e.logo_url.as_ref().map(|l| l.to_string()))
+            .and_then(|e| e.logo_url.as_ref().map(|l| l.into()))
     }
 }

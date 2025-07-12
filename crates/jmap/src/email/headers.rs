@@ -1,19 +1,17 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::borrow::Cow;
 
-use jmap_proto::{
-    object::Object,
-    types::{
-        property::{HeaderForm, HeaderProperty, Property},
-        value::Value,
-    },
+use jmap_proto::types::{
+    property::{HeaderForm, HeaderProperty, Property},
+    value::{Object, Value},
 };
 use mail_builder::{
+    MessageBuilder,
     headers::{
         address::{Address, EmailAddress, GroupedAddresses},
         date::Date,
@@ -22,9 +20,12 @@ use mail_builder::{
         text::Text,
         url::URL,
     },
-    MessageBuilder,
 };
-use mail_parser::{parsers::MessageStream, Addr, Header, HeaderName, HeaderValue};
+use mail_parser::{
+    Addr, ArchivedHeader, ArchivedHeaderValue, Header, HeaderName, HeaderValue,
+    parsers::MessageStream,
+};
+use store::rkyv::vec::ArchivedVec;
 
 pub trait IntoForm {
     fn into_form(self, form: &HeaderForm) -> Value;
@@ -75,7 +76,7 @@ impl HeaderToValue for Vec<Header<'_>> {
             if header.name.as_str().eq_ignore_ascii_case(header_name) {
                 let header_value = if is_raw || matches!(header.value, HeaderValue::Empty) {
                     raw_message
-                        .get(header.offset_start..header.offset_end)
+                        .get(header.offset_start as usize..header.offset_end as usize)
                         .map_or(HeaderValue::Empty, |bytes| match form {
                             HeaderForm::Raw => {
                                 HeaderValue::Text(String::from_utf8_lossy(bytes.trim_end()))
@@ -117,7 +118,7 @@ impl HeaderToValue for Vec<Header<'_>> {
                         Property::Value,
                         String::from_utf8_lossy(
                             raw_message
-                                .get(header.offset_start..header.offset_end)
+                                .get(header.offset_start as usize..header.offset_end as usize)
                                 .unwrap_or_default()
                                 .trim_end(),
                         )
@@ -169,10 +170,12 @@ impl IntoForm for HeaderValue<'_> {
             (
                 HeaderValue::Address(mail_parser::Address::List(addrlist)),
                 HeaderForm::GroupedAddresses,
-            ) => Value::List(vec![Object::with_capacity(2)
-                .with_property(Property::Name, Value::Null)
-                .with_property(Property::Addresses, addrlist)
-                .into()]),
+            ) => Value::List(vec![
+                Object::with_capacity(2)
+                    .with_property(Property::Name, Value::Null)
+                    .with_property(Property::Addresses, addrlist)
+                    .into(),
+            ]),
             (
                 HeaderValue::Address(mail_parser::Address::Group(grouplist)),
                 HeaderForm::GroupedAddresses,
@@ -188,12 +191,12 @@ impl<'x> ValueToHeader<'x> for Value {
         let mut obj = self.try_unwrap_object()?;
         Some(GroupedAddresses {
             name: obj
-                .properties
+                .0
                 .remove(&Property::Name)
                 .and_then(|n| n.try_unwrap_string())
                 .map(|n| n.into()),
             addresses: obj
-                .properties
+                .0
                 .remove(&Property::Addresses)?
                 .try_into_address_list()?,
         })
@@ -212,15 +215,11 @@ impl<'x> ValueToHeader<'x> for Value {
         let mut obj = self.try_unwrap_object()?;
         Some(EmailAddress {
             name: obj
-                .properties
+                .0
                 .remove(&Property::Name)
                 .and_then(|n| n.try_unwrap_string())
                 .map(|n| n.into()),
-            email: obj
-                .properties
-                .remove(&Property::Email)?
-                .try_unwrap_string()?
-                .into(),
+            email: obj.0.remove(&Property::Email)?.try_unwrap_string()?.into(),
         })
     }
 }
@@ -339,6 +338,96 @@ impl BuildHeader for MessageBuilder<'_> {
                 return Err(header);
             }
         })
+    }
+}
+
+impl HeaderToValue for ArchivedVec<ArchivedHeader<'_>> {
+    fn header_to_value(&self, property: &Property, raw_message: &[u8]) -> Value {
+        let (header_name, form, all) = match property {
+            Property::Header(header) => (
+                HeaderName::parse(header.header.as_str())
+                    .unwrap_or_else(|| HeaderName::Other(header.header.as_str().into())),
+                header.form,
+                header.all,
+            ),
+            Property::Sender => (HeaderName::Sender, HeaderForm::Addresses, false),
+            Property::From => (HeaderName::From, HeaderForm::Addresses, false),
+            Property::To => (HeaderName::To, HeaderForm::Addresses, false),
+            Property::Cc => (HeaderName::Cc, HeaderForm::Addresses, false),
+            Property::Bcc => (HeaderName::Bcc, HeaderForm::Addresses, false),
+            Property::ReplyTo => (HeaderName::ReplyTo, HeaderForm::Addresses, false),
+            Property::Subject => (HeaderName::Subject, HeaderForm::Text, false),
+            Property::MessageId => (HeaderName::MessageId, HeaderForm::MessageIds, false),
+            Property::InReplyTo => (HeaderName::InReplyTo, HeaderForm::MessageIds, false),
+            Property::References => (HeaderName::References, HeaderForm::MessageIds, false),
+            Property::SentAt => (HeaderName::Date, HeaderForm::Date, false),
+            _ => return Value::Null,
+        };
+
+        let is_raw = matches!(form, HeaderForm::Raw) || matches!(header_name, HeaderName::Other(_));
+        let mut headers = Vec::new();
+        let header_name = header_name.as_str();
+        for header in self.iter().rev() {
+            if header.name.as_str().eq_ignore_ascii_case(header_name) {
+                let header_value = if is_raw || matches!(header.value, ArchivedHeaderValue::Empty) {
+                    raw_message
+                        .get(
+                            u32::from(header.offset_start) as usize
+                                ..u32::from(header.offset_end) as usize,
+                        )
+                        .map_or(HeaderValue::Empty, |bytes| match form {
+                            HeaderForm::Raw => {
+                                HeaderValue::Text(String::from_utf8_lossy(bytes.trim_end()))
+                            }
+                            HeaderForm::Text => MessageStream::new(bytes).parse_unstructured(),
+                            HeaderForm::Addresses
+                            | HeaderForm::GroupedAddresses
+                            | HeaderForm::URLs => MessageStream::new(bytes).parse_address(),
+                            HeaderForm::MessageIds => MessageStream::new(bytes).parse_id(),
+                            HeaderForm::Date => MessageStream::new(bytes).parse_date(),
+                        })
+                } else {
+                    HeaderValue::from(&header.value)
+                };
+                headers.push(header_value.into_form(&form));
+                if !all {
+                    break;
+                }
+            }
+        }
+
+        if !all {
+            headers.pop().unwrap_or_default()
+        } else {
+            if headers.len() > 1 {
+                headers.reverse();
+            }
+            Value::List(headers)
+        }
+    }
+
+    fn headers_to_value(&self, raw_message: &[u8]) -> Value {
+        let mut headers = Vec::with_capacity(self.len());
+        for header in self.iter() {
+            headers.push(Value::Object(
+                Object::with_capacity(2)
+                    .with_property(Property::Name, header.name.to_string())
+                    .with_property(
+                        Property::Value,
+                        String::from_utf8_lossy(
+                            raw_message
+                                .get(
+                                    u32::from(header.offset_start) as usize
+                                        ..u32::from(header.offset_end) as usize,
+                                )
+                                .unwrap_or_default()
+                                .trim_end(),
+                        )
+                        .into_owned(),
+                    ),
+            ));
+        }
+        headers.into()
     }
 }
 

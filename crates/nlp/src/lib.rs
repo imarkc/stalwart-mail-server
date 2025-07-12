@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
+ */
+
 pub mod bayes;
 pub mod language;
 pub mod tokenizers;
@@ -8,8 +14,8 @@ mod test {
 
     use crate::{
         bayes::{
-            tokenize::{tests::ToBayesToken, BayesTokenizer},
             BayesClassifier, BayesModel,
+            tokenize::{BayesTokenizer, tests::ToBayesToken},
         },
         tokenizers::{
             osb::{OsbToken, OsbTokenizer},
@@ -20,8 +26,8 @@ mod test {
     #[test]
     #[ignore]
     fn train() {
-        let db = fs::read_to_string("/Users/me/code/mail-server/_ignore/old/spam_or_not_spam.csv")
-            .unwrap();
+        let db =
+            fs::read_to_string("/Users/me/code/stalwart/_ignore/old/spam_or_not_spam.csv").unwrap();
         let mut bayes = BayesModel::default();
 
         for line in db.lines() {
@@ -41,7 +47,7 @@ mod test {
         }
         println!("Ham: {} Spam: {}", bayes.ham_learns, bayes.spam_learns,);
         fs::write(
-            "/Users/me/code/mail-server/_ignore/old/spam_or_not_spam.bin",
+            "/Users/me/code/stalwart/_ignore/old/spam_or_not_spam.bin",
             bincode::serialize(&bayes).unwrap(),
         )
         .unwrap();
@@ -51,7 +57,7 @@ mod test {
     #[ignore]
     fn classify() {
         let model: BayesModel = bincode::deserialize(
-            &fs::read("/Users/me/code/mail-server/_ignore/old/spam_or_not_spam.bin").unwrap(),
+            &fs::read("/Users/me/code/stalwart/_ignore/old/spam_or_not_spam.bin").unwrap(),
         )
         .unwrap();
         let bayes = BayesClassifier::new();

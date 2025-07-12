@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -13,10 +13,10 @@ use serde_json::json;
 use crate::{
     backend::elastic::INDEX_NAMES,
     dispatch::DocumentSet,
-    fts::{index::FtsDocument, Field},
+    fts::{Field, index::FtsDocument},
 };
 
-use super::{assert_success, ElasticSearchStore};
+use super::{ElasticSearchStore, assert_success};
 
 #[derive(Serialize, Deserialize, Default)]
 struct Document<'x> {

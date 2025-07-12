@@ -1,19 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use ::email::message::metadata::MessageData;
+use common::storage::index::ObjectIndexBuilder;
 use jmap_client::{
     core::query::{Comparator, Filter},
     email,
     mailbox::Role,
 };
-use jmap_proto::types::{collection::Collection, id::Id, property::Property, state::State};
+use jmap_proto::types::{
+    collection::{Collection, SyncCollection},
+    id::Id,
+    state::State,
+};
 
 use store::{
     ahash::{AHashMap, AHashSet},
-    write::{log::ChangeLogBuilder, BatchBuilder, MaybeDynamicId, TagValue, F_BITMAP, F_CLEAR},
+    write::BatchBuilder,
 };
 
 use crate::jmap::{
@@ -118,9 +124,11 @@ pub async fn test(params: &mut JMAPTest) {
             }
             LogAction::Update(id) => {
                 let id = *id_map.get(id).unwrap();
-                let mut changelog = ChangeLogBuilder::new();
-                changelog.log_update(Collection::Email, id);
-                server.commit_changes(1, changelog).await.unwrap();
+                let mut batch = BatchBuilder::new();
+                batch
+                    .update_document(id.document_id())
+                    .log_item_update(SyncCollection::Email, id.prefix_id().into());
+                server.store().write(batch.build_all()).await.unwrap();
                 updated_ids.insert(id);
             }
             LogAction::Delete(id) => {
@@ -131,6 +139,18 @@ pub async fn test(params: &mut JMAPTest) {
             LogAction::Move(from, to) => {
                 let id = *id_map.get(from).unwrap();
                 let new_id = Id::from_parts(thread_id, id.document_id());
+
+                //let new_thread_id = store::rand::random::<u32>();
+
+                let old_message_ = server
+                    .get_archive(1, Collection::Email, id.document_id())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let old_message = old_message_.to_unarchived::<MessageData>().unwrap();
+                let mut new_message = old_message.deserialize::<MessageData>().unwrap();
+                new_message.thread_id = thread_id;
+
                 server
                     .core
                     .storage
@@ -138,23 +158,15 @@ pub async fn test(params: &mut JMAPTest) {
                     .write(
                         BatchBuilder::new()
                             .with_account_id(1)
-                            .with_collection(Collection::Thread)
-                            .create_document()
                             .with_collection(Collection::Email)
                             .update_document(id.document_id())
-                            .value(Property::ThreadId, id.prefix_id(), F_BITMAP | F_CLEAR)
-                            .set(Property::ThreadId, MaybeDynamicId::Dynamic(0))
-                            .tag(
-                                Property::ThreadId,
-                                TagValue::Id(MaybeDynamicId::Dynamic(0)),
-                                0,
+                            .custom(
+                                ObjectIndexBuilder::new()
+                                    .with_current(old_message)
+                                    .with_changes(new_message),
                             )
-                            .custom(server.begin_changes(1).unwrap().with_log_move(
-                                Collection::Email,
-                                id,
-                                new_id,
-                            ))
-                            .build_batch(),
+                            .unwrap()
+                            .build_all(),
                     )
                     .await
                     .unwrap();
@@ -231,9 +243,9 @@ pub async fn test(params: &mut JMAPTest) {
                         let id = Id::from_bytes(id.as_bytes()).unwrap();
                         assert!(
                             removed_ids.contains(&id),
-                            "{:?} (id: {})",
+                            "{:?} (id: {:?})",
                             changes,
-                            id_map.iter().find(|(_, v)| **v == id).unwrap().0
+                            id_map.iter().find(|(_, v)| **v == id).map(|(k, _)| k)
                         );
                     }
                 }
@@ -243,9 +255,9 @@ pub async fn test(params: &mut JMAPTest) {
                         let id = Id::from_bytes(item.id().as_bytes()).unwrap();
                         assert!(
                             type1_ids.contains(&id),
-                            "{:?} (id: {})",
+                            "{:?} (id: {:?})",
                             changes,
-                            id_map.iter().find(|(_, v)| **v == id).unwrap().0
+                            id_map.iter().find(|(_, v)| **v == id).map(|(k, _)| k)
                         );
                     }
                 }
@@ -267,26 +279,6 @@ pub async fn test(params: &mut JMAPTest) {
     }
 
     destroy_all_mailboxes(params).await;
-
-    // Delete virtual threads
-    let mut batch = BatchBuilder::new();
-    batch.with_account_id(1).with_collection(Collection::Thread);
-    for thread_id in server
-        .get_document_ids(1, Collection::Thread)
-        .await
-        .unwrap()
-        .unwrap_or_default()
-    {
-        batch.delete_document(thread_id);
-    }
-    server
-        .core
-        .storage
-        .data
-        .write(batch.build_batch())
-        .await
-        .unwrap();
-
     assert_is_empty(server).await;
 }
 

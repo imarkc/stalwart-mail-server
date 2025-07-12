@@ -1,19 +1,15 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::future::Future;
-
-use common::{
-    config::smtp::QueueRateLimiter, expr::functions::ResolveVariable, Server, KV_RATE_LIMIT_SMTP,
-};
-use store::write::now;
-
 use crate::core::throttle::NewKey;
-
-use super::{Domain, Status};
+use common::{
+    KV_RATE_LIMIT_SMTP, Server, config::smtp::QueueRateLimiter, expr::functions::ResolveVariable,
+};
+use std::future::Future;
+use store::write::now;
 
 pub trait IsAllowed: Sync + Send {
     fn is_allowed<'x>(
@@ -67,12 +63,5 @@ impl IsAllowed for Server {
         }
 
         Ok(())
-    }
-}
-
-impl Domain {
-    pub fn set_rate_limiter_error(&mut self, retry_at: u64) {
-        self.retry.due = retry_at;
-        self.status = Status::TemporaryFailure(super::Error::RateLimited);
     }
 }

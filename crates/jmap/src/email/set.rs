@@ -1,23 +1,31 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{borrow::Cow, collections::HashMap, slice::IterMut};
+use std::{borrow::Cow, collections::HashMap};
 
-use common::{auth::AccessToken, Server};
+use super::headers::{BuildHeader, ValueToHeader};
+use crate::{JmapMethods, blob::download::BlobDownload, changes::state::MessageCacheState};
+use common::{Server, auth::AccessToken, storage::index::ObjectIndexBuilder};
 use email::{
-    ingest::{EmailIngest, IngestEmail, IngestSource},
-    mailbox::{MailboxFnc, UidMailbox},
+    cache::{MessageCacheFetch, email::MessageCacheAccess, mailbox::MailboxCacheAccess},
+    mailbox::UidMailbox,
+    message::{
+        delete::EmailDeletion,
+        ingest::{EmailIngest, IngestEmail, IngestSource},
+        metadata::MessageData,
+    },
 };
+use http_proto::HttpSessionData;
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     method::set::{RequestArguments, SetRequest, SetResponse},
     response::references::EvalObjectReferences,
     types::{
         acl::Acl,
-        collection::Collection,
+        collection::{Collection, SyncCollection, VanishedCollection},
         keyword::Keyword,
         property::Property,
         state::{State, StateChange},
@@ -26,35 +34,17 @@ use jmap_proto::{
     },
 };
 use mail_builder::{
+    MessageBuilder,
     headers::{
-        address::Address, content_type::ContentType, date::Date, message_id::MessageId, raw::Raw,
-        text::Text, HeaderType,
+        HeaderType, address::Address, content_type::ContentType, date::Date, message_id::MessageId,
+        raw::Raw, text::Text,
     },
     mime::{BodyPart, MimePart},
-    MessageBuilder,
 };
 use mail_parser::MessageParser;
-use store::{
-    ahash::AHashSet,
-    roaring::RoaringBitmap,
-    write::{
-        assert::HashedValue, log::ChangeLogBuilder, BatchBuilder, DeserializeFrom, SerializeInto,
-        ToBitmaps, ValueClass, F_BITMAP, F_CLEAR, F_VALUE,
-    },
-    Serialize,
-};
-use trc::AddContext;
-
-use crate::{
-    api::http::HttpSessionData, auth::acl::AclMethods, blob::download::BlobDownload,
-    changes::state::StateManager, JmapMethods,
-};
 use std::future::Future;
-
-use super::{
-    delete::EmailDeletion,
-    headers::{BuildHeader, ValueToHeader},
-};
+use store::{ahash::AHashMap, roaring::RoaringBitmap, write::BatchBuilder};
+use trc::AddContext;
 
 pub trait EmailSet: Sync + Send {
     fn email_set(
@@ -74,45 +64,33 @@ impl EmailSet for Server {
     ) -> trc::Result<SetResponse> {
         // Prepare response
         let account_id = request.account_id.document_id();
+        let cache = self.get_cached_messages(account_id).await?;
         let mut response = self
-            .prepare_set_response(&request, Collection::Email)
+            .prepare_set_response(&request, cache.assert_state(false, &request.if_in_state)?)
             .await?;
         let can_train_spam = self.email_bayes_can_train(access_token);
 
         // Obtain mailboxIds
-        let mailbox_ids = self.mailbox_get_or_create(account_id).await?;
-        let (can_add_mailbox_ids, can_delete_mailbox_ids, can_modify_message_ids) = if access_token
-            .is_shared(account_id)
-        {
-            (
-                self.shared_documents(access_token, account_id, Collection::Mailbox, Acl::AddItems)
-                    .await?
-                    .into(),
-                self.shared_documents(
-                    access_token,
-                    account_id,
-                    Collection::Mailbox,
-                    Acl::RemoveItems,
+        let (can_add_mailbox_ids, can_delete_mailbox_ids, can_modify_message_ids) =
+            if access_token.is_shared(account_id) {
+                (
+                    cache.shared_mailboxes(access_token, Acl::AddItems).into(),
+                    cache
+                        .shared_mailboxes(access_token, Acl::RemoveItems)
+                        .into(),
+                    cache.shared_messages(access_token, Acl::ModifyItems).into(),
                 )
-                .await?
-                .into(),
-                self.shared_messages(access_token, account_id, Acl::ModifyItems)
-                    .await?
-                    .into(),
-            )
-        } else {
-            (None, None, None)
-        };
+            } else {
+                (None, None, None)
+            };
 
+        let mut last_change_id = None;
         let will_destroy = request.unwrap_destroy();
-
-        // Obtain quota
-        let resource_token = self.get_resource_token(access_token, account_id).await?;
 
         // Process creates
         'create: for (id, mut object) in request.unwrap_create() {
             let has_body_structure = object
-                .properties
+                .0
                 .keys()
                 .any(|key| matches!(key, Property::BodyStructure));
             let mut builder = MessageBuilder::new();
@@ -121,33 +99,25 @@ impl EmailSet for Server {
             let mut received_at = None;
 
             // Parse body values
-            let body_values = object
-                .properties
-                .remove(&Property::BodyValues)
-                .and_then(|obj| {
-                    if let SetValue::Value(Value::Object(obj)) = obj {
-                        let mut values = HashMap::with_capacity(obj.properties.len());
-                        for (key, value) in obj.properties {
-                            if let (Property::_T(id), Value::Object(mut bv)) = (key, value) {
-                                values.insert(
-                                    id,
-                                    bv.properties
-                                        .remove(&Property::Value)?
-                                        .try_unwrap_string()?,
-                                );
-                            } else {
-                                return None;
-                            }
+            let body_values = object.0.remove(&Property::BodyValues).and_then(|obj| {
+                if let SetValue::Value(Value::Object(obj)) = obj {
+                    let mut values = HashMap::with_capacity(obj.0.len());
+                    for (key, value) in obj.0 {
+                        if let (Property::_T(id), Value::Object(mut bv)) = (key, value) {
+                            values.insert(id, bv.0.remove(&Property::Value)?.try_unwrap_string()?);
+                        } else {
+                            return None;
                         }
-                        Some(values)
-                    } else {
-                        None
                     }
-                });
+                    Some(values)
+                } else {
+                    None
+                }
+            });
             let mut size_attachments = 0;
 
             // Parse properties
-            for (property, value) in object.properties {
+            for (property, value) in object.0 {
                 let value = match response.eval_object_references(value) {
                     Ok(value) => value,
                     Err(err) => {
@@ -306,7 +276,7 @@ impl EmailSet for Server {
                                 let mut headers: Vec<(Cow<str>, HeaderType)> = Vec::new();
 
                                 if let Some(obj) = value.try_unwrap_object() {
-                                    for (body_property, value) in obj.properties {
+                                    for (body_property, value) in obj.0 {
                                         match (body_property, value) {
                                             (Property::Type, Value::Text(value)) => {
                                                 content_type = value.into();
@@ -679,7 +649,7 @@ impl EmailSet for Server {
 
             // Verify that the mailboxIds are valid
             for mailbox_id in &mailboxes {
-                if !mailbox_ids.contains(*mailbox_id) {
+                if !cache.has_mailbox_id(mailbox_id) {
                     response.not_created.append(
                         id,
                         SetError::invalid_properties()
@@ -733,7 +703,7 @@ impl EmailSet for Server {
                 .email_ingest(IngestEmail {
                     raw_message: &raw_message,
                     message: MessageParser::new().parse(&raw_message),
-                    resource: resource_token.clone(),
+                    access_token,
                     mailbox_ids: mailboxes,
                     keywords,
                     received_at,
@@ -745,6 +715,7 @@ impl EmailSet for Server {
                 .await
             {
                 Ok(message) => {
+                    last_change_id = message.change_id.into();
                     response.created.insert(id, message.into());
                 }
                 Err(err) if err.matches(trc::EventType::Limit(trc::LimitEvent::Quota)) => {
@@ -759,7 +730,9 @@ impl EmailSet for Server {
         }
 
         // Process updates
-        let mut changes = ChangeLogBuilder::new();
+        let mut batch = BatchBuilder::new();
+        let mut changed_mailboxes: AHashMap<u32, Vec<u32>> = AHashMap::new();
+        let mut will_update = Vec::with_capacity(request.update.as_ref().map_or(0, |u| u.len()));
         'update: for (id, object) in request.unwrap_update() {
             // Make sure id won't be destroyed
             if will_destroy.contains(&id) {
@@ -767,37 +740,26 @@ impl EmailSet for Server {
                 continue 'update;
             }
 
-            // Obtain current keywords and mailboxes
+            // Obtain message data
             let document_id = id.document_id();
-            let (mut mailboxes, mut keywords) = if let (Some(mailboxes), Some(keywords)) = (
-                self.get_property::<HashedValue<Vec<UidMailbox>>>(
-                    account_id,
-                    Collection::Email,
-                    document_id,
-                    Property::MailboxIds,
-                )
-                .await?,
-                self.get_property::<HashedValue<Vec<Keyword>>>(
-                    account_id,
-                    Collection::Email,
-                    document_id,
-                    Property::Keywords,
-                )
-                .await?,
-            ) {
-                (TagManager::new(mailboxes), TagManager::new(keywords))
-            } else {
-                response.not_updated.append(id, SetError::not_found());
-                continue 'update;
+            let data_ = match self
+                .get_archive(account_id, Collection::Email, document_id)
+                .await?
+            {
+                Some(data) => data,
+                None => {
+                    response.not_updated.append(id, SetError::not_found());
+                    continue 'update;
+                }
             };
+            let data = data_
+                .to_unarchived::<MessageData>()
+                .caused_by(trc::location!())?;
+            let mut new_data = data
+                .deserialize::<MessageData>()
+                .caused_by(trc::location!())?;
 
-            // Prepare write batch
-            let mut batch = BatchBuilder::new();
-            batch
-                .with_account_id(account_id)
-                .with_collection(Collection::Email);
-
-            for (property, value) in object.properties {
+            for (property, value) in object.0 {
                 let value = match response.eval_object_references(value) {
                     Ok(value) => value,
                     Err(err) => {
@@ -807,7 +769,7 @@ impl EmailSet for Server {
                 };
                 match (property, value) {
                     (Property::MailboxIds, MaybePatchValue::Value(Value::List(ids))) => {
-                        mailboxes.set(
+                        new_data.set_mailboxes(
                             ids.into_iter()
                                 .filter_map(|id| {
                                     UidMailbox::new_unassigned(id.try_unwrap_id()?.document_id())
@@ -819,14 +781,15 @@ impl EmailSet for Server {
                     (Property::MailboxIds, MaybePatchValue::Patch(patch)) => {
                         let mut patch = patch.into_iter();
                         if let Some(id) = patch.next().unwrap().try_unwrap_id() {
-                            mailboxes.update(
-                                UidMailbox::new_unassigned(id.document_id()),
-                                patch.next().unwrap().try_unwrap_bool().unwrap_or_default(),
-                            );
+                            if patch.next().unwrap().try_unwrap_bool().unwrap_or_default() {
+                                new_data.add_mailbox(UidMailbox::new_unassigned(id.document_id()));
+                            } else {
+                                new_data.remove_mailbox(id.document_id());
+                            }
                         }
                     }
                     (Property::Keywords, MaybePatchValue::Value(Value::List(keywords_))) => {
-                        keywords.set(
+                        new_data.set_keywords(
                             keywords_
                                 .into_iter()
                                 .filter_map(|keyword| keyword.try_unwrap_keyword())
@@ -836,10 +799,11 @@ impl EmailSet for Server {
                     (Property::Keywords, MaybePatchValue::Patch(patch)) => {
                         let mut patch = patch.into_iter();
                         if let Some(keyword) = patch.next().unwrap().try_unwrap_keyword() {
-                            keywords.update(
-                                keyword,
-                                patch.next().unwrap().try_unwrap_bool().unwrap_or_default(),
-                            );
+                            if patch.next().unwrap().try_unwrap_bool().unwrap_or_default() {
+                                new_data.add_keyword(keyword);
+                            } else {
+                                new_data.remove_keyword(&keyword);
+                            }
                         }
                     }
                     (property, _) => {
@@ -849,7 +813,9 @@ impl EmailSet for Server {
                 }
             }
 
-            if !mailboxes.has_changes() && !keywords.has_changes() {
+            let has_keyword_changes = new_data.has_keyword_changes(data.inner);
+            let has_mailbox_changes = new_data.has_mailbox_changes(data.inner);
+            if !has_keyword_changes && !has_mailbox_changes {
                 response.not_updated.append(
                     id,
                     SetError::invalid_properties()
@@ -858,13 +824,8 @@ impl EmailSet for Server {
                 continue 'update;
             }
 
-            // Log change
-            batch.update_document(document_id);
-            let mut changed_mailboxes = AHashSet::new();
-            changes.log_update(Collection::Email, id);
-
             // Process keywords
-            if keywords.has_changes() {
+            if has_keyword_changes {
                 // Verify permissions on shared accounts
                 if matches!(&can_modify_message_ids, Some(ids) if !ids.contains(document_id)) {
                     response.not_updated.append(
@@ -876,29 +837,23 @@ impl EmailSet for Server {
                 }
 
                 // Set all current mailboxes as changed if the Seen tag changed
-                if keywords
-                    .changed_tags()
+                if new_data
+                    .added_keywords(data.inner)
                     .any(|keyword| keyword == &Keyword::Seen)
+                    || new_data
+                        .removed_keywords(data.inner)
+                        .any(|keyword| keyword == &Keyword::Seen)
                 {
-                    for mailbox_id in mailboxes.current() {
-                        changed_mailboxes.insert(mailbox_id.mailbox_id);
+                    for mailbox_id in new_data.mailboxes.iter() {
+                        changed_mailboxes.insert(mailbox_id.mailbox_id, Vec::new());
                     }
                 }
-
-                // Update keywords property
-                keywords.update_batch(&mut batch, Property::Keywords);
-
-                // Update last change id
-                if changes.change_id == u64::MAX {
-                    changes.change_id = self.assign_change_id(account_id)?;
-                }
-                batch.value(Property::Cid, changes.change_id, F_VALUE);
             }
 
             // Process mailboxes
-            if mailboxes.has_changes() {
+            if has_mailbox_changes {
                 // Make sure the message is at least in one mailbox
-                if !mailboxes.has_tags() {
+                if new_data.mailboxes.is_empty() {
                     response.not_updated.append(
                         id,
                         SetError::invalid_properties()
@@ -909,12 +864,12 @@ impl EmailSet for Server {
                 }
 
                 // Make sure all new mailboxIds are valid
-                for mailbox_id in mailboxes.added() {
-                    if mailbox_ids.contains(mailbox_id.mailbox_id) {
+                for mailbox_id in new_data.added_mailboxes(data.inner) {
+                    if cache.has_mailbox_id(&mailbox_id.mailbox_id) {
                         // Verify permissions on shared accounts
                         if !matches!(&can_add_mailbox_ids, Some(ids) if !ids.contains(mailbox_id.mailbox_id))
                         {
-                            changed_mailboxes.insert(mailbox_id.mailbox_id);
+                            changed_mailboxes.insert(mailbox_id.mailbox_id, Vec::new());
                         } else {
                             response.not_updated.append(
                                 id,
@@ -940,11 +895,14 @@ impl EmailSet for Server {
                 }
 
                 // Add all removed mailboxes to change list
-                for mailbox_id in mailboxes.removed() {
+                for mailbox_id in new_data.removed_mailboxes(data.inner) {
                     // Verify permissions on shared accounts
-                    if !matches!(&can_delete_mailbox_ids, Some(ids) if !ids.contains(mailbox_id.mailbox_id))
+                    if !matches!(&can_delete_mailbox_ids, Some(ids) if !ids.contains(u32::from(mailbox_id.mailbox_id)))
                     {
-                        changed_mailboxes.insert(mailbox_id.mailbox_id);
+                        changed_mailboxes
+                            .entry(mailbox_id.mailbox_id.to_native())
+                            .or_default()
+                            .push(mailbox_id.uid.to_native());
                     } else {
                         response.not_updated.append(
                             id,
@@ -958,7 +916,7 @@ impl EmailSet for Server {
                 }
 
                 // Obtain IMAP UIDs for added mailboxes
-                for uid_mailbox in mailboxes.inner_tags_mut() {
+                for uid_mailbox in &mut new_data.mailboxes {
                     if uid_mailbox.uid == 0 {
                         uid_mailbox.uid = self
                             .assign_imap_uid(account_id, uid_mailbox.mailbox_id)
@@ -966,24 +924,47 @@ impl EmailSet for Server {
                             .caused_by(trc::location!())?;
                     }
                 }
-
-                // Update mailboxIds property
-                mailboxes.update_batch(&mut batch, Property::MailboxIds);
-            }
-
-            // Log mailbox changes
-            for mailbox_id in changed_mailboxes {
-                changes.log_child_update(Collection::Mailbox, mailbox_id);
             }
 
             // Write changes
-            if !batch.is_empty() {
-                match self.core.storage.data.write(batch.build()).await {
-                    Ok(_) => {
-                        // Add to updated list
+            batch
+                .with_account_id(account_id)
+                .with_collection(Collection::Email)
+                .update_document(document_id)
+                .custom(
+                    ObjectIndexBuilder::new()
+                        .with_current(data)
+                        .with_changes(new_data),
+                )
+                .caused_by(trc::location!())?
+                .commit_point();
+            will_update.push(id);
+        }
+
+        if !batch.is_empty() {
+            // Log mailbox changes
+            for (parent_id, deleted_uids) in changed_mailboxes {
+                batch.log_container_property_change(SyncCollection::Email, parent_id);
+                for deleted_uid in deleted_uids {
+                    batch.log_vanished_item(VanishedCollection::Email, (parent_id, deleted_uid));
+                }
+            }
+
+            match self
+                .commit_batch(batch)
+                .await
+                .and_then(|ids| ids.last_change_id(account_id))
+            {
+                Ok(change_id) => {
+                    last_change_id = change_id.into();
+
+                    // Add to updated list
+                    for id in will_update {
                         response.updated.append(id, None);
                     }
-                    Err(err) if err.is_assertion_failure() => {
+                }
+                Err(err) if err.is_assertion_failure() => {
+                    for id in will_update {
                         response.not_updated.append(
                             id,
                             SetError::forbidden().with_description(
@@ -991,23 +972,18 @@ impl EmailSet for Server {
                             ),
                         );
                     }
-                    Err(err) => {
-                        return Err(err.caused_by(trc::location!()));
-                    }
+                }
+                Err(err) => {
+                    return Err(err.caused_by(trc::location!()));
                 }
             }
         }
 
         // Process deletions
         if !will_destroy.is_empty() {
-            let email_ids = self
-                .get_document_ids(account_id, Collection::Email)
-                .await?
-                .unwrap_or_default();
+            let email_ids = cache.email_document_ids();
             let can_destroy_message_ids = if access_token.is_shared(account_id) {
-                self.shared_messages(access_token, account_id, Acl::RemoveItems)
-                    .await?
-                    .into()
+                cache.shared_messages(access_token, Acl::RemoveItems).into()
             } else {
                 None
             };
@@ -1036,11 +1012,18 @@ impl EmailSet for Server {
 
             if !destroy_ids.is_empty() {
                 // Batch delete (tombstone) messages
-                let (change, not_destroyed) =
-                    self.emails_tombstone(account_id, destroy_ids).await?;
-
-                // Merge changes
-                changes.merge(change);
+                let mut batch = BatchBuilder::new();
+                let not_destroyed = self
+                    .emails_tombstone(account_id, &mut batch, destroy_ids)
+                    .await?;
+                if !batch.is_empty() {
+                    last_change_id = self
+                        .commit_batch(batch)
+                        .await
+                        .and_then(|ids| ids.last_change_id(account_id))
+                        .caused_by(trc::location!())?
+                        .into();
+                }
 
                 // Mark messages that were not found as not destroyed (this should not occur in practice)
                 if !not_destroyed.is_empty() {
@@ -1062,130 +1045,21 @@ impl EmailSet for Server {
         }
 
         // Update state
-        if !changes.is_empty() || !response.created.is_empty() {
-            let new_state = if !changes.is_empty() {
-                self.commit_changes(account_id, changes).await?.into()
-            } else {
-                self.get_state(account_id, Collection::Email).await?
-            };
-            if let State::Exact(change_id) = &new_state {
-                response.state_change = StateChange::new(account_id)
-                    .with_change(DataType::Email, *change_id)
-                    .with_change(DataType::Mailbox, *change_id)
-                    .with_change(DataType::Thread, *change_id)
-                    .into();
+        if let Some(change_id) = last_change_id {
+            if response.updated.is_empty() && response.destroyed.is_empty() {
+                // Message ingest does not broadcast state changes
+                self.broadcast_state_change(
+                    StateChange::new(account_id, change_id)
+                        .with_change(DataType::Email)
+                        .with_change(DataType::Mailbox)
+                        .with_change(DataType::Thread),
+                )
+                .await;
             }
 
-            response.new_state = new_state.into();
+            response.new_state = State::Exact(change_id).into();
         }
 
         Ok(response)
-    }
-}
-pub struct TagManager<
-    T: PartialEq + Clone + ToBitmaps + SerializeInto + Serialize + DeserializeFrom + Sync + Send,
-> {
-    current: HashedValue<Vec<T>>,
-    added: Vec<T>,
-    removed: Vec<T>,
-    last: LastTag,
-}
-
-enum LastTag {
-    Set,
-    Update,
-    None,
-}
-
-impl<
-        T: PartialEq + Clone + ToBitmaps + SerializeInto + Serialize + DeserializeFrom + Sync + Send,
-    > TagManager<T>
-{
-    pub fn new(current: HashedValue<Vec<T>>) -> Self {
-        Self {
-            current,
-            added: Vec::new(),
-            removed: Vec::new(),
-            last: LastTag::None,
-        }
-    }
-
-    pub fn set(&mut self, tags: Vec<T>) {
-        if matches!(self.last, LastTag::None) {
-            self.added.clear();
-            self.removed.clear();
-
-            for tag in &tags {
-                if !self.current.inner.contains(tag) {
-                    self.added.push(tag.clone());
-                }
-            }
-
-            for tag in &self.current.inner {
-                if !tags.contains(tag) {
-                    self.removed.push(tag.clone());
-                }
-            }
-
-            self.current.inner = tags;
-            self.last = LastTag::Set;
-        }
-    }
-
-    pub fn update(&mut self, tag: T, add: bool) {
-        if matches!(self.last, LastTag::None | LastTag::Update) {
-            if add {
-                if !self.current.inner.contains(&tag) {
-                    self.added.push(tag.clone());
-                    self.current.inner.push(tag);
-                }
-            } else if let Some(index) = self.current.inner.iter().position(|t| t == &tag) {
-                self.current.inner.swap_remove(index);
-                self.removed.push(tag);
-            }
-            self.last = LastTag::Update;
-        }
-    }
-
-    pub fn added(&self) -> &[T] {
-        &self.added
-    }
-
-    pub fn removed(&self) -> &[T] {
-        &self.removed
-    }
-
-    pub fn current(&self) -> &[T] {
-        &self.current.inner
-    }
-
-    pub fn changed_tags(&self) -> impl Iterator<Item = &T> {
-        self.added.iter().chain(self.removed.iter())
-    }
-
-    pub fn inner_tags_mut(&mut self) -> IterMut<'_, T> {
-        self.current.inner.iter_mut()
-    }
-
-    pub fn has_tags(&self) -> bool {
-        !self.current.inner.is_empty()
-    }
-
-    pub fn has_changes(&self) -> bool {
-        !self.added.is_empty() || !self.removed.is_empty()
-    }
-
-    pub fn update_batch(self, batch: &mut BatchBuilder, property: Property) {
-        let property = u8::from(property);
-
-        batch
-            .assert_value(ValueClass::Property(property), &self.current)
-            .value(property, self.current.inner, F_VALUE);
-        for added in self.added {
-            batch.value(property, added, F_BITMAP);
-        }
-        for removed in self.removed {
-            batch.value(property, removed, F_BITMAP | F_CLEAR);
-        }
     }
 }

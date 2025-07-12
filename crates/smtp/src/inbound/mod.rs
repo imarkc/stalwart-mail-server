@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,8 +8,8 @@ use std::borrow::Cow;
 
 use common::config::smtp::auth::{ArcSealer, DkimSigner};
 use mail_auth::{
-    arc::ArcSet, dkim::Signature, dmarc::Policy, ArcOutput, AuthenticatedMessage,
-    AuthenticationResults, DkimResult, DmarcResult, IprevResult, SpfResult,
+    ArcOutput, AuthenticatedMessage, AuthenticationResults, DkimResult, DmarcResult, IprevResult,
+    SpfResult, arc::ArcSet, dkim::Signature, dmarc::Policy,
 };
 
 pub mod auth;

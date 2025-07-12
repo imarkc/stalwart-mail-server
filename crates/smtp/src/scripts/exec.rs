@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,13 +7,14 @@
 use std::{sync::Arc, time::SystemTime};
 
 use common::listener::SessionStream;
+
 use mail_auth::common::resolver::ToReverseName;
-use sieve::{runtime::Variable, Envelope, Sieve};
+use sieve::{Envelope, Sieve, runtime::Variable};
 use smtp_proto::*;
 
 use crate::{core::Session, inbound::AuthResult};
 
-use super::{event_loop::RunScript, ScriptParameters, ScriptResult};
+use super::{ScriptParameters, ScriptResult, event_loop::RunScript};
 
 impl<T: SessionStream> Session<T> {
     pub fn build_script_parameters(&self, stage: &'static str) -> ScriptParameters<'_> {
@@ -21,7 +22,7 @@ impl<T: SessionStream> Session<T> {
         let mut params = ScriptParameters::new()
             .set_variable("remote_ip", self.data.remote_ip.to_string())
             .set_variable("remote_ip.reverse", self.data.remote_ip.to_reverse_name())
-            .set_variable("helo_domain", self.data.helo_domain.to_lowercase())
+            .set_variable("helo_domain", self.data.helo_domain.as_str().to_lowercase())
             .set_variable(
                 "authenticated_as",
                 self.authenticated_as().unwrap_or_default().to_string(),
@@ -86,7 +87,7 @@ impl<T: SessionStream> Session<T> {
             if let Some(env_id) = &mail_from.dsn_info {
                 params
                     .envelope
-                    .push((Envelope::Envid, env_id.to_lowercase().into()));
+                    .push((Envelope::Envid, env_id.as_str().to_lowercase().into()));
             }
 
             if stage != "data" {
@@ -97,7 +98,7 @@ impl<T: SessionStream> Session<T> {
                     if let Some(orcpt) = &rcpt.dsn_info {
                         params
                             .envelope
-                            .push((Envelope::Orcpt, orcpt.to_lowercase().into()));
+                            .push((Envelope::Orcpt, orcpt.as_str().to_lowercase().into()));
                     }
                 }
             } else {

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -21,7 +21,7 @@ impl SessionData {
             Envelope::From => {
                 let (address, address_lcase, domain) = if value.contains('@') {
                     let address_lcase = value.to_lowercase();
-                    let domain = address_lcase.domain_part().to_string();
+                    let domain = address_lcase.domain_part().into();
                     (value, address_lcase, domain)
                 } else if value.is_empty() {
                     (String::new(), String::new(), String::new())
@@ -46,7 +46,7 @@ impl SessionData {
             Envelope::To => {
                 if value.contains('@') {
                     let address_lcase = value.to_lowercase();
-                    let domain = address_lcase.domain_part().to_string();
+                    let domain = address_lcase.domain_part().into();
                     if let Some(rcpt_to) = self.rcpt_to.last_mut() {
                         rcpt_to.address = value;
                         rcpt_to.address_lcase = address_lcase;

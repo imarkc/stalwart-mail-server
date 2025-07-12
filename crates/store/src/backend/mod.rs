@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -14,9 +14,13 @@ pub mod elastic;
 pub mod foundationdb;
 pub mod fs;
 pub mod http;
+#[cfg(feature = "kafka")]
+pub mod kafka;
 pub mod memory;
 #[cfg(feature = "mysql")]
 pub mod mysql;
+#[cfg(feature = "nats")]
+pub mod nats;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "redis")]
@@ -27,6 +31,8 @@ pub mod rocksdb;
 pub mod s3;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "zenoh")]
+pub mod zenoh;
 
 pub const MAX_TOKEN_LENGTH: usize = (u8::MAX >> 1) as usize;
 pub const MAX_TOKEN_MASK: usize = MAX_TOKEN_LENGTH - 1;

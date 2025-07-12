@@ -1,235 +1,229 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use crate::{SerializeInfallible, U64_LEN};
 use ahash::AHashSet;
 use utils::{codec::leb128::Leb128Vec, map::vec_map::VecMap};
 
-use crate::Serialize;
-
-use super::{IntoOperations, MaybeDynamicValue, Operation, SerializeWithId};
+use super::key::KeySerializer;
 
 #[derive(Default, Debug)]
-pub struct ChangeLogBuilder {
-    pub change_id: u64,
+pub(crate) struct ChangeLogBuilder {
     pub changes: VecMap<u8, Changes>,
+    pub vanished: VecMap<u8, VanishedItems>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum VanishedItem {
+    Name(String),
+    Id(u64),
+    IdPair(u32, u32),
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct VanishedItems(Vec<VanishedItem>);
 
 #[derive(Default, Debug)]
 pub struct Changes {
-    pub inserts: AHashSet<u64>,
-    pub updates: AHashSet<u64>,
-    pub deletes: AHashSet<u64>,
-    pub child_updates: AHashSet<u64>,
+    pub item_inserts: AHashSet<u64>,
+    pub item_updates: AHashSet<u64>,
+    pub item_deletes: AHashSet<u64>,
+
+    pub container_inserts: AHashSet<u32>,
+    pub container_updates: AHashSet<u32>,
+    pub container_deletes: AHashSet<u32>,
+    pub container_property_changes: AHashSet<u32>,
 }
 
 impl ChangeLogBuilder {
-    pub fn new() -> ChangeLogBuilder {
-        ChangeLogBuilder {
-            change_id: u64::MAX,
-            changes: VecMap::default(),
+    pub fn log_container_insert(&mut self, collection: impl Into<u8>, document_id: u32) {
+        let changes = self.changes.get_mut_or_insert(collection.into());
+        if changes.container_deletes.remove(&document_id) {
+            changes.container_updates.insert(document_id);
+        } else {
+            changes.container_inserts.insert(document_id);
         }
     }
 
-    pub fn with_change_id(change_id: u64) -> ChangeLogBuilder {
-        ChangeLogBuilder {
-            change_id,
-            changes: VecMap::default(),
-        }
-    }
-
-    pub fn log_insert(&mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) {
-        self.changes
-            .get_mut_or_insert(collection.into())
-            .inserts
-            .insert(jmap_id.into());
-    }
-
-    pub fn log_update(&mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) {
-        self.changes
-            .get_mut_or_insert(collection.into())
-            .updates
-            .insert(jmap_id.into());
-    }
-
-    pub fn log_child_update(&mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) {
-        self.changes
-            .get_mut_or_insert(collection.into())
-            .child_updates
-            .insert(jmap_id.into());
-    }
-
-    pub fn log_delete(&mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) {
-        self.changes
-            .get_mut_or_insert(collection.into())
-            .deletes
-            .insert(jmap_id.into());
-    }
-
-    pub fn log_move(
+    pub fn log_item_insert(
         &mut self,
         collection: impl Into<u8>,
-        old_jmap_id: impl Into<u64>,
-        new_jmap_id: impl Into<u64>,
+        prefix: Option<u32>,
+        document_id: u32,
     ) {
-        let change = self.changes.get_mut_or_insert(collection.into());
-        change.deletes.insert(old_jmap_id.into());
-        change.inserts.insert(new_jmap_id.into());
-    }
-
-    pub fn with_log_insert(mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) -> Self {
-        self.log_insert(collection, jmap_id);
-        self
-    }
-
-    pub fn with_log_move(
-        mut self,
-        collection: impl Into<u8>,
-        old_jmap_id: impl Into<u64>,
-        new_jmap_id: impl Into<u64>,
-    ) -> Self {
-        self.log_move(collection, old_jmap_id, new_jmap_id);
-        self
-    }
-
-    pub fn with_log_update(mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) -> Self {
-        self.log_update(collection, jmap_id);
-        self
-    }
-
-    pub fn with_log_delete(mut self, collection: impl Into<u8>, jmap_id: impl Into<u64>) -> Self {
-        self.log_delete(collection, jmap_id);
-        self
-    }
-
-    pub fn merge(&mut self, changes: ChangeLogBuilder) {
-        for (collection, other) in changes.changes {
-            let this = self.changes.get_mut_or_insert(collection);
-            for id in other.deletes {
-                if !this.inserts.remove(&id) {
-                    this.deletes.insert(id);
-                }
-                this.updates.remove(&id);
-                this.child_updates.remove(&id);
-            }
-            this.inserts.extend(other.inserts);
-            this.updates.extend(other.updates);
-            this.child_updates.extend(other.child_updates);
+        let id = build_id(prefix, document_id);
+        let changes = self.changes.get_mut_or_insert(collection.into());
+        if changes.item_deletes.remove(&id) {
+            changes.item_updates.insert(id);
+        } else {
+            changes.item_inserts.insert(id);
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+    pub fn log_container_update(&mut self, collection: impl Into<u8>, document_id: u32) {
+        self.changes
+            .get_mut_or_insert(collection.into())
+            .container_updates
+            .insert(document_id);
+    }
+
+    pub fn log_container_property_update(&mut self, collection: impl Into<u8>, document_id: u32) {
+        self.changes
+            .get_mut_or_insert(collection.into())
+            .container_property_changes
+            .insert(document_id);
+    }
+
+    pub fn log_item_update(
+        &mut self,
+        collection: impl Into<u8>,
+        prefix: Option<u32>,
+        document_id: u32,
+    ) {
+        self.changes
+            .get_mut_or_insert(collection.into())
+            .item_updates
+            .insert(build_id(prefix, document_id));
+    }
+
+    pub fn log_container_delete(&mut self, collection: impl Into<u8>, document_id: u32) {
+        let changes = self.changes.get_mut_or_insert(collection.into());
+        let id = document_id;
+        changes.container_updates.remove(&id);
+        changes.container_property_changes.remove(&id);
+        changes.container_deletes.insert(id);
+    }
+
+    pub fn log_item_delete(
+        &mut self,
+        collection: impl Into<u8>,
+        prefix: Option<u32>,
+        document_id: u32,
+    ) {
+        let changes = self.changes.get_mut_or_insert(collection.into());
+        let id = build_id(prefix, document_id);
+        changes.item_updates.remove(&id);
+        changes.item_deletes.insert(id);
+    }
+
+    pub fn log_vanished_item(&mut self, collection: impl Into<u8>, item: impl Into<VanishedItem>) {
+        self.vanished
+            .get_mut_or_insert(collection.into())
+            .0
+            .push(item.into());
     }
 }
 
-impl IntoOperations for ChangeLogBuilder {
-    fn build(self, batch: &mut super::BatchBuilder) {
-        batch.with_change_id(self.change_id);
-        for (collection, changes) in self.changes {
-            batch.ops.push(Operation::Collection { collection });
-            batch.ops.push(Operation::Log {
-                set: changes.serialize().into(),
-            });
-        }
+#[inline(always)]
+fn build_id(prefix: Option<u32>, document_id: u32) -> u64 {
+    if let Some(prefix) = prefix {
+        ((prefix as u64) << 32) | document_id as u64
+    } else {
+        document_id as u64
     }
 }
 
 impl Changes {
-    pub fn insert<T, I>(id: T) -> Self
-    where
-        T: IntoIterator<Item = I>,
-        I: Into<u64>,
-    {
-        Changes {
-            inserts: id.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        }
+    pub fn has_container_changes(&self) -> bool {
+        !self.container_inserts.is_empty()
+            || !self.container_updates.is_empty()
+            || !self.container_property_changes.is_empty()
+            || !self.container_deletes.is_empty()
     }
 
-    pub fn update<T, I>(id: T) -> Self
-    where
-        T: IntoIterator<Item = I>,
-        I: Into<u64>,
-    {
-        Changes {
-            updates: id.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        }
-    }
-
-    pub fn child_update<T, I>(id: T) -> Self
-    where
-        T: IntoIterator<Item = I>,
-        I: Into<u64>,
-    {
-        Changes {
-            child_updates: id.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        }
-    }
-
-    pub fn delete<T, I>(id: T) -> Self
-    where
-        T: IntoIterator<Item = I>,
-        I: Into<u64>,
-    {
-        Changes {
-            deletes: id.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        }
+    pub fn has_item_changes(&self) -> bool {
+        !self.item_inserts.is_empty()
+            || !self.item_updates.is_empty()
+            || !self.item_deletes.is_empty()
     }
 }
 
-impl Serialize for &Changes {
-    fn serialize(self) -> Vec<u8> {
+impl SerializeInfallible for Changes {
+    fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(
-            1 + (self.inserts.len()
-                + self.updates.len()
-                + self.child_updates.len()
-                + self.deletes.len()
+            1 + (self.item_inserts.len()
+                + self.item_updates.len()
+                + self.item_deletes.len()
+                + self.container_inserts.len()
+                + self.container_updates.len()
+                + self.container_property_changes.len()
+                + self.container_deletes.len()
                 + 4)
                 * std::mem::size_of::<usize>(),
         );
 
-        buf.push_leb128(self.inserts.len());
-        buf.push_leb128(self.updates.len());
-        buf.push_leb128(self.child_updates.len());
-        buf.push_leb128(self.deletes.len());
+        buf.push_leb128(self.container_inserts.len());
+        buf.push_leb128(self.container_updates.len());
+        buf.push_leb128(self.container_property_changes.len());
+        buf.push_leb128(self.container_deletes.len());
+        buf.push_leb128(self.item_inserts.len());
+        buf.push_leb128(self.item_updates.len());
+        buf.push_leb128(self.item_deletes.len());
 
         for list in [
-            &self.inserts,
-            &self.updates,
-            &self.child_updates,
-            &self.deletes,
+            &self.container_inserts,
+            &self.container_updates,
+            &self.container_property_changes,
+            &self.container_deletes,
         ] {
             for id in list {
                 buf.push_leb128(*id);
             }
         }
+        for list in [&self.item_inserts, &self.item_updates, &self.item_deletes] {
+            for id in list {
+                buf.push_leb128(*id);
+            }
+        }
+
         buf
     }
 }
 
-impl From<Changes> for MaybeDynamicValue {
-    fn from(changes: Changes) -> Self {
-        MaybeDynamicValue::Static(changes.serialize())
+impl From<String> for VanishedItem {
+    fn from(value: String) -> Self {
+        VanishedItem::Name(value)
     }
 }
 
-pub struct LogInsert();
-
-impl SerializeWithId for LogInsert {
-    fn serialize_with_id(&self, ids: &super::AssignedIds) -> trc::Result<Vec<u8>> {
-        ids.last_document_id()
-            .map(|id| Changes::insert([id]).serialize())
+impl From<u64> for VanishedItem {
+    fn from(value: u64) -> Self {
+        VanishedItem::Id(value)
     }
 }
 
-impl From<LogInsert> for MaybeDynamicValue {
-    fn from(value: LogInsert) -> Self {
-        MaybeDynamicValue::Dynamic(Box::new(value))
+impl From<(u32, u32)> for VanishedItem {
+    fn from(value: (u32, u32)) -> Self {
+        VanishedItem::Id((value.0 as u64) << 32 | value.1 as u64)
+    }
+}
+
+impl VanishedItem {
+    pub fn serialized_size(&self) -> usize {
+        match self {
+            VanishedItem::Name(name) => name.len() + 1,
+            VanishedItem::Id(_) | VanishedItem::IdPair(..) => U64_LEN,
+        }
+    }
+}
+
+impl SerializeInfallible for VanishedItems {
+    fn serialize(&self) -> Vec<u8> {
+        let mut buf = KeySerializer::new(64);
+
+        for item in &self.0 {
+            buf = match item {
+                VanishedItem::Name(name) => buf.write(name.as_bytes()).write(0u8),
+                VanishedItem::Id(id) => buf.write(id.to_be_bytes().as_slice()),
+                VanishedItem::IdPair(a, b) => buf
+                    .write(a.to_be_bytes().as_slice())
+                    .write(b.to_be_bytes().as_slice()),
+            };
+        }
+
+        buf.finalize()
     }
 }

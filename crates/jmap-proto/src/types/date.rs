@@ -1,14 +1,14 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::fmt::Display;
 
-use store::Serialize;
+use store::SerializeInfallible;
 
-use crate::parser::{json::Parser, JsonObjectParser};
+use crate::parser::{JsonObjectParser, json::Parser};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct UTCDate {
@@ -220,8 +220,8 @@ impl serde::Serialize for UTCDate {
     }
 }
 
-impl Serialize for UTCDate {
-    fn serialize(self) -> Vec<u8> {
+impl SerializeInfallible for UTCDate {
+    fn serialize(&self) -> Vec<u8> {
         (self.timestamp() as u64).serialize()
     }
 }
@@ -229,6 +229,12 @@ impl Serialize for UTCDate {
 impl From<UTCDate> for u64 {
     fn from(value: UTCDate) -> Self {
         value.timestamp() as u64
+    }
+}
+
+impl From<u64> for UTCDate {
+    fn from(value: u64) -> Self {
+        UTCDate::from_timestamp(value as i64)
     }
 }
 

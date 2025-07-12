@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,7 +10,7 @@ use mail_parser::DateTime;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::{Error, Event, EventDetails, Key, Level, Value};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 
 pub struct FmtWriter<T: AsyncWrite + Unpin> {
     writer: T,
@@ -176,9 +176,6 @@ impl<T: AsyncWrite + Unpin> FmtWriter<T> {
     async fn write_value(&mut self, value: &Value, indent: usize) -> std::io::Result<()> {
         Box::pin(async move {
             match value {
-                Value::Static(v) => {
-                    self.writer.write_all(v.as_bytes()).await?;
-                }
                 Value::String(v) => {
                     self.writer.write_all("\"".as_bytes()).await?;
                     for ch in v.as_bytes() {
@@ -323,7 +320,6 @@ impl Color {
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Static(value) => value.fmt(f),
             Value::String(value) => value.fmt(f),
             Value::UInt(value) => value.fmt(f),
             Value::Int(value) => value.fmt(f),

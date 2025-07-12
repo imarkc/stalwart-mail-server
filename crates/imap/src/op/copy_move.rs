@@ -1,37 +1,38 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{sync::Arc, time::Instant};
-
+use crate::{
+    core::{MailboxId, SelectedMailbox, Session, SessionData},
+    spawn_op,
+};
+use common::{listener::SessionStream, storage::index::ObjectIndexBuilder};
 use directory::Permission;
 use email::{
-    ingest::EmailIngest,
     mailbox::{JUNK_ID, UidMailbox},
+    message::{
+        bayes::EmailBayesTrain, copy::EmailCopy, ingest::EmailIngest, metadata::MessageData,
+    },
 };
 use imap_proto::{
     Command, ResponseCode, ResponseType, StatusResponse, protocol::copy_move::Arguments,
     receiver::Request,
 };
-
-use crate::{
-    core::{SelectedMailbox, Session, SessionData},
-    spawn_op,
-};
-use common::{MailboxId, listener::SessionStream};
-use jmap::email::{bayes::EmailBayesTrain, copy::EmailCopy, set::TagManager};
 use jmap_proto::{
     error::set::SetErrorType,
     types::{
-        acl::Acl, collection::Collection, id::Id, property::Property, state::StateChange,
+        acl::Acl,
+        collection::{Collection, VanishedCollection},
+        state::StateChange,
         type_state::DataType,
     },
 };
+use std::{sync::Arc, time::Instant};
 use store::{
     roaring::RoaringBitmap,
-    write::{BatchBuilder, F_VALUE, ValueClass, assert::HashedValue, log::ChangeLogBuilder},
+    write::{AlignedBytes, Archive, BatchBuilder, ValueClass},
 };
 
 use super::ImapContext;
@@ -170,7 +171,6 @@ impl<T: SessionStream> SessionData<T> {
         } else {
             Command::Copy(is_uid)
         });
-        let mut changelog = ChangeLogBuilder::new();
         let mut did_move = false;
         let mut copied_ids = Vec::with_capacity(ids.len());
         let access_token = self
@@ -185,11 +185,12 @@ impl<T: SessionStream> SessionData<T> {
             let dest_mailbox_id = UidMailbox::new_unassigned(dest_mailbox_id);
             let can_spam_train = self.server.email_bayes_can_train(&access_token);
             let mut has_spam_train_tasks = false;
+            let mut batch = BatchBuilder::new();
 
             for (id, imap_id) in ids {
                 // Obtain mailbox tags
-                let (mut mailboxes, thread_id) = if let Some(result) = self
-                    .get_mailbox_tags(account_id, id)
+                let data_ = if let Some(result) = self
+                    .get_message_data(account_id, id)
                     .await
                     .imap_ctx(&arguments.tag, trc::location!())?
                 {
@@ -198,23 +199,69 @@ impl<T: SessionStream> SessionData<T> {
                     continue;
                 };
 
+                // Deserialize
+                let data = data_
+                    .to_unarchived::<MessageData>()
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+
                 // Make sure the message still belongs to this mailbox
-                if !mailboxes
-                    .current()
-                    .contains(&UidMailbox::new_unassigned(src_mailbox.id.mailbox_id))
-                    || mailboxes.current().contains(&dest_mailbox_id)
+                if !data
+                    .inner
+                    .mailboxes
+                    .iter()
+                    .any(|mailbox| mailbox.mailbox_id == src_mailbox.id.mailbox_id)
                 {
                     continue;
                 }
 
+                // If the message is already in the destination mailbox, skip it.
+                if let Some(mailbox) = data
+                    .inner
+                    .mailboxes
+                    .iter()
+                    .find(|mailbox| mailbox.mailbox_id == dest_mailbox_id.mailbox_id)
+                {
+                    copied_ids.push((imap_id.uid, mailbox.uid.to_native()));
+
+                    if is_move {
+                        let mut new_data = data
+                            .deserialize()
+                            .imap_ctx(&arguments.tag, trc::location!())?;
+                        new_data.remove_mailbox(src_mailbox.id.mailbox_id);
+                        batch
+                            .with_account_id(account_id)
+                            .with_collection(Collection::Email)
+                            .update_document(id)
+                            .custom(
+                                ObjectIndexBuilder::new()
+                                    .with_current(data)
+                                    .with_changes(new_data),
+                            )
+                            .imap_ctx(&arguments.tag, trc::location!())?
+                            .log_vanished_item(
+                                VanishedCollection::Email,
+                                (src_mailbox.id.mailbox_id, imap_id.uid),
+                            )
+                            .commit_point();
+                        did_move = true;
+                    }
+
+                    continue;
+                }
+
+                // Prepare changes
+                let mut new_data = data
+                    .deserialize()
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+
                 // Add destination folder
-                mailboxes.update(dest_mailbox_id, true);
+                new_data.add_mailbox(dest_mailbox_id);
                 if is_move {
-                    mailboxes.update(UidMailbox::new_unassigned(src_mailbox.id.mailbox_id), false);
+                    new_data.remove_mailbox(src_mailbox.id.mailbox_id);
                 }
 
                 // Assign IMAP UIDs
-                for uid_mailbox in mailboxes.inner_tags_mut() {
+                for uid_mailbox in &mut new_data.mailboxes {
                     if uid_mailbox.uid == 0 {
                         let assigned_uid = self
                             .server
@@ -228,19 +275,22 @@ impl<T: SessionStream> SessionData<T> {
                 }
 
                 // Prepare write batch
-                let mut batch = BatchBuilder::new();
                 batch
                     .with_account_id(account_id)
                     .with_collection(Collection::Email)
-                    .update_document(id);
-                mailboxes.update_batch(&mut batch, Property::MailboxIds);
-                if changelog.change_id == u64::MAX {
-                    changelog.change_id = self
-                        .server
-                        .assign_change_id(account_id)
-                        .imap_ctx(&arguments.tag, trc::location!())?;
+                    .update_document(id)
+                    .custom(
+                        ObjectIndexBuilder::new()
+                            .with_current(data)
+                            .with_changes(new_data),
+                    )
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+                if is_move {
+                    batch.log_vanished_item(
+                        VanishedCollection::Email,
+                        (src_mailbox.id.mailbox_id, imap_id.uid),
+                    );
                 }
-                batch.value(Property::Cid, changelog.change_id, F_VALUE);
 
                 // Add bayes train task
                 if can_spam_train {
@@ -268,22 +318,19 @@ impl<T: SessionStream> SessionData<T> {
                         has_spam_train_tasks = true;
                     }
                 }
-
-                // Write changes
-                self.server
-                    .store()
-                    .write(batch)
-                    .await
-                    .imap_ctx(&arguments.tag, trc::location!())?;
+                batch.commit_point();
 
                 // Update changelog
-                changelog.log_update(Collection::Email, Id::from_parts(thread_id, id));
-                changelog.log_child_update(Collection::Mailbox, dest_mailbox_id.mailbox_id);
                 if is_move {
-                    changelog.log_child_update(Collection::Mailbox, src_mailbox.id.mailbox_id);
                     did_move = true;
                 }
             }
+
+            // Write changes
+            self.server
+                .commit_batch(batch)
+                .await
+                .imap_ctx(&arguments.tag, trc::location!())?;
 
             // Trigger Bayes training
             if has_spam_train_tasks {
@@ -337,14 +384,21 @@ impl<T: SessionStream> SessionData<T> {
 
             // Untag or delete emails
             if !destroy_ids.is_empty() {
+                let mut batch = BatchBuilder::new();
                 self.email_untag_or_delete(
                     src_account_id,
                     src_mailbox.id.mailbox_id,
                     &destroy_ids,
-                    &mut changelog,
+                    &mut batch,
                 )
                 .await
                 .imap_ctx(&arguments.tag, trc::location!())?;
+
+                self.server
+                    .commit_batch(batch)
+                    .await
+                    .imap_ctx(&arguments.tag, trc::location!())?;
+
                 did_move = true;
             }
 
@@ -352,29 +406,13 @@ impl<T: SessionStream> SessionData<T> {
             if let Some(change_id) = dest_change_id {
                 self.server
                     .broadcast_state_change(
-                        StateChange::new(dest_account_id)
-                            .with_change(DataType::Email, change_id)
-                            .with_change(DataType::Thread, change_id)
-                            .with_change(DataType::Mailbox, change_id),
+                        StateChange::new(dest_account_id, change_id)
+                            .with_change(DataType::Email)
+                            .with_change(DataType::Thread)
+                            .with_change(DataType::Mailbox),
                     )
                     .await;
             }
-        }
-
-        // Write changes on source account
-        if !changelog.is_empty() {
-            let change_id = self
-                .server
-                .commit_changes(src_mailbox.id.account_id, changelog)
-                .await
-                .imap_ctx(&arguments.tag, trc::location!())?;
-            self.server
-                .broadcast_state_change(
-                    StateChange::new(src_mailbox.id.account_id)
-                        .with_change(DataType::Email, change_id)
-                        .with_change(DataType::Mailbox, change_id),
-                )
-                .await;
         }
 
         // Map copied JMAP Ids to IMAP UIDs in the destination folder.
@@ -396,9 +434,10 @@ impl<T: SessionStream> SessionData<T> {
 
         // Prepare response
         let uid_validity = self
-            .get_uid_validity(&dest_mailbox)
-            .await
-            .imap_ctx(&arguments.tag, trc::location!())?;
+            .mailbox_state(&dest_mailbox)
+            .map(|m| m.uid_validity as u32)
+            .unwrap_or_default();
+
         let mut src_uids = Vec::with_capacity(copied_ids.len());
         let mut dest_uids = Vec::with_capacity(copied_ids.len());
         for (src_uid, dest_uid) in copied_ids {
@@ -463,26 +502,17 @@ impl<T: SessionStream> SessionData<T> {
         self.write_bytes(response).await
     }
 
-    pub async fn get_mailbox_tags(
+    pub async fn get_message_data(
         &self,
         account_id: u32,
         id: u32,
-    ) -> trc::Result<Option<(TagManager<UidMailbox>, u32)>> {
-        // Obtain mailbox tags
-        if let (Some(mailboxes), Some(thread_id)) = (
-            self.server
-                .get_property::<HashedValue<Vec<UidMailbox>>>(
-                    account_id,
-                    Collection::Email,
-                    id,
-                    Property::MailboxIds,
-                )
-                .await?,
-            self.server
-                .get_property::<u32>(account_id, Collection::Email, id, Property::ThreadId)
-                .await?,
-        ) {
-            Ok(Some((TagManager::new(mailboxes), thread_id)))
+    ) -> trc::Result<Option<Archive<AlignedBytes>>> {
+        if let Some(data) = self
+            .server
+            .get_archive(account_id, Collection::Email, id)
+            .await?
+        {
+            Ok(Some(data))
         } else {
             trc::event!(
                 Store(trc::StoreEvent::NotFound),

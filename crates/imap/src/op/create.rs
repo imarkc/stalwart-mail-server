@@ -1,33 +1,27 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
-
-use std::time::Instant;
 
 use crate::{
     core::{Session, SessionData},
     op::ImapContext,
     spawn_op,
 };
-use common::{listener::SessionStream, Account, Mailbox};
+use common::{
+    config::jmap::settings::SpecialUse, listener::SessionStream, storage::index::ObjectIndexBuilder,
+};
 use directory::Permission;
-use email::mailbox::SCHEMA;
+use email::cache::{MessageCacheFetch, mailbox::MailboxCacheAccess};
 use imap_proto::{
+    Command, ResponseCode, StatusResponse,
     protocol::{create::Arguments, list::Attribute},
     receiver::Request,
-    Command, ResponseCode, StatusResponse,
 };
-use jmap::JmapMethods;
-use jmap_proto::{
-    object::{index::ObjectIndexBuilder, Object},
-    types::{
-        acl::Acl, collection::Collection, id::Id, property::Property, state::StateChange,
-        type_state::DataType, value::Value,
-    },
-};
-use store::{query::Filter, write::BatchBuilder};
+use jmap_proto::types::{acl::Acl, collection::Collection, id::Id};
+use std::time::Instant;
+use store::write::BatchBuilder;
 use trc::AddContext;
 
 impl<T: SessionStream> Session<T> {
@@ -68,69 +62,51 @@ impl<T: SessionStream> SessionData<T> {
             .imap_ctx(&arguments.tag, trc::location!())?;
 
         // Validate mailbox name
-        let mut params = self
+        let params = self
             .validate_mailbox_create(&arguments.mailbox_name, arguments.mailbox_role)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
         debug_assert!(!params.path.is_empty());
 
         // Build batch
-        let mut changes = self
-            .server
-            .begin_changes(params.account_id)
-            .imap_ctx(&arguments.tag, trc::location!())?;
-
         let mut parent_id = params.parent_mailbox_id.map(|id| id + 1).unwrap_or(0);
         let mut create_ids = Vec::with_capacity(params.path.len());
+        let mut next_document_id = self
+            .server
+            .store()
+            .assign_document_ids(
+                params.account_id,
+                Collection::Mailbox,
+                params.path.len() as u64,
+            )
+            .await
+            .caused_by(trc::location!())?;
+        let mut batch = BatchBuilder::new();
         for (pos, &path_item) in params.path.iter().enumerate() {
-            let mut mailbox = Object::with_capacity(4)
-                .with_property(Property::Name, path_item)
-                .with_property(Property::ParentId, Value::Id(Id::from(parent_id)))
-                .with_property(
-                    Property::Cid,
-                    Value::UnsignedInt(rand::random::<u32>() as u64),
-                );
+            let mut mailbox = email::mailbox::Mailbox::new(path_item).with_parent_id(parent_id);
+
             if pos == params.path.len() - 1 {
-                if let Some(mailbox_role) = arguments.mailbox_role {
-                    mailbox.set(Property::Role, mailbox_role);
+                if let Some(mailbox_role) = arguments.mailbox_role.map(attr_to_role) {
+                    mailbox.role = mailbox_role;
                 }
             }
-            let mut batch = BatchBuilder::new();
+            let mailbox_id = next_document_id;
+            next_document_id -= 1;
             batch
                 .with_account_id(params.account_id)
                 .with_collection(Collection::Mailbox)
-                .create_document()
-                .custom(ObjectIndexBuilder::new(SCHEMA).with_changes(mailbox));
-            let mailbox_id = self
-                .server
-                .store()
-                .write_expect_id(batch)
-                .await
-                .imap_ctx(&arguments.tag, trc::location!())?;
-            changes.log_insert(Collection::Mailbox, mailbox_id);
+                .create_document(mailbox_id)
+                .custom(ObjectIndexBuilder::<(), _>::new().with_changes(mailbox))
+                .imap_ctx(&arguments.tag, trc::location!())?
+                .commit_point();
             parent_id = mailbox_id + 1;
             create_ids.push(mailbox_id);
         }
 
-        // Write changes
-        let change_id = changes.change_id;
-        let mut batch = BatchBuilder::new();
-        batch
-            .with_account_id(params.account_id)
-            .with_collection(Collection::Mailbox)
-            .custom(changes);
         self.server
-            .store()
-            .write(batch)
+            .commit_batch(batch)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
-
-        // Broadcast changes
-        self.server
-            .broadcast_state_change(
-                StateChange::new(params.account_id).with_change(DataType::Mailbox, change_id),
-            )
-            .await;
 
         trc::event!(
             Imap(trc::ImapEvent::CreateMailbox),
@@ -144,12 +120,6 @@ impl<T: SessionStream> SessionData<T> {
             Elapsed = op_start.elapsed()
         );
 
-        // Add created mailboxes to session
-        std::mem::drop(
-            self.add_created_mailboxes(&mut params, change_id, create_ids)
-                .imap_ctx(&arguments.tag, trc::location!())?,
-        );
-
         // Build response
         Ok(StatusResponse::ok("Mailbox created.")
             .with_code(ResponseCode::MailboxId {
@@ -158,97 +128,10 @@ impl<T: SessionStream> SessionData<T> {
             .with_tag(arguments.tag))
     }
 
-    pub fn add_created_mailboxes(
-        &self,
-        params: &mut CreateParams<'_>,
-        new_state: u64,
-        mailbox_ids: Vec<u32>,
-    ) -> trc::Result<parking_lot::MutexGuard<'_, Vec<Account>>> {
-        // Lock mailboxes
-        let mut mailboxes = self.mailboxes.lock();
-        let account = if let Some(account) = mailboxes
-            .iter_mut()
-            .find(|account| account.account_id == params.account_id)
-        {
-            account
-        } else {
-            return Err(trc::ImapEvent::Error
-                .into_err()
-                .details("Account no longer available.")
-                .caused_by(trc::location!()));
-        };
-
-        // Update state
-        account.state_mailbox = new_state.into();
-
-        // Add mailboxes
-        let mut mailbox_name = if let Some(parent_mailbox_name) = params.parent_mailbox_name.take()
-        {
-            if let Some(parent_mailbox) = account
-                .mailbox_state
-                .get_mut(params.parent_mailbox_id.as_ref().unwrap())
-            {
-                parent_mailbox.has_children = true;
-            }
-            parent_mailbox_name
-        } else if let Some(account_prefix) = account.prefix.as_ref() {
-            account_prefix.to_string()
-        } else {
-            "".to_string()
-        };
-
-        for (pos, (mailbox_id, path_item)) in
-            mailbox_ids.into_iter().zip(params.path.iter()).enumerate()
-        {
-            mailbox_name = if !mailbox_name.is_empty() {
-                format!("{}/{}", mailbox_name, path_item)
-            } else {
-                path_item.to_string()
-            };
-
-            let effective_id = self
-                .server
-                .core
-                .jmap
-                .default_folders
-                .iter()
-                .find(|f| f.aliases.iter().any(|a| a == &mailbox_name))
-                .and_then(|f| account.mailbox_names.get(&f.name))
-                .copied()
-                .unwrap_or(mailbox_id);
-
-            account
-                .mailbox_names
-                .insert(mailbox_name.clone(), effective_id);
-
-            account.mailbox_state.insert(
-                mailbox_id,
-                Mailbox {
-                    has_children: pos < params.path.len() - 1 || params.is_rename,
-                    is_subscribed: false,
-                    total_messages: 0.into(),
-                    total_unseen: 0.into(),
-                    total_deleted: 0.into(),
-                    total_deleted_storage: 0.into(),
-                    uid_validity: None,
-                    uid_next: None,
-                    size: 0.into(),
-                    special_use: if pos == params.path.len() - 1 {
-                        params.special_use
-                    } else {
-                        None
-                    },
-                },
-            );
-        }
-
-        Ok(mailboxes)
-    }
-
     pub async fn validate_mailbox_create<'x>(
         &self,
         mailbox_name: &'x str,
-        mailbox_role: Option<&'x str>,
+        mailbox_role: Option<Attribute>,
     ) -> trc::Result<CreateParams<'x>> {
         // Remove leading and trailing separators
         let mut name = mailbox_name.trim();
@@ -292,44 +175,55 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Validate special folders
-        let full_path = path.join("/");
         let mut parent_mailbox_id = None;
         let mut parent_mailbox_name = None;
         let (account_id, path) = {
             let mailboxes = self.mailboxes.lock();
-            let account = if path.first() == Some(&self.server.core.jmap.shared_folder.as_str()) {
-                // Shared Folders/<username>/<folder>
-                if path.len() < 3 {
+            let (account, full_path) =
+                if path.first() == Some(&self.server.core.jmap.shared_folder.as_str()) {
+                    // Shared Folders/<username>/<folder>
+                    if path.len() < 3 {
+                        return Err(trc::ImapEvent::Error
+                            .into_err()
+                            .details("Mailboxes under root shared folders are not allowed.")
+                            .code(ResponseCode::Cannot));
+                    }
+                    // Build path
+                    let root = &mut path[2];
+                    if root.eq_ignore_ascii_case("INBOX") {
+                        *root = "INBOX";
+                    }
+                    let full_path = path.join("/");
+                    let prefix = Some(format!("{}/{}", path.remove(0), path.remove(0)));
+
+                    // Locate account
+                    if let Some(account) = mailboxes
+                        .iter()
+                        .skip(1)
+                        .find(|account| account.prefix == prefix)
+                    {
+                        (account, full_path)
+                    } else {
+                        #[allow(clippy::unnecessary_literal_unwrap)]
+                        return Err(trc::ImapEvent::Error.into_err().details(format!(
+                            "Shared account '{}' not found.",
+                            prefix.unwrap_or_default()
+                        )));
+                    }
+                } else if let Some(account) = mailboxes.first() {
+                    let root = &mut path[0];
+                    if root.eq_ignore_ascii_case("INBOX") {
+                        *root = "INBOX";
+                    }
+
+                    (account, path.join("/"))
+                } else {
                     return Err(trc::ImapEvent::Error
                         .into_err()
-                        .details("Mailboxes under root shared folders are not allowed.")
-                        .code(ResponseCode::Cannot));
-                }
-                let prefix = Some(format!("{}/{}", path.remove(0), path.remove(0)));
-
-                // Locate account
-                if let Some(account) = mailboxes
-                    .iter()
-                    .skip(1)
-                    .find(|account| account.prefix == prefix)
-                {
-                    account
-                } else {
-                    #[allow(clippy::unnecessary_literal_unwrap)]
-                    return Err(trc::ImapEvent::Error.into_err().details(format!(
-                        "Shared account '{}' not found.",
-                        prefix.unwrap_or_default()
-                    )));
-                }
-            } else if let Some(account) = mailboxes.first() {
-                account
-            } else {
-                return Err(trc::ImapEvent::Error
-                    .into_err()
-                    .details("Internal server error.")
-                    .caused_by(trc::location!())
-                    .code(ResponseCode::ContactAdmin));
-            };
+                        .details("Internal server error.")
+                        .caused_by(trc::location!())
+                        .code(ResponseCode::ContactAdmin));
+                };
 
             // Locate parent mailbox
             if account.mailbox_names.contains_key(&full_path) {
@@ -343,7 +237,7 @@ impl<T: SessionStream> SessionData<T> {
                 if path.len() > 1 {
                     let mut create_path = Vec::with_capacity(path.len());
                     while !path.is_empty() {
-                        let mailbox_name = path.join("/");
+                        let mailbox_name: String = path.join("/");
                         if let Some(&mailbox_id) = account.mailbox_names.get(&mailbox_name) {
                             parent_mailbox_id = mailbox_id.into();
                             parent_mailbox_name = mailbox_name.into();
@@ -387,31 +281,28 @@ impl<T: SessionStream> SessionData<T> {
         Ok(CreateParams {
             account_id,
             path,
-            full_path,
             parent_mailbox_id,
             parent_mailbox_name,
             special_use: if let Some(mailbox_role) = mailbox_role {
                 // Make sure role is unique
-                if !self
+                let special_use = attr_to_role(mailbox_role);
+                if self
                     .server
-                    .filter(
-                        account_id,
-                        Collection::Mailbox,
-                        vec![Filter::eq(Property::Role, mailbox_role)],
-                    )
+                    .get_cached_messages(account_id)
                     .await
                     .caused_by(trc::location!())?
-                    .results
-                    .is_empty()
+                    .mailbox_by_role(&special_use)
+                    .is_some()
                 {
                     return Err(trc::ImapEvent::Error
                         .into_err()
                         .details(format!(
-                            "A mailbox with role '{mailbox_role}' already exists.",
+                            "A mailbox with role '{}' already exists.",
+                            special_use.as_str().unwrap_or_default()
                         ))
                         .code(ResponseCode::UseAttr));
                 }
-                Attribute::try_from(mailbox_role).ok()
+                Some(mailbox_role)
             } else {
                 None
             },
@@ -424,9 +315,21 @@ impl<T: SessionStream> SessionData<T> {
 pub struct CreateParams<'x> {
     pub account_id: u32,
     pub path: Vec<&'x str>,
-    pub full_path: String,
     pub parent_mailbox_id: Option<u32>,
     pub parent_mailbox_name: Option<String>,
     pub special_use: Option<Attribute>,
     pub is_rename: bool,
+}
+
+#[inline]
+fn attr_to_role(attr: Attribute) -> SpecialUse {
+    match attr {
+        Attribute::Archive => SpecialUse::Archive,
+        Attribute::Drafts => SpecialUse::Drafts,
+        Attribute::Junk => SpecialUse::Junk,
+        Attribute::Sent => SpecialUse::Sent,
+        Attribute::Trash => SpecialUse::Trash,
+        Attribute::Important => SpecialUse::Important,
+        _ => SpecialUse::None,
+    }
 }

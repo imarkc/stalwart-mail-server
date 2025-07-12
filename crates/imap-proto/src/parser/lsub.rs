@@ -1,17 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{
-        list::{self, SelectionOption},
-        ProtocolVersion,
-    },
-    receiver::{bad, Request},
-    utf7::utf7_maybe_decode,
     Command,
+    protocol::{
+        ProtocolVersion,
+        list::{self, SelectionOption},
+    },
+    receiver::{Request, bad},
+    utf7::utf7_maybe_decode,
 };
 
 impl Request<Command> {
@@ -22,15 +24,15 @@ impl Request<Command> {
             Ok(list::Arguments::Extended {
                 reference_name: tokens
                     .next()
-                    .ok_or_else(|| bad(self.tag.to_string(), "Missing reference name."))?
+                    .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing reference name."))?
                     .unwrap_string()
-                    .map_err(|v| bad(self.tag.to_string(), v))?,
+                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                 mailbox_name: vec![utf7_maybe_decode(
                     tokens
                         .next()
-                        .ok_or_else(|| bad(self.tag.to_string(), "Missing mailbox name."))?
+                        .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing mailbox name."))?
                         .unwrap_string()
-                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                     ProtocolVersion::Rev1,
                 )],
                 selection_options: vec![SelectionOption::Subscribed],
@@ -58,9 +60,9 @@ mod tests {
             (
                 "A002 LSUB \"#news.\" \"comp.mail.*\"\r\n",
                 list::Arguments::Extended {
-                    tag: "A002".to_string(),
-                    reference_name: "#news.".to_string(),
-                    mailbox_name: vec!["comp.mail.*".to_string()],
+                    tag: "A002".into(),
+                    reference_name: "#news.".into(),
+                    mailbox_name: vec!["comp.mail.*".into()],
                     selection_options: vec![SelectionOption::Subscribed],
                     return_options: vec![],
                 },
@@ -68,9 +70,9 @@ mod tests {
             (
                 "A002 LSUB \"#news.\" \"comp.%\"\r\n",
                 list::Arguments::Extended {
-                    tag: "A002".to_string(),
-                    reference_name: "#news.".to_string(),
-                    mailbox_name: vec!["comp.%".to_string()],
+                    tag: "A002".into(),
+                    reference_name: "#news.".into(),
+                    mailbox_name: vec!["comp.%".into()],
                     selection_options: vec![SelectionOption::Subscribed],
                     return_options: vec![],
                 },

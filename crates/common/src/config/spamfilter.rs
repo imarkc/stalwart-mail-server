@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -15,15 +15,16 @@ use nlp::bayes::BayesClassifier;
 use tokio::net::lookup_host;
 use utils::{
     cache::CacheItemWeight,
-    config::{utils::ParseValue, Config},
+    config::{Config, utils::ParseValue},
     glob::GlobMap,
 };
 
-use super::{functions::ResolveVariable, if_block::IfBlock, tokenizer::TokenMap, Variable};
+use super::{Variable, functions::ResolveVariable, if_block::IfBlock, tokenizer::TokenMap};
 
 #[derive(Debug, Clone, Default)]
 pub struct SpamFilterConfig {
     pub enabled: bool,
+    pub card_is_ham: bool,
     pub dnsbl: DnsBlConfig,
     pub rules: SpamFilterRules,
     pub lists: SpamFilterLists,
@@ -85,6 +86,7 @@ pub struct BayesConfig {
     pub auto_learn_reply_ham: bool,
     pub auto_learn_spam_threshold: f64,
     pub auto_learn_ham_threshold: f64,
+    pub auto_learn_card_is_ham: bool,
     pub score_spam: f64,
     pub score_ham: f64,
     pub account_score_spam: f64,
@@ -178,6 +180,9 @@ impl SpamFilterConfig {
             enabled: config
                 .property_or_default("spam-filter.enable", "true")
                 .unwrap_or(true),
+            card_is_ham: config
+                .property_or_default("spam-filter.card-is-ham", "true")
+                .unwrap_or(true),
             dnsbl: DnsBlConfig::parse(config),
             rules: SpamFilterRules::parse(config),
             lists: SpamFilterLists::parse(config),
@@ -194,11 +199,7 @@ impl SpamFilterConfig {
 impl SpamFilterRules {
     pub fn parse(config: &mut Config) -> SpamFilterRules {
         let mut rules = vec![];
-        for id in config
-            .sub_keys("spam-filter.rule", ".scope")
-            .map(|k| k.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id in config.sub_keys("spam-filter.rule", ".scope") {
             if let Some(rule) = SpamFilterRule::parse(config, id) {
                 rules.push(rule);
             }
@@ -261,11 +262,7 @@ impl SpamFilterRule {
 impl DnsBlConfig {
     pub fn parse(config: &mut Config) -> Self {
         let mut servers = vec![];
-        for id in config
-            .sub_keys("spam-filter.dnsbl.server", ".scope")
-            .map(|k| k.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id in config.sub_keys("spam-filter.dnsbl.server", ".scope") {
             if let Some(server) = DnsBlServer::parse(config, id) {
                 servers.push(server);
             }
@@ -569,6 +566,9 @@ impl BayesConfig {
             account_score_ham: config
                 .property_or_default("spam-filter.bayes.account.score.ham", "0.5")
                 .unwrap_or(0.5),
+            auto_learn_card_is_ham: config
+                .property_or_default("spam-filter.bayes.auto-learn.card-is-ham", "true")
+                .unwrap_or(true),
         }
         .into()
     }
@@ -845,8 +845,8 @@ pub struct IpResolver {
 impl ResolveVariable for IpResolver {
     fn resolve_variable(&self, variable: u32) -> Variable<'_> {
         match variable {
-            V_IP => Variable::String(self.ip_string.as_str().into()),
-            V_IP_REVERSE => Variable::String(self.reverse.as_str().into()),
+            V_IP => self.ip_string.as_str().into(),
+            V_IP_REVERSE => self.reverse.as_str().into(),
             V_IP_OCTETS => self.octets.clone(),
             V_IP_IS_V4 => Variable::Integer(self.ip.is_ipv4() as _),
             V_IP_IS_V6 => Variable::Integer(self.ip.is_ipv6() as _),

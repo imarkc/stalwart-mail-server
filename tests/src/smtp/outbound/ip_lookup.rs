@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,14 +9,14 @@ use std::time::{Duration, Instant};
 use common::config::server::ServerProtocol;
 use mail_auth::{IpLookupStrategy, MX};
 
-use crate::smtp::{session::TestSession, DnsCache, TestSMTP};
+use crate::smtp::{DnsCache, TestSMTP, session::TestSession};
 
 const LOCAL: &str = r#"
 [session.rcpt]
 relay = true
 
-[queue.outbound]
-ip-strategy = "ipv6_then_ipv4"
+[queue.gateway.mx]
+ip-lookup = "ipv6_then_ipv4"
 "#;
 
 const REMOTE: &str = r#"
@@ -65,7 +65,7 @@ async fn ip_lookup_strategy() {
 
         // Retry on failed STARTTLS
         let mut session = local.new_session();
-        session.data.remote_ip_str = "10.0.0.1".to_string();
+        session.data.remote_ip_str = "10.0.0.1".into();
         session.eval_session_params().await;
         session.ehlo("mx.test.org").await;
         session
@@ -81,7 +81,7 @@ async fn ip_lookup_strategy() {
             remote.queue_receiver.expect_message().await;
         } else {
             let message = local.queue_receiver.last_queued_message().await;
-            let status = message.domains[0].status.to_string();
+            let status = message.message.recipients[0].status.to_string();
             assert!(
                 status.contains("Connection refused"),
                 "Message: {:?}",

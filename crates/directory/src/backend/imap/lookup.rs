@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,7 +7,7 @@
 use mail_send::Credentials;
 use smtp_proto::{AUTH_CRAM_MD5, AUTH_LOGIN, AUTH_OAUTHBEARER, AUTH_PLAIN, AUTH_XOAUTH2};
 
-use crate::{backend::RcptType, IntoError, Principal, QueryBy};
+use crate::{IntoError, Principal, QueryBy, Type, backend::RcptType};
 
 use super::{ImapDirectory, ImapError};
 
@@ -48,7 +48,7 @@ impl ImapDirectory {
             match client.authenticate(mechanism, credentials).await {
                 Ok(_) => {
                     client.is_valid = false;
-                    Ok(Some(Principal::default()))
+                    Ok(Some(Principal::new(u32::MAX, Type::Individual)))
                 }
                 Err(err) => match &err {
                     ImapError::AuthenticationFailed => Ok(None),

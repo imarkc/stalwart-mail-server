@@ -1,17 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use std::time::Duration;
+
 use jmap_client::{
-    client::Client,
+    Error, Set,
+    client::{Client, Credentials},
     core::{
         query::Filter,
         set::{SetError, SetErrorType, SetObject, SetRequest},
     },
     mailbox::{self, Mailbox, Role},
-    Error, Set,
 };
 use jmap_proto::types::{id::Id, state::State};
 use serde::{Deserialize, Serialize};
@@ -19,7 +21,7 @@ use store::ahash::AHashMap;
 
 use crate::jmap::assert_is_empty;
 
-use super::{wait_for_index, JMAPTest};
+use super::{JMAPTest, wait_for_index};
 
 pub async fn test(params: &mut JMAPTest) {
     println!("Running Mailbox tests...");
@@ -299,12 +301,14 @@ pub async fn test(params: &mut JMAPTest) {
         .update(&id_map["1.1.1.1.1"])
         .name("Renamed and moved")
         .parent_id((&id_map["l.2"]).into());
-    assert!(request
-        .send_set_mailbox()
-        .await
-        .unwrap()
-        .updated(&id_map["1.1.1.1.1"])
-        .is_ok());
+    assert!(
+        request
+            .send_set_mailbox()
+            .await
+            .unwrap()
+            .updated(&id_map["1.1.1.1.1"])
+            .is_ok()
+    );
 
     // Verify changes
     let state = client.mailbox_changes(state, 0).await.unwrap();
@@ -494,24 +498,30 @@ pub async fn test(params: &mut JMAPTest) {
         .destroy([&id_map["trash"]])
         .arguments()
         .on_destroy_remove_emails(true);
-    assert!(request
-        .send_set_mailbox()
-        .await
-        .unwrap()
-        .destroyed(&id_map["trash"])
-        .is_ok());
+    assert!(
+        request
+            .send_set_mailbox()
+            .await
+            .unwrap()
+            .destroyed(&id_map["trash"])
+            .is_ok()
+    );
 
     // Verify that Trash folder and its contents are gone
-    assert!(client
-        .mailbox_get(&id_map["trash"], None::<Vec<_>>)
-        .await
-        .unwrap()
-        .is_none());
-    assert!(client
-        .email_get(&mail_id, None::<Vec<_>>)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        client
+            .mailbox_get(&id_map["trash"], None::<Vec<_>>)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        client
+            .email_get(&mail_id, None::<Vec<_>>)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Check search results after changing folder properties
     let mut request = client.build();
@@ -522,12 +532,14 @@ pub async fn test(params: &mut JMAPTest) {
         .sort_order(100)
         .parent_id((&id_map["l.2"]).into())
         .role(Role::None);
-    assert!(request
-        .send_set_mailbox()
-        .await
-        .unwrap()
-        .updated(&id_map["drafts"])
-        .is_ok());
+    assert!(
+        request
+            .send_set_mailbox()
+            .await
+            .unwrap()
+            .updated(&id_map["drafts"])
+            .is_ok()
+    );
     assert_eq!(
         client
             .mailbox_query(
@@ -547,24 +559,28 @@ pub async fn test(params: &mut JMAPTest) {
             .collect::<Vec<_>>(),
         ["drafts"]
     );
-    assert!(client
-        .mailbox_query(
-            mailbox::query::Filter::name("Drafts").into(),
-            [mailbox::query::Comparator::name()].into()
-        )
-        .await
-        .unwrap()
-        .ids()
-        .is_empty());
-    assert!(client
-        .mailbox_query(
-            mailbox::query::Filter::role(Role::Drafts).into(),
-            [mailbox::query::Comparator::name()].into()
-        )
-        .await
-        .unwrap()
-        .ids()
-        .is_empty());
+    assert!(
+        client
+            .mailbox_query(
+                mailbox::query::Filter::name("Drafts").into(),
+                [mailbox::query::Comparator::name()].into()
+            )
+            .await
+            .unwrap()
+            .ids()
+            .is_empty()
+    );
+    assert!(
+        client
+            .mailbox_query(
+                mailbox::query::Filter::role(Role::Drafts).into(),
+                [mailbox::query::Comparator::name()].into()
+            )
+            .await
+            .unwrap()
+            .ids()
+            .is_empty()
+    );
     assert_eq!(
         client
             .mailbox_query(
@@ -642,6 +658,19 @@ fn build_create_query(
             build_create_query(request, mailbox_map, children, create_mailbox_id.into());
         }
     }
+}
+
+pub async fn destroy_all_mailboxes_for_account(account_id: u32) {
+    let mut client = Client::new()
+        .credentials(Credentials::basic("admin", "secret"))
+        .follow_redirects(["127.0.0.1"])
+        .timeout(Duration::from_secs(3600))
+        .accept_invalid_certs(true)
+        .connect("https://127.0.0.1:8899")
+        .await
+        .unwrap();
+    client.set_default_account_id(Id::from(account_id));
+    destroy_all_mailboxes_no_wait(&client).await;
 }
 
 pub async fn destroy_all_mailboxes(test: &JMAPTest) {

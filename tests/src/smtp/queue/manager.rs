@@ -1,17 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::time::Duration;
-
-use mail_auth::hickory_resolver::proto::op::ResponseCode;
-
-use smtp::queue::{spool::SmtpSpool, Domain, Message, Schedule, Status};
+use crate::smtp::{
+    TestSMTP,
+    queue::{QueuedEvents, build_rcpt},
+};
+use common::config::smtp::queue::QueueName;
+use smtp::queue::{
+    Error, ErrorDetails, Message, MessageWrapper, Recipient, Status, spool::SmtpSpool,
+};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
 use store::write::now;
-
-use crate::smtp::TestSMTP;
 
 const CONFIG: &str = r#"
 [session.ehlo]
@@ -31,31 +36,33 @@ async fn queue_due() {
     let qr = &local.queue_receiver;
 
     let mut message = new_message(0);
-    message.domains.push(domain("c", 3, 8, 9));
-    let due = message.next_delivery_event();
-    message.save_changes(&core, 0.into(), due.into()).await;
+    message.message.recipients.push(build_rcpt("c", 3, 8, 9));
+    message.save_changes(&core, 0.into()).await;
 
     let mut message = new_message(1);
-    message.domains.push(domain("b", 2, 6, 7));
-    let due = message.next_delivery_event();
-    message.save_changes(&core, 0.into(), due.into()).await;
+    message.message.recipients.push(build_rcpt("b", 2, 6, 7));
+    message.save_changes(&core, 0.into()).await;
 
     let mut message = new_message(2);
-    message.domains.push(domain("a", 1, 4, 5));
-    let due = message.next_delivery_event();
-    message.save_changes(&core, 0.into(), due.into()).await;
+    message.message.recipients.push(build_rcpt("a", 1, 4, 5));
+    message.save_changes(&core, 0.into()).await;
 
     for domain in vec!["a", "b", "c"].into_iter() {
         let now = now();
-        for queue_event in core.next_event().await {
-            if queue_event.due > now {
-                let wake_up = queue_event.due - now;
-                assert_eq!(wake_up, 1);
-                std::thread::sleep(Duration::from_secs(wake_up));
-            }
-            if let Some(message) = core.read_message(queue_event.queue_id).await {
-                message.domain(domain);
-                message.remove(&core, queue_event.due).await;
+        let queued = core.all_queued_messages().await;
+        if queued.messages.is_empty() {
+            let wake_up = queued.next_refresh - now;
+            assert_eq!(wake_up, 1);
+            std::thread::sleep(Duration::from_secs(wake_up));
+        }
+
+        for queue_event in core.all_queued_messages().await.messages {
+            if let Some(message) = core
+                .read_message(queue_event.queue_id, QueueName::default())
+                .await
+            {
+                message.message.rcpt(domain);
+                message.remove(&core, queue_event.due.into()).await;
             } else {
                 panic!("Message not found");
             }
@@ -67,108 +74,162 @@ async fn queue_due() {
 
 #[test]
 fn delivery_events() {
-    let mut message = new_message(0);
+    let mut message = new_message(0).message;
+    message.created = now();
 
-    message.domains.push(domain("a", 1, 2, 3));
-    message.domains.push(domain("b", 4, 5, 6));
-    message.domains.push(domain("c", 7, 8, 9));
+    message.recipients.push(build_rcpt("a", 1, 2, 3));
+    message.recipients.push(build_rcpt("b", 4, 5, 6));
+    message.recipients.push(build_rcpt("c", 7, 8, 9));
 
     for t in 0..2 {
-        assert_eq!(message.next_event().unwrap(), message.domain("a").retry.due);
-        assert_eq!(message.next_delivery_event(), message.domain("a").retry.due);
         assert_eq!(
-            message
-                .next_event_after(message.domain("a").expires)
-                .unwrap(),
-            message.domain("b").retry.due
+            message.next_event(None).unwrap(),
+            message.rcpt("a").retry.due
         );
         assert_eq!(
-            message
-                .next_event_after(message.domain("b").expires)
-                .unwrap(),
-            message.domain("c").retry.due
+            message.next_delivery_event(None).unwrap(),
+            message.rcpt("a").retry.due
         );
         assert_eq!(
-            message
-                .next_event_after(message.domain("c").notify.due)
-                .unwrap(),
-            message.domain("c").expires
+            next_event_after(
+                &message,
+                None,
+                message.rcpt("a").expiration_time(message.created).unwrap()
+            )
+            .unwrap(),
+            message.rcpt("b").retry.due
         );
-        assert!(message
-            .next_event_after(message.domain("c").expires)
-            .is_none());
+        assert_eq!(
+            next_event_after(
+                &message,
+                None,
+                message.rcpt("b").expiration_time(message.created).unwrap()
+            )
+            .unwrap(),
+            message.rcpt("c").retry.due
+        );
+        assert_eq!(
+            next_event_after(&message, None, message.rcpt("c").notify.due).unwrap(),
+            message.rcpt("c").expiration_time(message.created).unwrap()
+        );
+        assert!(
+            next_event_after(
+                &message,
+                None,
+                message.rcpt("c").expiration_time(message.created).unwrap()
+            )
+            .is_none()
+        );
 
         if t == 0 {
-            message.domains.reverse();
+            message.recipients.reverse();
         } else {
-            message.domains.swap(0, 1);
+            message.recipients.swap(0, 1);
         }
     }
 
-    message.domain_mut("a").set_status(
-        mail_auth::Error::DnsRecordNotFound(ResponseCode::BADCOOKIE),
-        &[],
+    message.rcpt_mut("a").status = Status::PermanentFailure(ErrorDetails {
+        entity: "localhost".into(),
+        details: Error::ConcurrencyLimited,
+    });
+    assert_eq!(
+        message.next_event(None).unwrap(),
+        message.rcpt("b").retry.due
     );
-    assert_eq!(message.next_event().unwrap(), message.domain("b").retry.due);
-    assert_eq!(message.next_delivery_event(), message.domain("b").retry.due);
+    assert_eq!(
+        message.next_delivery_event(None).unwrap(),
+        message.rcpt("b").retry.due
+    );
 
-    message.domain_mut("b").set_status(
-        mail_auth::Error::DnsRecordNotFound(ResponseCode::BADCOOKIE),
-        &[],
+    message.rcpt_mut("b").status = Status::PermanentFailure(ErrorDetails {
+        entity: "localhost".into(),
+        details: Error::ConcurrencyLimited,
+    });
+    assert_eq!(
+        message.next_event(None).unwrap(),
+        message.rcpt("c").retry.due
     );
-    assert_eq!(message.next_event().unwrap(), message.domain("c").retry.due);
-    assert_eq!(message.next_delivery_event(), message.domain("c").retry.due);
+    assert_eq!(
+        message.next_delivery_event(None).unwrap(),
+        message.rcpt("c").retry.due
+    );
 
-    message.domain_mut("c").set_status(
-        mail_auth::Error::DnsRecordNotFound(ResponseCode::BADCOOKIE),
-        &[],
-    );
-    assert!(message.next_event().is_none());
+    message.rcpt_mut("c").status = Status::PermanentFailure(ErrorDetails {
+        entity: "localhost".into(),
+        details: Error::ConcurrencyLimited,
+    });
+    assert!(message.next_event(None).is_none());
 }
 
-pub fn new_message(queue_id: u64) -> Message {
-    Message {
-        size: 0,
+pub fn new_message(queue_id: u64) -> MessageWrapper {
+    MessageWrapper {
         queue_id,
         span_id: 0,
-        created: 0,
-        return_path: "sender@foobar.org".to_string(),
-        return_path_lcase: "".to_string(),
-        return_path_domain: "foobar.org".to_string(),
-        recipients: vec![],
-        domains: vec![],
-        flags: 0,
-        env_id: None,
-        priority: 0,
-        quota_keys: vec![],
-        blob_hash: Default::default(),
+        queue_name: QueueName::default(),
+        is_multi_queue: false,
+        message: Message {
+            size: 0,
+            created: now(),
+            return_path: "sender@foobar.org".into(),
+            return_path_lcase: "".into(),
+            return_path_domain: "foobar.org".into(),
+            recipients: vec![],
+            flags: 0,
+            env_id: None,
+            priority: 0,
+            quota_keys: vec![],
+            blob_hash: Default::default(),
+            received_from_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            received_via_port: 0,
+        },
     }
 }
 
-fn domain(domain: &str, retry: u64, notify: u64, expires: u64) -> Domain {
-    Domain {
-        domain: domain.to_string(),
-        retry: Schedule::later(Duration::from_secs(retry)),
-        notify: Schedule::later(Duration::from_secs(notify)),
-        expires: now() + expires,
-        status: Status::Scheduled,
+fn next_event_after(message: &Message, queue: Option<QueueName>, instant: u64) -> Option<u64> {
+    let mut next_event = None;
+
+    for rcpt in &message.recipients {
+        if matches!(rcpt.status, Status::Scheduled | Status::TemporaryFailure(_))
+            && queue.is_none_or(|q| rcpt.queue == q)
+        {
+            if rcpt.retry.due > instant
+                && next_event.as_ref().is_none_or(|ne| rcpt.retry.due.lt(ne))
+            {
+                next_event = rcpt.retry.due.into();
+            }
+            if rcpt.notify.due > instant
+                && next_event.as_ref().is_none_or(|ne| rcpt.notify.due.lt(ne))
+            {
+                next_event = rcpt.notify.due.into();
+            }
+            if let Some(expires) = rcpt.expiration_time(message.created) {
+                if expires > instant && next_event.as_ref().is_none_or(|ne| expires.lt(ne)) {
+                    next_event = expires.into();
+                }
+            }
+        }
     }
+
+    next_event
 }
 
 pub trait TestMessage {
-    fn domain(&self, name: &str) -> &Domain;
-    fn domain_mut(&mut self, name: &str) -> &mut Domain;
+    fn rcpt(&self, name: &str) -> &Recipient;
+    fn rcpt_mut(&mut self, name: &str) -> &mut Recipient;
 }
 
 impl TestMessage for Message {
-    fn domain(&self, name: &str) -> &Domain {
-        self.domains
+    fn rcpt(&self, name: &str) -> &Recipient {
+        self.recipients
             .iter()
-            .find(|d| d.domain == name)
-            .unwrap_or_else(|| panic!("Expected domain {name} not found in {:?}", self.domains))
+            .find(|d| d.address_lcase == name)
+            .unwrap_or_else(|| panic!("Expected rcpt {name} not found in {:?}", self.recipients))
     }
 
-    fn domain_mut(&mut self, name: &str) -> &mut Domain {
-        self.domains.iter_mut().find(|d| d.domain == name).unwrap()
+    fn rcpt_mut(&mut self, name: &str) -> &mut Recipient {
+        self.recipients
+            .iter_mut()
+            .find(|d| d.address_lcase == name)
+            .unwrap()
     }
 }

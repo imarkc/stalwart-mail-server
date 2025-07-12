@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::{auth::AccessToken, Server};
+use common::{Server, auth::AccessToken};
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     method::copy::{CopyBlobRequest, CopyBlobResponse},
@@ -14,8 +14,8 @@ use trc::AddContext;
 
 use std::future::Future;
 use store::{
-    write::{now, BatchBuilder, BlobOp},
-    BlobClass, Serialize,
+    BlobClass, SerializeInfallible,
+    write::{BatchBuilder, BlobOp, now},
 };
 use utils::map::vec_map::VecMap;
 
@@ -55,7 +55,7 @@ impl BlobCopy for Server {
                     0u32.serialize(),
                 );
                 self.store()
-                    .write(batch)
+                    .write(batch.build_all())
                     .await
                     .caused_by(trc::location!())?;
                 let dest_blob_id = BlobId {

@@ -1,13 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use nlp::tokenizers::types::{TokenType, TypesTokenizer};
-use sieve::{runtime::Variable, FunctionMap};
+use sieve::{FunctionMap, runtime::Variable};
 
-use crate::scripts::functions::{text::tokenize_words, ApplyString};
+use crate::scripts::functions::{ApplyString, text::tokenize_words};
 
 use super::PluginContext;
 

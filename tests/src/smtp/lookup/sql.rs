@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,13 +7,13 @@
 use std::time::{Duration, Instant};
 
 use common::{
-    expr::{tokenizer::TokenMap, *},
     Core,
+    expr::{tokenizer::TokenMap, *},
 };
 
 use directory::{
-    backend::internal::{manage::ManageDirectory, PrincipalField, PrincipalValue},
-    Principal, QueryBy, Type,
+    QueryBy, Type,
+    backend::internal::{PrincipalField, PrincipalSet, PrincipalValue, manage::ManageDirectory},
 };
 use mail_auth::MX;
 use store::Stores;
@@ -22,8 +22,8 @@ use utils::config::Config;
 use crate::{
     directory::DirectoryStore,
     smtp::{
-        session::{TestSession, VerifyResponse},
         DnsCache, TempDir, TestSMTP,
+        session::{TestSession, VerifyResponse},
     },
 };
 use smtp::{core::Session, queue::RecipientDomain};
@@ -158,7 +158,7 @@ async fn lookup_sql() {
     for name in ["foobar.org", "foobar.net"] {
         internal_store
             .create_principal(
-                Principal::new(0, Type::Domain).with_field(PrincipalField::Name, name),
+                PrincipalSet::new(0, Type::Domain).with_field(PrincipalField::Name, name),
                 None,
                 None,
             )
@@ -169,7 +169,7 @@ async fn lookup_sql() {
     // Create lists
     internal_store
         .create_principal(
-            Principal::new(0, Type::List)
+            PrincipalSet::new(0, Type::List)
                 .with_field(PrincipalField::Name, "support@foobar.org")
                 .with_field(PrincipalField::Emails, "support@foobar.org")
                 .with_field(
@@ -183,7 +183,7 @@ async fn lookup_sql() {
         .unwrap();
     internal_store
         .create_principal(
-            Principal::new(0, Type::List)
+            PrincipalSet::new(0, Type::List)
                 .with_field(PrincipalField::Name, "sales@foobar.org")
                 .with_field(PrincipalField::Emails, "sales@foobar.org")
                 .with_field(
@@ -236,7 +236,7 @@ async fn lookup_sql() {
         .ehlo("mx.foobar.org")
         .await
         .assert_contains("REQUIRETLS");
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session
         .ehlo("mx1.foobar.org")

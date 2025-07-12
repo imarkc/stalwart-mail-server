@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -174,7 +174,7 @@ async fn sign_and_seal() {
     // Test DKIM signing
     let mut qr = test.queue_receiver;
     let mut session = Session::test(test.server);
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.eval_session_params().await;
     session.ehlo("mx.example.com").await;
     session

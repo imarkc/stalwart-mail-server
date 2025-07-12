@@ -1,19 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use crate::{
-    parser::{json::Parser, Ignore, JsonObjectParser, Token},
+    parser::{Ignore, JsonObjectParser, Token, json::Parser},
     request::{
-        reference::{MaybeReference, ResultReference},
         RequestProperty,
+        reference::{MaybeReference, ResultReference},
     },
     types::id::Id,
 };
 
-use super::query::{parse_filter, Filter};
+use super::query::{Filter, parse_filter};
 
 #[derive(Debug, Clone)]
 pub struct GetSearchSnippetRequest {

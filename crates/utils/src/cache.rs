@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -12,10 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mail_auth::{ResolverCache, Txt, MX};
+use mail_auth::{MX, ResolverCache, Txt};
 use quick_cache::{
-    sync::{DefaultLifecycle, PlaceholderGuard},
     Equivalent, Weighter,
+    sync::{DefaultLifecycle, PlaceholderGuard},
 };
 
 use crate::config::Config;

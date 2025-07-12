@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use mail_auth::common::resolver::ToReverseName;
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
-use sieve::{runtime::Variable, Context};
+use sieve::{Context, runtime::Variable};
 
 use super::ApplyString;
 

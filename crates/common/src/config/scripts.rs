@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,13 +7,16 @@
 use std::{sync::Arc, time::Duration};
 
 use ahash::AHashMap;
-use sieve::{compiler::grammar::Capability, Compiler, Runtime, Sieve};
+use sieve::{Compiler, Runtime, Sieve, compiler::grammar::Capability};
 use store::Stores;
 use utils::config::Config;
 
-use crate::scripts::{
-    functions::{register_functions_trusted, register_functions_untrusted},
-    plugins::RegisterSievePlugins,
+use crate::{
+    VERSION_PUBLIC,
+    scripts::{
+        functions::{register_functions_trusted, register_functions_untrusted},
+        plugins::RegisterSievePlugins,
+    },
 };
 
 use super::{if_block::IfBlock, smtp::SMTP_RCPT_TO_VARS, tokenizer::TokenMap};
@@ -182,8 +185,8 @@ impl Scripting {
                     .unwrap_or("Auto: ")
                     .to_string(),
             )
-            .with_env_variable("name", "Stalwart Mail Server")
-            .with_env_variable("version", env!("CARGO_PKG_VERSION"))
+            .with_env_variable("name", "Stalwart Server")
+            .with_env_variable("version", VERSION_PUBLIC)
             .with_env_variable("location", "MS")
             .with_env_variable("phase", "during");
 
@@ -272,11 +275,7 @@ impl Scripting {
 
         // Parse trusted scripts
         let mut trusted_scripts = AHashMap::new();
-        for id in config
-            .sub_keys("sieve.trusted.scripts", ".contents")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id in config.sub_keys("sieve.trusted.scripts", ".contents") {
             match trusted_compiler.compile(
                 config
                     .value(("sieve.trusted.scripts", id.as_str(), "contents"))
@@ -295,11 +294,7 @@ impl Scripting {
 
         // Parse untrusted scripts
         let mut untrusted_scripts = AHashMap::new();
-        for id in config
-            .sub_keys("sieve.untrusted.scripts", ".contents")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id in config.sub_keys("sieve.untrusted.scripts", ".contents") {
             match untrusted_compiler.compile(
                 config
                     .value(("sieve.untrusted.scripts", id.as_str(), "contents"))

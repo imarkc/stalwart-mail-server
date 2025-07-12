@@ -1,8 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+
+use compact_str::{CompactString, ToCompactString};
 
 use crate::Command;
 use crate::protocol::status::Status;
@@ -21,7 +23,7 @@ impl Request<Command> {
                         .next()
                         .unwrap()
                         .unwrap_string()
-                        .map_err(|v| bad(self.tag.clone(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                     version,
                 );
                 let mut items = Vec::with_capacity(len - 2);
@@ -31,7 +33,7 @@ impl Request<Command> {
                     .is_none_or(|token| !token.is_parenthesis_open())
                 {
                     return Err(bad(
-                        self.tag.to_string(),
+                        self.tag.to_compact_string(),
                         "Expected parenthesis after mailbox name.",
                     ));
                 }
@@ -42,12 +44,13 @@ impl Request<Command> {
                         Token::ParenthesisClose => break,
                         Token::Argument(value) => {
                             items.push(
-                                Status::parse(&value).map_err(|v| bad(self.tag.to_string(), v))?,
+                                Status::parse(&value)
+                                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                             );
                         }
                         _ => {
                             return Err(bad(
-                                self.tag.to_string(),
+                                self.tag.to_compact_string(),
                                 "Invalid status return option argument.",
                             ));
                         }
@@ -61,7 +64,10 @@ impl Request<Command> {
                         items,
                     })
                 } else {
-                    Err(bad(self.tag, "At least one status item is required."))
+                    Err(bad(
+                        CompactString::from_string_buffer(self.tag),
+                        "At least one status item is required.",
+                    ))
                 }
             }
         }
@@ -114,8 +120,8 @@ mod tests {
                 .parse_status(ProtocolVersion::Rev2)
                 .unwrap(),
             status::Arguments {
-                tag: "A042".to_string(),
-                mailbox_name: "blurdybloop".to_string(),
+                tag: "A042".into(),
+                mailbox_name: "blurdybloop".into(),
                 items: vec![status::Status::UidNext, status::Status::Messages],
             }
         );

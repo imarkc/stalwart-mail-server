@@ -1,11 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 pub mod references;
 pub mod serialize;
+pub mod status;
 
 use std::collections::HashMap;
 
@@ -25,7 +26,7 @@ use crate::{
         upload::BlobUploadResponse,
         validate::ValidateSieveScriptResponse,
     },
-    request::{echo::Echo, method::MethodName, Call},
+    request::{Call, echo::Echo, method::MethodName},
     types::any_id::AnyId,
 };
 

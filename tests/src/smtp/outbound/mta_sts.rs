@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -14,16 +14,16 @@ use common::{
     ipc::PolicyType,
 };
 use mail_auth::{
+    MX,
     common::parse::TxtRecordParser,
     mta_sts::{MtaSts, ReportUri, TlsRpt},
     report::tlsrpt::ResultType,
-    MX,
 };
 
 use crate::smtp::{
+    DnsCache, TestSMTP,
     inbound::{TestMessage, TestQueueEvent, TestReportingEvent},
     session::{TestSession, VerifyResponse},
-    DnsCache, TestSMTP,
 };
 use smtp::outbound::mta_sts::{lookup::STS_TEST_POLICY, parse::ParsePolicy};
 
@@ -31,8 +31,9 @@ const LOCAL: &str = r#"
 [session.rcpt]
 relay = true
 
-[queue.outbound.tls]
+[queue.tls.default]
 mta-sts = "require"
+allow-invalid-certs = false
 
 [report.tls.aggregate]
 send = "weekly"
@@ -91,7 +92,7 @@ async fn mta_sts_verify() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -109,7 +110,8 @@ async fn mta_sts_verify() {
         .read_lines(&local.queue_receiver)
         .await
         .assert_contains("<bill@foobar.org> (MTA-STS failed to authenticate")
-        .assert_contains("Record not found");
+        .assert_contains("Record not f=")
+        .assert_contains("ound");
     local.queue_receiver.read_event().await.assert_done();
 
     // Expect TLS failure report

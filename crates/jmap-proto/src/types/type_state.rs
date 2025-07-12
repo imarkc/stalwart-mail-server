@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,10 +7,9 @@
 use std::fmt::Display;
 
 use serde::Serialize;
-use store::write::{DeserializeFrom, SerializeInto};
-use utils::map::bitmap::BitmapItem;
+use utils::map::bitmap::{BitmapItem, ShortId};
 
-use crate::parser::{json::Parser, JsonObjectParser};
+use crate::parser::{JsonObjectParser, json::Parser};
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Copy, Serialize)]
 #[repr(u8)]
@@ -41,7 +40,19 @@ pub enum DataType {
     Quota = 11,
     #[serde(rename = "SieveScript")]
     SieveScript = 12,
-    None = 13,
+    #[serde(rename = "Calendar")]
+    Calendar = 13,
+    #[serde(rename = "CalendarEvent")]
+    CalendarEvent = 14,
+    #[serde(rename = "CalendarEventNotification")]
+    CalendarEventNotification = 15,
+    #[serde(rename = "AddressBook")]
+    AddressBook = 16,
+    #[serde(rename = "ContactCard")]
+    ContactCard = 17,
+    #[serde(rename = "FileNode")]
+    FileNode = 18,
+    None = 19,
 }
 
 impl BitmapItem for DataType {
@@ -70,6 +81,12 @@ impl From<u64> for DataType {
             10 => DataType::Mdn,
             11 => DataType::Quota,
             12 => DataType::SieveScript,
+            13 => DataType::Calendar,
+            14 => DataType::CalendarEvent,
+            15 => DataType::CalendarEventNotification,
+            16 => DataType::AddressBook,
+            17 => DataType::ContactCard,
+            18 => DataType::FileNode,
             _ => {
                 debug_assert!(false, "Invalid type_state value: {}", value);
                 DataType::None
@@ -156,6 +173,25 @@ impl TryFrom<&str> for DataType {
 }
 
 impl DataType {
+    pub fn try_from_id(value: ShortId, is_container: bool) -> Option<Self> {
+        match (value.0, is_container) {
+            (0, false) => DataType::Email.into(),
+            (0, true) => DataType::Mailbox.into(),
+            (1, _) => DataType::Thread.into(),
+            (2, true) => DataType::Calendar.into(),
+            (2, false) => DataType::CalendarEvent.into(),
+            (3, true) => DataType::AddressBook.into(),
+            (3, false) => DataType::ContactCard.into(),
+            (4, _) => DataType::FileNode.into(),
+            (5, _) => DataType::Identity.into(),
+            (6, _) => DataType::EmailSubmission.into(),
+            (7, _) => DataType::SieveScript.into(),
+            _ => None,
+        }
+    }
+}
+
+impl DataType {
     pub fn as_str(&self) -> &'static str {
         match self {
             DataType::Email => "Email",
@@ -171,6 +207,12 @@ impl DataType {
             DataType::Mdn => "MDN",
             DataType::Quota => "Quota",
             DataType::SieveScript => "SieveScript",
+            DataType::Calendar => "Calendar",
+            DataType::CalendarEvent => "CalendarEvent",
+            DataType::CalendarEventNotification => "CalendarEventNotification",
+            DataType::AddressBook => "AddressBook",
+            DataType::ContactCard => "ContactCard",
+            DataType::FileNode => "FileNode",
             DataType::None => "",
         }
     }
@@ -179,33 +221,6 @@ impl DataType {
 impl Display for DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
-    }
-}
-
-impl SerializeInto for DataType {
-    fn serialize_into(&self, buf: &mut Vec<u8>) {
-        buf.push(*self as u8);
-    }
-}
-
-impl DeserializeFrom for DataType {
-    fn deserialize_from(bytes: &mut std::slice::Iter<'_, u8>) -> Option<Self> {
-        match *bytes.next()? {
-            0 => Some(DataType::Email),
-            1 => Some(DataType::EmailDelivery),
-            2 => Some(DataType::EmailSubmission),
-            3 => Some(DataType::Mailbox),
-            4 => Some(DataType::Thread),
-            5 => Some(DataType::Identity),
-            6 => Some(DataType::Core),
-            7 => Some(DataType::PushSubscription),
-            8 => Some(DataType::SearchSnippet),
-            9 => Some(DataType::VacationResponse),
-            10 => Some(DataType::Mdn),
-            11 => Some(DataType::Quota),
-            12 => Some(DataType::SieveScript),
-            _ => None,
-        }
     }
 }
 

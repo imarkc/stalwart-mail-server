@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -12,9 +12,9 @@ use std::{
 };
 
 use mail_auth::{
+    IpLookupStrategy,
     common::crypto::{Algorithm, HashAlgorithm},
     dkim::Canonicalization,
-    IpLookupStrategy,
 };
 use smtp_proto::MtPriority;
 
@@ -104,30 +104,51 @@ impl Config {
         }
     }
 
-    pub fn sub_keys<'x, 'y: 'x>(
-        &'y self,
-        prefix: impl AsKey,
-        suffix: &'y str,
-    ) -> impl Iterator<Item = &'x str> + 'x {
+    pub fn sub_keys(&self, prefix: impl AsKey, suffix: &str) -> Vec<String> {
         let mut last_key = "";
         let prefix = prefix.as_prefix();
 
-        self.keys.keys().filter_map(move |key| {
-            let key = key.strip_prefix(&prefix)?;
-            let key = if !suffix.is_empty() {
-                key.strip_suffix(suffix)?
-            } else if let Some((key, _)) = key.split_once('.') {
-                key
-            } else {
-                key
-            };
-            if last_key != key {
-                last_key = key;
-                Some(key)
-            } else {
-                None
-            }
-        })
+        self.keys
+            .keys()
+            .filter_map(move |key| {
+                let key = key.strip_prefix(&prefix)?;
+                let key = if !suffix.is_empty() {
+                    key.strip_suffix(suffix)?
+                } else if let Some((key, _)) = key.split_once('.') {
+                    key
+                } else {
+                    key
+                };
+                if last_key != key {
+                    last_key = key;
+                    Some(key.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub fn sub_keys_with_suffixes(&self, prefix: impl AsKey, suffixes: &[&str]) -> Vec<String> {
+        let mut last_key = "";
+        let prefix = prefix.as_prefix();
+
+        self.keys
+            .keys()
+            .filter_map(move |key| {
+                let key = key.strip_prefix(&prefix)?;
+                let key = suffixes
+                    .iter()
+                    .filter_map(|suffix| key.strip_suffix(suffix))
+                    .next()?;
+                if last_key != key {
+                    last_key = key;
+                    Some(key.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn prefix<'x, 'y: 'x>(&'y self, prefix: impl AsKey) -> impl Iterator<Item = &'x str> + 'x {
@@ -216,11 +237,7 @@ impl Config {
 
         if let Some(value) = self.keys.get(&key).and_then(|v| {
             let v = v.trim();
-            if !v.is_empty() {
-                Some(v)
-            } else {
-                None
-            }
+            if !v.is_empty() { Some(v) } else { None }
         }) {
             Some(value)
         } else {
@@ -632,16 +649,6 @@ pub trait AsKey: Clone {
     fn as_prefix(&self) -> String;
 }
 
-impl AsKey for &str {
-    fn as_key(&self) -> String {
-        self.to_string()
-    }
-
-    fn as_prefix(&self) -> String {
-        format!("{self}.")
-    }
-}
-
 impl AsKey for String {
     fn as_key(&self) -> String {
         self.to_string()
@@ -662,53 +669,111 @@ impl AsKey for &String {
     }
 }
 
-impl AsKey for (&str, &str) {
+impl AsKey for &str {
     fn as_key(&self) -> String {
-        format!("{}.{}", self.0, self.1)
+        self.to_string()
     }
 
     fn as_prefix(&self) -> String {
-        format!("{}.{}.", self.0, self.1)
+        format!("{self}.")
     }
 }
 
-impl AsKey for (&str, &String) {
+impl<A, B> AsKey for (A, B)
+where
+    A: AsRef<str> + Clone,
+    B: AsRef<str> + Clone,
+{
     fn as_key(&self) -> String {
-        format!("{}.{}", self.0, self.1)
+        format!("{}.{}", self.0.as_ref(), self.1.as_ref(),)
     }
 
     fn as_prefix(&self) -> String {
-        format!("{}.{}.", self.0, self.1)
+        format!("{}.{}.", self.0.as_ref(), self.1.as_ref(),)
     }
 }
 
-impl AsKey for (&String, &str) {
+impl<A, B, C> AsKey for (A, B, C)
+where
+    A: AsRef<str> + Clone,
+    B: AsRef<str> + Clone,
+    C: AsRef<str> + Clone,
+{
     fn as_key(&self) -> String {
-        format!("{}.{}", self.0, self.1)
+        format!(
+            "{}.{}.{}",
+            self.0.as_ref(),
+            self.1.as_ref(),
+            self.2.as_ref()
+        )
     }
 
     fn as_prefix(&self) -> String {
-        format!("{}.{}.", self.0, self.1)
+        format!(
+            "{}.{}.{}.",
+            self.0.as_ref(),
+            self.1.as_ref(),
+            self.2.as_ref()
+        )
     }
 }
 
-impl AsKey for (&str, &str, &str) {
+impl<A, B, C, D> AsKey for (A, B, C, D)
+where
+    A: AsRef<str> + Clone,
+    B: AsRef<str> + Clone,
+    C: AsRef<str> + Clone,
+    D: AsRef<str> + Clone,
+{
     fn as_key(&self) -> String {
-        format!("{}.{}.{}", self.0, self.1, self.2)
+        format!(
+            "{}.{}.{}.{}",
+            self.0.as_ref(),
+            self.1.as_ref(),
+            self.2.as_ref(),
+            self.3.as_ref()
+        )
     }
 
     fn as_prefix(&self) -> String {
-        format!("{}.{}.{}.", self.0, self.1, self.2)
+        format!(
+            "{}.{}.{}.{}.",
+            self.0.as_ref(),
+            self.1.as_ref(),
+            self.2.as_ref(),
+            self.3.as_ref()
+        )
     }
 }
 
-impl AsKey for (&str, &str, &str, &str) {
+impl<A, B, C, D, E> AsKey for (A, B, C, D, E)
+where
+    A: AsRef<str> + Clone,
+    B: AsRef<str> + Clone,
+    C: AsRef<str> + Clone,
+    D: AsRef<str> + Clone,
+    E: AsRef<str> + Clone,
+{
     fn as_key(&self) -> String {
-        format!("{}.{}.{}.{}", self.0, self.1, self.2, self.3)
+        format!(
+            "{}.{}.{}.{}.{}",
+            self.0.as_ref(),
+            self.1.as_ref(),
+            self.2.as_ref(),
+            self.3.as_ref(),
+            self.4.as_ref()
+        )
     }
 
     fn as_prefix(&self) -> String {
-        format!("{}.{}.{}.{}.", self.0, self.1, self.2, self.3)
+        format!(
+            "{}.{}.{}.{}.{}.",
+            self.0.as_ref(),
+            self.1.as_ref(),
+            self.2.as_ref(),
+            self.3.as_ref(),
+            self.4.as_ref()
+        )
     }
 }
 
@@ -749,16 +814,10 @@ ip = "a:b::1:1"
         let mut config = Config::default();
         config.parse(toml).unwrap();
 
+        assert_eq!(config.sub_keys("queues", ""), ["a", "x", "z"]);
+        assert_eq!(config.sub_keys("servers", ""), ["my relay", "submissions"]);
         assert_eq!(
-            config.sub_keys("queues", "").collect::<Vec<_>>(),
-            ["a", "x", "z"]
-        );
-        assert_eq!(
-            config.sub_keys("servers", "").collect::<Vec<_>>(),
-            ["my relay", "submissions"]
-        );
-        assert_eq!(
-            config.sub_keys("queues.z.retry", "").collect::<Vec<_>>(),
+            config.sub_keys("queues.z.retry", ""),
             ["0000", "0001", "0002", "0003", "0004"]
         );
         assert_eq!(

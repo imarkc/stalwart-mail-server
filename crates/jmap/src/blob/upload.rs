@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::sync::Arc;
 
-use common::{auth::AccessToken, Server};
+use common::{Server, auth::AccessToken};
 use directory::Permission;
 use jmap_proto::{
     error::set::SetError,
@@ -19,9 +19,7 @@ use jmap_proto::{
 
 use trc::AddContext;
 
-use crate::auth::rate_limit::RateLimiter;
-
-use super::{download::BlobDownload, UploadResponse};
+use super::{UploadResponse, download::BlobDownload};
 use std::future::Future;
 
 #[cfg(feature = "test_mode")]

@@ -1,16 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::Server;
+use email::sieve::SieveScript;
 use jmap_proto::{
     method::get::{GetRequest, GetResponse, RequestArguments},
-    object::Object,
-    types::{collection::Collection, property::Property, value::Value},
+    types::{
+        blob::{BlobId, BlobSection},
+        collection::{Collection, SyncCollection},
+        property::Property,
+        value::{Object, Value},
+    },
 };
 use store::BlobClass;
+use trc::AddContext;
 
 use crate::changes::state::StateManager;
 
@@ -52,7 +58,7 @@ impl SieveScriptGet for Server {
         let mut response = GetResponse {
             account_id: request.account_id.into(),
             state: self
-                .get_state(account_id, Collection::SieveScript)
+                .get_state(account_id, SyncCollection::SieveScript)
                 .await?
                 .into(),
             list: Vec::with_capacity(ids.len()),
@@ -66,44 +72,46 @@ impl SieveScriptGet for Server {
                 response.not_found.push(id.into());
                 continue;
             }
-            let mut push = if let Some(push) = self
-                .get_property::<Object<Value>>(
-                    account_id,
-                    Collection::SieveScript,
-                    document_id,
-                    Property::Value,
-                )
+            let sieve_ = if let Some(sieve) = self
+                .get_archive(account_id, Collection::SieveScript, document_id)
                 .await?
             {
-                push
+                sieve
             } else {
                 response.not_found.push(id.into());
                 continue;
             };
+            let sieve = sieve_
+                .unarchive::<SieveScript>()
+                .caused_by(trc::location!())?;
             let mut result = Object::with_capacity(properties.len());
             for property in &properties {
                 match property {
                     Property::Id => {
                         result.append(Property::Id, Value::Id(id));
                     }
-                    Property::Name | Property::IsActive => {
-                        result.append(property.clone(), push.remove(property));
+                    Property::Name => {
+                        result.append(Property::Name, Value::from(&sieve.name));
+                    }
+                    Property::IsActive => {
+                        result.append(Property::IsActive, Value::Bool(sieve.is_active));
                     }
                     Property::BlobId => {
-                        result.append(
-                            Property::BlobId,
-                            match push.remove(&Property::BlobId) {
-                                Value::BlobId(mut blob_id) => {
-                                    blob_id.class = BlobClass::Linked {
-                                        account_id,
-                                        collection: Collection::SieveScript.into(),
-                                        document_id,
-                                    };
-                                    Value::BlobId(blob_id)
-                                }
-                                other => other,
+                        let blob_id = BlobId {
+                            hash: (&sieve.blob_hash).into(),
+                            class: BlobClass::Linked {
+                                account_id,
+                                collection: Collection::SieveScript.into(),
+                                document_id,
                             },
-                        );
+                            section: BlobSection {
+                                size: u32::from(sieve.size) as usize,
+                                ..Default::default()
+                            }
+                            .into(),
+                        };
+
+                        result.append(Property::BlobId, Value::BlobId(blob_id));
                     }
                     property => {
                         result.append(property.clone(), Value::Null);

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,16 +9,16 @@ use std::time::{Duration, Instant};
 use ahash::{AHashMap, HashMap, HashSet};
 use common::config::server::ServerProtocol;
 
-use jmap::api::management::queue::Message;
+use http::management::queue::Message;
 use mail_auth::MX;
 use mail_parser::DateTime;
-use reqwest::{header::AUTHORIZATION, Method, StatusCode};
+use reqwest::{Method, StatusCode, header::AUTHORIZATION};
 
 use crate::{
     jmap::ManagementApi,
-    smtp::{session::TestSession, DnsCache, TestSMTP},
+    smtp::{DnsCache, TestSMTP, session::TestSession},
 };
-use smtp::queue::{manager::SpawnQueue, QueueId, Status};
+use smtp::queue::{QueueId, Status, manager::SpawnQueue};
 
 const LOCAL: &str = r#"
 [storage]
@@ -34,10 +34,11 @@ description = "Superuser"
 secret = "secret"
 class = "admin"
 
-[queue.schedule]
+[queue.schedule.default]
 retry = "1000s"
 notify = "2000s"
 expire = "3000s"
+queue-name = "default"
 
 [session.rcpt]
 relay = true
@@ -138,7 +139,7 @@ async fn manage_queue() {
         .queue_receiver
         .queue_rx
         .spawn(local.server.inner.clone());
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("foobar.net").await;
     for test_num in 0..6 {
@@ -166,6 +167,7 @@ async fn manage_queue() {
             .queue_receiver
             .consume_message(&remote_core)
             .await
+            .message
             .recipients
             .into_iter()
             .map(|r| r.address)
@@ -193,11 +195,9 @@ async fn manage_queue() {
         let (sender, recipients) = envelopes.get(env_id.as_str()).unwrap();
         assert_eq!(&message.return_path, sender);
         'outer: for recipient in recipients {
-            for domain in &message.domains {
-                for rcpt in &domain.recipients {
-                    if &rcpt.address == recipient {
-                        continue 'outer;
-                    }
+            for rcpt in &message.recipients {
+                if &rcpt.address == recipient {
+                    continue 'outer;
                 }
             }
             panic!("Recipient {recipient} not found in message.");
@@ -209,47 +209,43 @@ async fn manage_queue() {
         let next_retry = created + hold_for;
         let next_notify = created + 2000 + hold_for;
         let expires = created + 3000 + hold_for;
-        for domain in &message.domains {
+        for rcpt in &message.recipients {
             if env_id == "c" {
-                let mut dt = *domain.next_retry.as_ref().unwrap();
+                let mut dt = *rcpt.next_retry.as_ref().unwrap();
                 dt.second -= 1;
                 test_search = dt.to_rfc3339();
             }
             if env_id != "f" {
-                assert_eq!(domain.retry_num, 0);
+                // HOLDFOR messages
+                assert_eq!(rcpt.retry_num, 0);
                 assert_timestamp(
-                    domain.next_retry.as_ref().unwrap(),
+                    rcpt.next_retry.as_ref().unwrap(),
                     next_retry,
                     "retry",
                     &message,
                 );
                 assert_timestamp(
-                    domain.next_notify.as_ref().unwrap(),
+                    rcpt.next_notify.as_ref().unwrap(),
                     next_notify,
                     "notify",
                     &message,
                 );
-                assert_timestamp(&domain.expires, expires, "expires", &message);
-                for rcpt in &domain.recipients {
-                    assert_eq!(&rcpt.status, &Status::Scheduled, "{message:#?}");
-                }
+                assert_timestamp(&rcpt.expires.unwrap(), expires, "expires", &message);
+                assert_eq!(&rcpt.status, &Status::Scheduled, "{message:#?}");
+            } else if rcpt.address == "success@foobar.org" {
+                assert_eq!(rcpt.retry_num, 0);
+                assert!(
+                    matches!(&rcpt.status, Status::Completed(_)),
+                    "{:?}",
+                    rcpt.status
+                );
             } else {
-                assert_eq!(domain.retry_num, 1);
-                for rcpt in &domain.recipients {
-                    if rcpt.address == "success@foobar.org" {
-                        assert!(
-                            matches!(&rcpt.status, Status::Completed(_)),
-                            "{:?}",
-                            rcpt.status
-                        );
-                    } else {
-                        assert!(
-                            matches!(&rcpt.status, Status::TemporaryFailure(_)),
-                            "{:?}",
-                            rcpt.status
-                        );
-                    }
-                }
+                assert_eq!(rcpt.retry_num, 1);
+                assert!(
+                    matches!(&rcpt.status, Status::TemporaryFailure(_)),
+                    "{:?}",
+                    rcpt.status
+                );
             }
         }
 
@@ -296,14 +292,15 @@ async fn manage_queue() {
 
     // Retry delivery
     for id in [id_map.get("e").unwrap(), id_map.get("f").unwrap()] {
-        assert!(api
-            .request::<bool>(Method::PATCH, &format!("/api/queue/messages/{id}",))
-            .await
-            .unwrap()
-            .unwrap_data(),);
+        assert!(
+            api.request::<bool>(Method::PATCH, &format!("/api/queue/messages/{id}",))
+                .await
+                .unwrap()
+                .unwrap_data(),
+        );
     }
-    assert!(api
-        .request::<bool>(
+    assert!(
+        api.request::<bool>(
             Method::PATCH,
             &format!(
                 "/api/queue/messages/{}?filter=example1.org&at=2200-01-01T00:00:00Z",
@@ -312,7 +309,8 @@ async fn manage_queue() {
         )
         .await
         .unwrap()
-        .unwrap_data());
+        .unwrap_data()
+    );
 
     // Expect delivery to john@foobar.org
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,6 +319,7 @@ async fn manage_queue() {
             .queue_receiver
             .consume_message(&remote_core)
             .await
+            .message
             .recipients
             .into_iter()
             .map(|r| r.address)
@@ -344,17 +343,17 @@ async fn manage_queue() {
             .next()
             .unwrap()
             .unwrap()
-            .domains
+            .recipients
             .first()
             .unwrap()
             .retry_num,
         2
     );
-    for domain in messages.next().unwrap().unwrap().domains {
-        let next_retry = domain.next_retry.as_ref().unwrap().to_rfc3339();
+    for rcpt in messages.next().unwrap().unwrap().recipients {
+        let next_retry = rcpt.next_retry.as_ref().unwrap().to_rfc3339();
         let matched =
             ["2200-01-01T00:00:00Z", "2199-12-31T23:59:59Z"].contains(&next_retry.as_str());
-        if domain.name == "example1.org" {
+        if rcpt.address.ends_with("example1.org") {
             assert!(matched, "{next_retry}");
         } else {
             assert!(!matched, "{next_retry}");
@@ -408,36 +407,25 @@ async fn manage_queue() {
             assert_eq!(message, None);
         } else {
             let message = message.unwrap();
-            assert!(!message.domains.is_empty());
-            for domain in message.domains {
+            assert!(!message.recipients.is_empty());
+            for rcpt in message.recipients {
                 match id {
                     "a" => {
-                        if domain.name == "example2.org" {
-                            assert_eq!(&domain.status, &Status::Completed("".to_string()));
-                            for rcpt in &domain.recipients {
-                                assert!(matches!(&rcpt.status, Status::PermanentFailure(_)));
-                            }
+                        if rcpt.address.ends_with("example2.org") {
+                            assert!(matches!(&rcpt.status, Status::PermanentFailure(_)));
                         } else {
-                            assert_eq!(&domain.status, &Status::Scheduled);
-                            for rcpt in &domain.recipients {
-                                assert!(matches!(&rcpt.status, Status::Scheduled));
-                            }
+                            assert!(matches!(&rcpt.status, Status::Scheduled));
                         }
                     }
                     "c" => {
-                        assert_eq!(&domain.status, &Status::Scheduled);
-                        if domain.name == "example2.com" {
-                            for rcpt in &domain.recipients {
-                                if rcpt.address == "rcpt6@example2.com" {
-                                    assert!(matches!(&rcpt.status, Status::PermanentFailure(_)));
-                                } else {
-                                    assert!(matches!(&rcpt.status, Status::Scheduled));
-                                }
-                            }
-                        } else {
-                            for rcpt in &domain.recipients {
+                        if rcpt.address.ends_with("example2.com") {
+                            if rcpt.address == "rcpt6@example2.com" {
+                                assert!(matches!(&rcpt.status, Status::PermanentFailure(_)));
+                            } else {
                                 assert!(matches!(&rcpt.status, Status::Scheduled));
                             }
+                        } else {
+                            assert!(matches!(&rcpt.status, Status::Scheduled));
                         }
                     }
                     _ => unreachable!(),
@@ -456,11 +444,12 @@ async fn manage_queue() {
             .len(),
         3
     );
-    assert!(api
-        .request::<bool>(Method::DELETE, "/api/queue/messages?text=example2.com")
-        .await
-        .unwrap()
-        .unwrap_data());
+    assert!(
+        api.request::<bool>(Method::DELETE, "/api/queue/messages?text=example2.com")
+            .await
+            .unwrap()
+            .unwrap_data()
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         api.request::<List<QueueId>>(Method::GET, "/api/queue/messages")
@@ -471,11 +460,12 @@ async fn manage_queue() {
             .len(),
         2
     );
-    assert!(api
-        .request::<bool>(Method::DELETE, "/api/queue/messages")
-        .await
-        .unwrap()
-        .unwrap_data());
+    assert!(
+        api.request::<bool>(Method::DELETE, "/api/queue/messages")
+            .await
+            .unwrap()
+            .unwrap_data()
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         api.request::<List<QueueId>>(Method::GET, "/api/queue/messages")
@@ -508,7 +498,9 @@ fn assert_timestamp(timestamp: &DateTime, expected: i64, ctx: &str, message: &Me
     let timestamp = timestamp.to_timestamp();
     let diff = timestamp - expected;
     if ![-2, -1, 0, 1, 2].contains(&diff) {
-        panic!("Got timestamp {timestamp}, expected {expected} (diff {diff} for {ctx}) for {message:?}");
+        panic!(
+            "Got timestamp {timestamp}, expected {expected} (diff {diff} for {ctx}) for {message:?}"
+        );
     }
 }
 

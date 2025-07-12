@@ -1,16 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::future::Future;
 
-use common::{Server, KV_TRUSTED_REPLY};
+use common::{KV_TRUSTED_REPLY, Server};
 use mail_parser::{HeaderName, HeaderValue};
 use store::dispatch::lookup::KeyValue;
 
-use crate::{modules::bayes::BayesClassifier, SpamFilterContext};
+use crate::{SpamFilterContext, modules::bayes::BayesClassifier};
 
 pub trait SpamFilterAnalyzeTrustedReply: Sync + Send {
     fn spam_filter_analyze_reply_in(
@@ -48,9 +48,9 @@ impl SpamFilterAnalyzeTrustedReply for Server {
                                 return;
                             }
                             Err(err) => {
-                                trc::error!(err
-                                    .span_id(ctx.input.span_id)
-                                    .caused_by(trc::location!()));
+                                trc::error!(
+                                    err.span_id(ctx.input.span_id).caused_by(trc::location!())
+                                );
                             }
                             _ => {}
                         }

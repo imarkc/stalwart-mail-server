@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,12 +7,12 @@
 use std::{iter::Peekable, sync::Arc, vec::IntoIter};
 
 use common::{
-    listener::{SessionResult, SessionStream},
     KV_RATE_LIMIT_IMAP,
+    listener::{SessionResult, SessionStream},
 };
 use imap_proto::{
-    receiver::{self, Request},
     Command, ResponseType, StatusResponse,
+    receiver::{self, Request},
 };
 use trc::SecurityEvent;
 
@@ -56,8 +56,8 @@ impl<T: SessionStream> Session<T> {
                         (&self.state, response.key(trc::Key::Code)),
                         (
                             State::NotAuthenticated { .. },
-                            Some(trc::Value::Static("PARSE"))
-                        )
+                            Some(trc::Value::String(v))
+                        ) if v == "PARSE"
                     ) {
                         match self.server.is_scanner_fail2banned(self.remote_addr).await {
                             Ok(true) => {
@@ -72,9 +72,10 @@ impl<T: SessionStream> Session<T> {
                             }
                             Ok(false) => {}
                             Err(err) => {
-                                trc::error!(err
-                                    .span_id(self.session_id)
-                                    .details("Failed to check for fail2ban"));
+                                trc::error!(
+                                    err.span_id(self.session_id)
+                                        .details("Failed to check for fail2ban")
+                                );
                             }
                         }
                     }

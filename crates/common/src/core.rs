@@ -1,38 +1,47 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{sync::Arc, time::Duration};
-
+use crate::{
+    Inner, Server,
+    auth::{AccessToken, ResourceToken, TenantInfo},
+    config::smtp::{
+        auth::{ArcSealer, DkimSigner, LazySignature, ResolvedSignature, build_signature},
+        queue::{
+            ConnectionStrategy, DEFAULT_QUEUE_NAME, GatewayStrategy, MxConfig, QueueExpiry,
+            QueueName, QueueStrategy, RequireOptional, TlsStrategy, VirtualQueue,
+        },
+    },
+    ipc::{BroadcastEvent, StateEvent},
+};
 use directory::{Directory, QueryBy, Type, backend::internal::manage::ManageDirectory};
 use jmap_proto::types::{
-    blob::BlobId, collection::Collection, property::Property, state::StateChange,
+    blob::BlobId,
+    collection::{Collection, SyncCollection},
+    property::Property,
+    state::StateChange,
+    type_state::DataType,
 };
+use mail_auth::IpLookupStrategy;
 use sieve::Sieve;
+use std::{
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use store::{
     BitmapKey, BlobClass, BlobStore, Deserialize, FtsStore, InMemoryStore, IndexKey, IterateParams,
-    LogKey, Serialize, Store, U32_LEN, ValueKey,
+    Key, LogKey, SUBSPACE_LOGS, SerializeInfallible, Store, U32_LEN, U64_LEN, ValueKey,
     dispatch::DocumentSet,
     roaring::RoaringBitmap,
     write::{
-        BatchBuilder, BitmapClass, BlobOp, DirectoryClass, QueueClass, TagValue, ValueClass,
-        key::DeserializeBigEndian, log::ChangeLogBuilder, now,
+        AlignedBytes, AnyClass, Archive, AssignedIds, BatchBuilder, BlobOp, DirectoryClass,
+        QueueClass, ValueClass, key::DeserializeBigEndian, now,
     },
 };
 use trc::AddContext;
 use utils::BlobHash;
-
-use crate::{
-    ImapId, Inner, MailboxState, Server,
-    auth::{AccessToken, ResourceToken, TenantInfo},
-    config::smtp::{
-        auth::{ArcSealer, DkimSigner, LazySignature, ResolvedSignature, build_signature},
-        queue::RelayHost,
-    },
-    ipc::StateEvent,
-};
 
 impl Server {
     #[inline(always)]
@@ -181,16 +190,148 @@ impl Server {
         })
     }
 
-    pub fn get_relay_host(&self, name: &str, session_id: u64) -> Option<&RelayHost> {
-        self.core.smtp.queue.relay_hosts.get(name).or_else(|| {
-            trc::event!(
-                Smtp(trc::SmtpEvent::RemoteIdNotFound),
-                Id = name.to_string(),
-                SpanId = session_id,
-            );
+    pub fn get_gateway_or_default(&self, name: &str, session_id: u64) -> &GatewayStrategy {
+        static LOCAL_GATEWAY: GatewayStrategy = GatewayStrategy::Local;
+        static MX_GATEWAY: GatewayStrategy = GatewayStrategy::Mx(MxConfig {
+            max_mx: 5,
+            max_multi_homed: 2,
+            ip_lookup_strategy: IpLookupStrategy::Ipv4thenIpv6,
+        });
+        self.core
+            .smtp
+            .queue
+            .gateway_strategy
+            .get(name)
+            .unwrap_or_else(|| match name {
+                "local" => &LOCAL_GATEWAY,
+                "mx" => &MX_GATEWAY,
+                _ => {
+                    trc::event!(
+                        Smtp(trc::SmtpEvent::IdNotFound),
+                        Id = name.to_string(),
+                        Details = "Gateway not found",
+                        SpanId = session_id,
+                    );
+                    &MX_GATEWAY
+                }
+            })
+    }
 
-            None
-        })
+    pub fn get_virtual_queue_or_default(&self, name: &QueueName) -> &VirtualQueue {
+        static DEFAULT_QUEUE: VirtualQueue = VirtualQueue { threads: 25 };
+        self.core
+            .smtp
+            .queue
+            .virtual_queues
+            .get(name)
+            .unwrap_or_else(|| {
+                if name != &DEFAULT_QUEUE_NAME {
+                    trc::event!(
+                        Smtp(trc::SmtpEvent::IdNotFound),
+                        Id = name.to_string(),
+                        Details = "Virtual queue not found",
+                    );
+                }
+
+                &DEFAULT_QUEUE
+            })
+    }
+
+    pub fn get_queue_or_default(&self, name: &str, session_id: u64) -> &QueueStrategy {
+        static DEFAULT_SCHEDULE: LazyLock<QueueStrategy> = LazyLock::new(|| QueueStrategy {
+            retry: vec![
+                120,  // 2 minutes
+                300,  // 5 minutes
+                600,  // 10 minutes
+                900,  // 15 minutes
+                1800, // 30 minutes
+                3600, // 1 hour
+                7200, // 2 hours
+            ],
+            notify: vec![
+                86400,  // 1 day
+                259200, // 3 days
+            ],
+            expiry: QueueExpiry::Duration(432000), // 5 days
+            virtual_queue: QueueName::default(),
+        });
+        self.core
+            .smtp
+            .queue
+            .queue_strategy
+            .get(name)
+            .unwrap_or_else(|| {
+                if name != "default" {
+                    trc::event!(
+                        Smtp(trc::SmtpEvent::IdNotFound),
+                        Id = name.to_string(),
+                        Details = "Queue strategy not found",
+                        SpanId = session_id,
+                    );
+                }
+
+                &DEFAULT_SCHEDULE
+            })
+    }
+
+    pub fn get_tls_or_default(&self, name: &str, session_id: u64) -> &TlsStrategy {
+        static DEFAULT_TLS: TlsStrategy = TlsStrategy {
+            dane: RequireOptional::Optional,
+            mta_sts: RequireOptional::Optional,
+            tls: RequireOptional::Optional,
+            allow_invalid_certs: false,
+            timeout_tls: Duration::from_secs(3 * 60),
+            timeout_mta_sts: Duration::from_secs(5 * 60),
+        };
+        self.core
+            .smtp
+            .queue
+            .tls_strategy
+            .get(name)
+            .unwrap_or_else(|| {
+                if name != "default" {
+                    trc::event!(
+                        Smtp(trc::SmtpEvent::IdNotFound),
+                        Id = name.to_string(),
+                        Details = "TLS strategy not found",
+                        SpanId = session_id,
+                    );
+                }
+
+                &DEFAULT_TLS
+            })
+    }
+
+    pub fn get_connection_or_default(&self, name: &str, session_id: u64) -> &ConnectionStrategy {
+        static DEFAULT_CONNECTION: ConnectionStrategy = ConnectionStrategy {
+            source_ipv4: Vec::new(),
+            source_ipv6: Vec::new(),
+            ehlo_hostname: None,
+            timeout_connect: Duration::from_secs(5 * 60),
+            timeout_greeting: Duration::from_secs(5 * 60),
+            timeout_ehlo: Duration::from_secs(5 * 60),
+            timeout_mail: Duration::from_secs(5 * 60),
+            timeout_rcpt: Duration::from_secs(5 * 60),
+            timeout_data: Duration::from_secs(10 * 60),
+        };
+
+        self.core
+            .smtp
+            .queue
+            .connection_strategy
+            .get(name)
+            .unwrap_or_else(|| {
+                if name != "default" {
+                    trc::event!(
+                        Smtp(trc::SmtpEvent::IdNotFound),
+                        Id = name.to_string(),
+                        Details = "Connection strategy not found",
+                        SpanId = session_id,
+                    );
+                }
+
+                &DEFAULT_CONNECTION
+            })
     }
 
     pub async fn get_used_quota(&self, account_id: u32) -> trc::Result<i64> {
@@ -244,7 +385,7 @@ impl Server {
             .clear(DirectoryClass::UsedQuota(account_id))
             .add(DirectoryClass::UsedQuota(account_id), quota);
         self.store()
-            .write(batch)
+            .write(batch.build_all())
             .await
             .caused_by(trc::location!())
             .map(|_| ())
@@ -267,7 +408,7 @@ impl Server {
         }
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         #[cfg(feature = "enterprise")]
@@ -317,7 +458,7 @@ impl Server {
                 quotas.quota = principal.quota();
 
                 // SPDX-SnippetBegin
-                // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+                // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
                 // SPDX-License-Identifier: LicenseRef-SEL
 
                 #[cfg(feature = "enterprise")]
@@ -348,22 +489,44 @@ impl Server {
         })
     }
 
-    pub async fn get_property<U>(
+    #[inline(always)]
+    pub async fn get_archive(
+        &self,
+        account_id: u32,
+        collection: Collection,
+        document_id: u32,
+    ) -> trc::Result<Option<Archive<AlignedBytes>>> {
+        self.core
+            .storage
+            .data
+            .get_value(ValueKey {
+                account_id,
+                collection: collection.into(),
+                document_id,
+                class: ValueClass::Property(Property::Value.into()),
+            })
+            .await
+            .add_context(|err| {
+                err.caused_by(trc::location!())
+                    .account_id(account_id)
+                    .collection(collection)
+                    .document_id(document_id)
+            })
+    }
+
+    #[inline(always)]
+    pub async fn get_archive_by_property(
         &self,
         account_id: u32,
         collection: Collection,
         document_id: u32,
         property: impl AsRef<Property> + Sync + Send,
-    ) -> trc::Result<Option<U>>
-    where
-        U: Deserialize + 'static,
-    {
+    ) -> trc::Result<Option<Archive<AlignedBytes>>> {
         let property = property.as_ref();
-
         self.core
             .storage
             .data
-            .get_value::<U>(ValueKey {
+            .get_value(ValueKey {
                 account_id,
                 collection: collection.into(),
                 document_id,
@@ -375,26 +538,21 @@ impl Server {
                     .account_id(account_id)
                     .collection(collection)
                     .document_id(document_id)
-                    .id(property.to_string())
             })
     }
 
-    pub async fn get_properties<U, I, P>(
+    pub async fn get_archives<I, CB>(
         &self,
         account_id: u32,
         collection: Collection,
-        iterate: &I,
-        property: P,
-    ) -> trc::Result<Vec<(u32, U)>>
+        documents: &I,
+        mut cb: CB,
+    ) -> trc::Result<()>
     where
         I: DocumentSet + Send + Sync,
-        P: AsRef<Property> + Sync + Send,
-        U: Deserialize + 'static,
+        CB: FnMut(u32, Archive<AlignedBytes>) -> trc::Result<bool> + Send + Sync,
     {
-        let property: u8 = property.as_ref().into();
         let collection: u8 = collection.into();
-        let expected_results = iterate.len();
-        let mut results = Vec::with_capacity(expected_results);
 
         self.core
             .storage
@@ -404,21 +562,21 @@ impl Server {
                     ValueKey {
                         account_id,
                         collection,
-                        document_id: iterate.min(),
-                        class: ValueClass::Property(property),
+                        document_id: documents.min(),
+                        class: ValueClass::Property(Property::Value.into()),
                     },
                     ValueKey {
                         account_id,
                         collection,
-                        document_id: iterate.max(),
-                        class: ValueClass::Property(property),
+                        document_id: documents.max(),
+                        class: ValueClass::Property(Property::Value.into()),
                     },
                 ),
                 |key, value| {
                     let document_id = key.deserialize_be_u32(key.len() - U32_LEN)?;
-                    if iterate.contains(document_id) {
-                        results.push((document_id, U::deserialize(value)?));
-                        Ok(expected_results == 0 || results.len() < expected_results)
+                    if documents.contains(document_id) {
+                        <Archive<AlignedBytes> as Deserialize>::deserialize(value)
+                            .and_then(|archive| cb(document_id, archive))
                     } else {
                         Ok(true)
                     }
@@ -429,11 +587,10 @@ impl Server {
                 err.caused_by(trc::location!())
                     .account_id(account_id)
                     .collection(collection)
-                    .id(property.to_string())
             })
-            .map(|_| results)
     }
 
+    #[inline(always)]
     pub async fn get_document_ids(
         &self,
         account_id: u32,
@@ -451,37 +608,9 @@ impl Server {
             })
     }
 
-    pub async fn get_tag(
-        &self,
-        account_id: u32,
-        collection: Collection,
-        property: impl AsRef<Property> + Sync + Send,
-        value: impl Into<TagValue<u32>> + Sync + Send,
-    ) -> trc::Result<Option<RoaringBitmap>> {
-        let property = property.as_ref();
-        self.core
-            .storage
-            .data
-            .get_bitmap(BitmapKey {
-                account_id,
-                collection: collection.into(),
-                class: BitmapClass::Tag {
-                    field: property.into(),
-                    value: value.into(),
-                },
-                document_id: 0,
-            })
-            .await
-            .add_context(|err| {
-                err.caused_by(trc::location!())
-                    .account_id(account_id)
-                    .collection(collection)
-                    .id(property.to_string())
-            })
-    }
-
+    #[inline(always)]
     pub fn notify_task_queue(&self) {
-        self.inner.ipc.index_tx.notify_one();
+        self.inner.ipc.task_tx.notify_one();
     }
 
     pub async fn total_queued_messages(&self) -> trc::Result<u64> {
@@ -504,76 +633,146 @@ impl Server {
             .map(|_| total)
     }
 
-    pub fn begin_changes(&self, account_id: u32) -> trc::Result<ChangeLogBuilder> {
-        self.assign_change_id(account_id)
-            .map(ChangeLogBuilder::with_change_id)
-    }
-
     #[inline(always)]
-    pub fn assign_change_id(&self, _: u32) -> trc::Result<u64> {
-        self.generate_snowflake_id()
+    pub fn generate_snowflake_id(&self) -> u64 {
+        self.inner.data.jmap_id_gen.generate()
     }
 
-    pub fn generate_snowflake_id(&self) -> trc::Result<u64> {
-        self.inner.data.jmap_id_gen.generate().ok_or_else(|| {
-            trc::StoreEvent::UnexpectedError
-                .into_err()
-                .caused_by(trc::location!())
-                .ctx(trc::Key::Reason, "Failed to generate snowflake id.")
-        })
-    }
+    pub async fn commit_batch(&self, mut builder: BatchBuilder) -> trc::Result<AssignedIds> {
+        let mut assigned_ids = AssignedIds::default();
+        let mut commit_points = builder.commit_points();
 
-    pub async fn commit_changes(
-        &self,
-        account_id: u32,
-        mut changes: ChangeLogBuilder,
-    ) -> trc::Result<u64> {
-        if changes.change_id == u64::MAX || changes.change_id == 0 {
-            changes.change_id = self.assign_change_id(account_id)?;
+        for commit_point in commit_points.iter() {
+            let batch = builder.build_one(commit_point);
+            assigned_ids
+                .ids
+                .extend(self.store().write(batch).await?.ids);
         }
-        let state = changes.change_id;
 
-        let mut builder = BatchBuilder::new();
-        builder.with_account_id(account_id).custom(changes);
-        self.core
-            .storage
-            .data
-            .write(builder.build())
-            .await
-            .caused_by(trc::location!())
-            .map(|_| state)
+        if let Some(changes) = builder.changes() {
+            for (account_id, changed_collections) in changes {
+                let mut state_change =
+                    StateChange::new(account_id, assigned_ids.last_change_id(account_id)?);
+                for changed_collection in changed_collections.changed_containers {
+                    if let Some(data_type) = DataType::try_from_id(changed_collection, true) {
+                        state_change.set_change(data_type);
+                    }
+                }
+                for changed_collection in changed_collections.changed_items {
+                    if let Some(data_type) = DataType::try_from_id(changed_collection, false) {
+                        state_change.set_change(data_type);
+                    }
+                }
+                if state_change.has_changes() {
+                    self.broadcast_state_change(state_change).await;
+                }
+            }
+        }
+
+        Ok(assigned_ids)
     }
 
-    pub async fn delete_changes(&self, account_id: u32, before: Duration) -> trc::Result<()> {
-        let reference_cid = self.inner.data.jmap_id_gen.past_id(before).ok_or_else(|| {
-            trc::StoreEvent::UnexpectedError
-                .caused_by(trc::location!())
-                .ctx(trc::Key::Reason, "Failed to generate reference change id.")
-        })?;
-
-        for collection in [
-            Collection::Email,
-            Collection::Mailbox,
-            Collection::Thread,
-            Collection::Identity,
-            Collection::EmailSubmission,
+    pub async fn delete_changes(&self, account_id: u32, max_entries: usize) -> trc::Result<()> {
+        for sync_collection in [
+            SyncCollection::Email,
+            SyncCollection::Thread,
+            SyncCollection::Identity,
+            SyncCollection::EmailSubmission,
+            SyncCollection::SieveScript,
+            SyncCollection::FileNode,
+            SyncCollection::AddressBook,
+            SyncCollection::Calendar,
         ] {
-            self.core
-                .storage
-                .data
-                .delete_range(
-                    LogKey {
-                        account_id,
-                        collection: collection.into(),
-                        change_id: 0,
-                    },
-                    LogKey {
-                        account_id,
-                        collection: collection.into(),
-                        change_id: reference_cid,
+            let collection = sync_collection.into();
+            let from_key = LogKey {
+                account_id,
+                collection,
+                change_id: 0,
+            };
+            let to_key = LogKey {
+                account_id,
+                collection,
+                change_id: u64::MAX,
+            };
+
+            let mut first_change_id = 0;
+            let mut num_changes = 0;
+
+            self.store()
+                .iterate(
+                    IterateParams::new(from_key, to_key)
+                        .descending()
+                        .no_values(),
+                    |key, _| {
+                        first_change_id = key.deserialize_be_u64(key.len() - U64_LEN)?;
+                        num_changes += 1;
+
+                        Ok(num_changes <= max_entries)
                     },
                 )
-                .await?;
+                .await
+                .caused_by(trc::location!())?;
+
+            if num_changes > max_entries {
+                self.store()
+                    .delete_range(
+                        LogKey {
+                            account_id,
+                            collection,
+                            change_id: 0,
+                        },
+                        LogKey {
+                            account_id,
+                            collection,
+                            change_id: first_change_id,
+                        },
+                    )
+                    .await
+                    .caused_by(trc::location!())?;
+
+                // Delete vanished items
+                if let Some(vanished_collection) =
+                    sync_collection.vanished_collection().map(u8::from)
+                {
+                    self.store()
+                        .delete_range(
+                            LogKey {
+                                account_id,
+                                collection: vanished_collection,
+                                change_id: 0,
+                            },
+                            LogKey {
+                                account_id,
+                                collection: vanished_collection,
+                                change_id: first_change_id,
+                            },
+                        )
+                        .await
+                        .caused_by(trc::location!())?;
+                }
+
+                // Write truncation entry for cache
+                let mut batch = BatchBuilder::new();
+                batch
+                    .with_account_id(account_id)
+                    .with_collection(collection)
+                    .set(
+                        ValueClass::Any(AnyClass {
+                            subspace: SUBSPACE_LOGS,
+                            key: LogKey {
+                                account_id,
+                                collection,
+                                change_id: first_change_id,
+                            }
+                            .serialize(0),
+                        }),
+                        Vec::new(),
+                    );
+                self.store()
+                    .write(batch.build_all())
+                    .await
+                    .caused_by(trc::location!())?;
+            }
         }
 
         Ok(())
@@ -585,7 +784,10 @@ impl Server {
             .ipc
             .state_tx
             .clone()
-            .send(StateEvent::Publish { state_change })
+            .send(StateEvent::Publish {
+                state_change,
+                broadcast: true,
+            })
             .await
         {
             Ok(_) => true,
@@ -601,6 +803,18 @@ impl Server {
         }
     }
 
+    pub async fn cluster_broadcast(&self, event: BroadcastEvent) {
+        if let Some(broadcast_tx) = &self.inner.ipc.broadcast_tx.clone() {
+            if broadcast_tx.send(event).await.is_err() {
+                trc::event!(
+                    Server(trc::ServerEvent::ThreadError),
+                    Details = "Error sending broadcast event.",
+                    CausedBy = trc::location!()
+                );
+            }
+        }
+    }
+
     #[allow(clippy::blocks_in_conditions)]
     pub async fn put_blob(
         &self,
@@ -609,7 +823,7 @@ impl Server {
         set_quota: bool,
     ) -> trc::Result<BlobId> {
         // First reserve the hash
-        let hash = BlobHash::from(data);
+        let hash = BlobHash::generate(data);
         let mut batch = BatchBuilder::new();
         let until = now() + self.core.jmap.upload_tmp_ttl;
 
@@ -623,7 +837,7 @@ impl Server {
         self.core
             .storage
             .data
-            .write(batch.build())
+            .write(batch.build_all())
             .await
             .caused_by(trc::location!())?;
 
@@ -649,7 +863,7 @@ impl Server {
             self.core
                 .storage
                 .data
-                .write(batch.build())
+                .write(batch.build_all())
                 .await
                 .caused_by(trc::location!())?;
         }
@@ -677,6 +891,14 @@ impl Server {
             .await
             .caused_by(trc::location!())
     }
+
+    #[cfg(not(feature = "enterprise"))]
+    pub async fn logo_resource(
+        &self,
+        _: &str,
+    ) -> trc::Result<Option<crate::manager::webadmin::Resource<Vec<u8>>>> {
+        Ok(None)
+    }
 }
 
 pub trait BuildServer {
@@ -688,23 +910,6 @@ impl BuildServer for Arc<Inner> {
         Server {
             inner: self.clone(),
             core: self.shared_core.load_full(),
-        }
-    }
-}
-
-impl MailboxState {
-    pub fn map_result_id(&self, document_id: u32, is_uid: bool) -> Option<(u32, ImapId)> {
-        if let Some(imap_id) = self.id_to_imap.get(&document_id) {
-            Some((if is_uid { imap_id.uid } else { imap_id.seqnum }, *imap_id))
-        } else if is_uid {
-            self.next_state.as_ref().and_then(|s| {
-                s.next_state
-                    .id_to_imap
-                    .get(&document_id)
-                    .map(|imap_id| (imap_id.uid, *imap_id))
-            })
-        } else {
-            None
         }
     }
 }

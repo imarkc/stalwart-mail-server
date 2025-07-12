@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,7 +11,7 @@ use hyper::Uri;
 use mail_parser::MimeHeaders;
 use nlp::tokenizers::types::{TokenType, TypesTokenizer};
 
-use crate::{modules::html::*, Hostname, SpamFilterContext, TextPart};
+use crate::{Hostname, SpamFilterContext, TextPart, modules::html::*};
 
 pub trait SpamFilterAnalyzeHtml: Sync + Send {
     fn spam_filter_analyze_html(
@@ -40,6 +40,7 @@ impl SpamFilterAnalyzeHtml for Server {
         }
 
         for (part_id, part) in ctx.output.text_parts.iter().enumerate() {
+            let part_id = part_id as u32;
             let is_body_part = ctx.input.message.text_body.contains(&part_id)
                 || ctx.input.message.html_body.contains(&part_id);
 

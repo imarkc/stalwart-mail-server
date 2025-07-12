@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,10 +11,10 @@ pub mod oidc;
 pub mod smtp;
 pub mod sql;
 
-use common::{config::smtp::session::AddressMapping, Core, Server};
+use common::{Core, Server, config::smtp::session::AddressMapping};
 use directory::{
-    backend::internal::{manage::ManageDirectory, PrincipalField},
     Directories, Principal, Type,
+    backend::internal::{PrincipalField, PrincipalSet, manage::ManageDirectory},
 };
 use mail_send::Credentials;
 use rustls::ServerConfig;
@@ -24,7 +24,7 @@ use std::{borrow::Cow, io::BufReader, sync::Arc};
 use store::{Store, Stores};
 use tokio_rustls::TlsAcceptor;
 
-use crate::{store::TempDir, AssertConfig};
+use crate::{AssertConfig, store::TempDir};
 
 const CONFIG: &str = r#"
 [directory."rocksdb"]
@@ -143,21 +143,65 @@ base-dn = "dc=example,dc=org"
 dn = "cn=serviceuser,ou=svcaccts,dc=example,dc=org"
 secret = "mysecret"
 
-[directory."ldap".bind.auth]
-enable = false
-dn = "cn=?,ou=svcaccts,dc=example,dc=org"
-
 [directory."ldap".filter]
 name = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(uid=?))"
 email = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(|(mail=?)(givenName=?)(sn=?)))"
-verify = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(|(mail=*?*)(givenName=*?*)))"
-expand = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(sn=?))"
-domains = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(|(mail=*@?)(givenName=*@?)(sn=*@?)))"
-
-# Glauth does not support searchable custom attributes so
-# 'sn' and 'givenName' are used to search for aliases/lists.
 
 [directory."ldap".attributes]
+name = "uid"
+description = ["principalName", "description"]
+secret = "userPassword"
+groups = ["memberOf", "otherGroups"]
+email = "mail"
+email-alias = "givenName"
+quota = "diskQuota"
+class = "objectClass"
+
+[directory."ldap-bind-template"]
+type = "ldap"
+url = "ldap://localhost:3893"
+base-dn = "dc=example,dc=org"
+
+[directory."ldap-bind-template".bind]
+dn = "cn=serviceuser,ou=svcaccts,dc=example,dc=org"
+secret = "mysecret"
+
+[directory."ldap-bind-template".bind.auth]
+method = "template"
+template = "cn={username},ou=,dc=example,dc=org"
+search = false
+
+[directory."ldap-bind-template".filter]
+name = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(uid=?))"
+email = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(|(mail=?)(givenName=?)(sn=?)))"
+
+[directory."ldap-bind-template".attributes]
+name = "uid"
+description = ["principalName", "description"]
+secret = "userPassword"
+groups = ["memberOf", "otherGroups"]
+email = "mail"
+email-alias = "givenName"
+quota = "diskQuota"
+class = "objectClass"
+
+[directory."ldap-bind-lookup"]
+type = "ldap"
+url = "ldap://localhost:3893"
+base-dn = "dc=example,dc=org"
+
+[directory."ldap-bind-lookup".bind]
+dn = "cn=serviceuser,ou=svcaccts,dc=example,dc=org"
+secret = "mysecret"
+
+[directory."ldap-bind-lookup".bind.auth]
+method = "lookup"
+
+[directory."ldap-bind-lookup".filter]
+name = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(uid=?))"
+email = "(&(|(objectClass=posixAccount)(objectClass=posixGroup))(|(mail=?)(givenName=?)(sn=?)))"
+
+[directory."ldap-bind-lookup".attributes]
 name = "uid"
 description = ["principalName", "description"]
 secret = "userPassword"
@@ -362,6 +406,7 @@ impl DirectoryTest {
             true,
         )
         .await;
+
         config.assert_no_errors();
 
         // Enable catch-all and subaddressing
@@ -493,6 +538,12 @@ trait IntoTestPrincipal {
     fn into_test(self) -> TestPrincipal;
 }
 
+impl IntoTestPrincipal for PrincipalSet {
+    fn into_test(self) -> TestPrincipal {
+        TestPrincipal::from(self)
+    }
+}
+
 impl IntoTestPrincipal for Principal {
     fn into_test(self) -> TestPrincipal {
         TestPrincipal::from(self)
@@ -507,8 +558,8 @@ impl TestPrincipal {
     }
 }
 
-impl From<Principal> for TestPrincipal {
-    fn from(mut value: Principal) -> Self {
+impl From<PrincipalSet> for TestPrincipal {
+    fn from(mut value: PrincipalSet) -> Self {
         Self {
             id: value.id(),
             typ: value.typ(),
@@ -534,9 +585,26 @@ impl From<Principal> for TestPrincipal {
     }
 }
 
-impl From<TestPrincipal> for Principal {
+impl From<Principal> for TestPrincipal {
+    fn from(value: Principal) -> Self {
+        Self {
+            id: value.id(),
+            typ: value.typ(),
+            quota: value.quota(),
+            member_of: value.member_of().iter().map(|v| v.to_string()).collect(),
+            roles: value.roles().iter().map(|v| v.to_string()).collect(),
+            lists: value.lists().iter().map(|v| v.to_string()).collect(),
+            name: value.name,
+            secrets: value.secrets,
+            emails: value.emails,
+            description: value.description,
+        }
+    }
+}
+
+impl From<TestPrincipal> for PrincipalSet {
     fn from(value: TestPrincipal) -> Self {
-        Principal::new(value.id, value.typ)
+        PrincipalSet::new(value.id, value.typ)
             .with_field(PrincipalField::Name, value.name)
             .with_field(PrincipalField::Quota, value.quota)
             .with_field(PrincipalField::Secrets, value.secrets)

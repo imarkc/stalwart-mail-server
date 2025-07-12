@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: LicenseRef-SEL
  *
@@ -12,14 +12,14 @@ use std::{future::Future, time::Duration};
 
 use ahash::{AHashMap, AHashSet};
 use store::{
-    write::{key::DeserializeBigEndian, BatchBuilder, MaybeDynamicId, TelemetryClass, ValueClass},
-    Deserialize, IterateParams, Store, ValueKey, U64_LEN,
+    Deserialize, IterateParams, Store, U64_LEN, ValueKey,
+    write::{BatchBuilder, TelemetryClass, ValueClass, key::DeserializeBigEndian},
 };
 use trc::{
-    ipc::subscriber::SubscriberBuilder,
-    serializers::binary::{deserialize_events, serialize_events},
     AddContext, AuthEvent, Event, EventDetails, EventType, Key, MessageIngestEvent,
     OutgoingReportEvent, QueueEvent, Value,
+    ipc::subscriber::SubscriberBuilder,
+    serializers::binary::{deserialize_events, serialize_events},
 };
 use utils::snowflake::SnowflakeIdGenerator;
 
@@ -67,10 +67,10 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, settings: StoreTrac
                                         }
                                     }
                                     (Key::RemoteIp, Value::Ipv4(ip)) => {
-                                        values.insert(ip.to_string());
+                                        values.insert(ip.to_string().into());
                                     }
                                     (Key::RemoteIp, Value::Ipv6(ip)) => {
-                                        values.insert(ip.to_string());
+                                        values.insert(ip.to_string().into());
                                     }
 
                                     _ => {}
@@ -112,7 +112,7 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, settings: StoreTrac
                                 batch.set(
                                     ValueClass::Telemetry(TelemetryClass::Index {
                                         span_id,
-                                        value: value.into_bytes(),
+                                        value: value.as_bytes().to_vec(),
                                     }),
                                     vec![],
                                 );
@@ -123,7 +123,7 @@ pub(crate) fn spawn_store_tracer(builder: SubscriberBuilder, settings: StoreTrac
             }
 
             if !batch.is_empty() {
-                if let Err(err) = store.write(batch.build()).await {
+                if let Err(err) = store.write(batch.build_all()).await {
                     trc::error!(err.caused_by(trc::location!()));
                 }
                 batch = BatchBuilder::new();
@@ -261,7 +261,7 @@ impl TracingStore for Store {
         .await
         .caused_by(trc::location!())?;
 
-        let mut delete_keys: Vec<ValueClass<MaybeDynamicId>> = Vec::new();
+        let mut delete_keys: Vec<ValueClass> = Vec::new();
         self.iterate(
             IterateParams::new(
                 ValueKey::from(ValueClass::Telemetry(TelemetryClass::Index {
@@ -296,15 +296,15 @@ impl TracingStore for Store {
             let mut batch = BatchBuilder::new();
 
             for key in delete_keys {
-                if batch.ops.len() >= 1000 {
-                    self.write(batch.build()).await?;
+                if batch.is_large_batch() {
+                    self.write(batch.build_all()).await?;
                     batch = BatchBuilder::new();
                 }
                 batch.clear(key);
             }
 
             if !batch.is_empty() {
-                self.write(batch.build()).await?;
+                self.write(batch.build_all()).await?;
             }
         }
 

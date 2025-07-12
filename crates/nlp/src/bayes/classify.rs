@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -130,11 +130,7 @@ fn inv_chi_square(value: f64, freedom_deg: u32) -> f64 {
          * confidence that inv-chi-square is close to zero
          */
 
-        if value < 0.0 {
-            0.0
-        } else {
-            1.0
-        }
+        if value < 0.0 { 0.0 } else { 1.0 }
     }
 }
 

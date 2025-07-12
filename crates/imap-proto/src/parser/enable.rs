@@ -1,13 +1,15 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{capability::Capability, enable},
-    receiver::{bad, Request},
     Command,
+    protocol::{capability::Capability, enable},
+    receiver::{Request, bad},
 };
 
 impl Request<Command> {
@@ -18,7 +20,7 @@ impl Request<Command> {
             for capability in self.tokens {
                 capabilities.push(
                     Capability::parse(&capability.unwrap_bytes())
-                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                 );
             }
             Ok(enable::Arguments {
@@ -69,7 +71,7 @@ mod tests {
                 .parse_enable()
                 .unwrap(),
             enable::Arguments {
-                tag: "t2".to_string(),
+                tag: "t2".into(),
                 capabilities: vec![Capability::IMAP4rev2, Capability::CondStore],
             }
         );

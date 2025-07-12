@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,12 +10,12 @@ use store::Stores;
 use utils::config::Config;
 
 use crate::{
+    Core, Server,
     config::{
-        server::{tls::parse_certificates, Listeners},
+        server::{Listeners, tls::parse_certificates},
         telemetry::Telemetry,
     },
-    listener::blocked::{BlockedIps, BLOCKED_IP_KEY},
-    Core, Server,
+    listener::blocked::{BLOCKED_IP_KEY, BlockedIps},
 };
 
 use super::config::{ConfigManager, Patterns};
@@ -76,6 +76,7 @@ impl Server {
             blob_stores: self.core.storage.blobs.clone(),
             fts_stores: self.core.storage.ftss.clone(),
             in_memory_stores: self.core.storage.lookups.clone(),
+            pubsub_stores: Default::default(),
             purge_schedules: Default::default(),
         };
         stores.parse_stores(&mut config).await;
@@ -103,7 +104,7 @@ impl Server {
         };
 
         // Parse settings and build shared core
-        let core = Core::parse(&mut config, stores, manager).await;
+        let core = Box::pin(Core::parse(&mut config, stores, manager)).await;
         if !config.errors.is_empty() {
             return Ok(config.into());
         }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,7 +10,9 @@ use crate::{
         assert_is_empty, delivery::SmtpConnection, emails_purge_tombstoned, jmap_raw_request,
         mailbox::destroy_all_mailboxes, test_account_login,
     },
+    smtp::queue::QueuedEvents,
 };
+use common::config::smtp::queue::QueueName;
 use email::mailbox::INBOX_ID;
 use jmap::blob::upload::DISABLE_UPLOAD_QUOTA;
 use jmap_client::{
@@ -358,12 +360,12 @@ pub async fn test(params: &mut JMAPTest) {
         params.client.set_default_account_id(account_id.to_string());
         destroy_all_mailboxes(params).await;
     }
-    for event in server.next_event().await {
+    for event in server.all_queued_messages().await.messages {
         server
-            .read_message(event.queue_id)
+            .read_message(event.queue_id, QueueName::default())
             .await
             .unwrap()
-            .remove(&server, event.due)
+            .remove(&server, event.due.into())
             .await;
     }
     assert_is_empty(server).await;

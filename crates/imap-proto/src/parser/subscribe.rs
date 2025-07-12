@@ -1,14 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{subscribe, ProtocolVersion},
-    receiver::{bad, Request},
-    utf7::utf7_maybe_decode,
     Command,
+    protocol::{ProtocolVersion, subscribe},
+    receiver::{Request, bad},
+    utf7::utf7_maybe_decode,
 };
 
 impl Request<Command> {
@@ -21,7 +23,7 @@ impl Request<Command> {
                         .next()
                         .unwrap()
                         .unwrap_string()
-                        .map_err(|v| bad(self.tag.clone(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                     version,
                 ),
                 tag: self.tag,
@@ -35,7 +37,7 @@ impl Request<Command> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        protocol::{subscribe, ProtocolVersion},
+        protocol::{ProtocolVersion, subscribe},
         receiver::Receiver,
     };
 
@@ -47,15 +49,15 @@ mod tests {
             (
                 "A142 SUBSCRIBE #news.comp.mail.mime\r\n",
                 subscribe::Arguments {
-                    mailbox_name: "#news.comp.mail.mime".to_string(),
-                    tag: "A142".to_string(),
+                    mailbox_name: "#news.comp.mail.mime".into(),
+                    tag: "A142".into(),
                 },
             ),
             (
                 "A142 SUBSCRIBE \"#news.comp.mail.mime\"\r\n",
                 subscribe::Arguments {
-                    mailbox_name: "#news.comp.mail.mime".to_string(),
-                    tag: "A142".to_string(),
+                    mailbox_name: "#news.comp.mail.mime".into(),
+                    tag: "A142".into(),
                 },
             ),
         ] {

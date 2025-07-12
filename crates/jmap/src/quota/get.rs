@@ -1,14 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::{auth::AccessToken, Server};
+use common::{Server, auth::AccessToken};
 use jmap_proto::{
     method::get::{GetRequest, GetResponse, RequestArguments},
-    object::Object,
-    types::{id::Id, property::Property, state::State, type_state::DataType, value::Value},
+    types::{
+        id::Id,
+        property::Property,
+        state::State,
+        type_state::DataType,
+        value::{Object, Value},
+    },
 };
 use std::future::Future;
 
@@ -73,8 +78,12 @@ impl QuotaGet for Server {
                     Property::Used => (self.get_used_quota(account_id).await? as u64).into(),
                     Property::HardLimit => access_token.quota.into(),
                     Property::Scope => "account".to_string().into(),
-                    Property::Name => access_token.name.clone().into(),
-                    Property::Description => access_token.description.clone().into(),
+                    Property::Name => access_token.name.to_string().into(),
+                    Property::Description => access_token
+                        .description
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .into(),
                     Property::Types => vec![
                         Value::Text(DataType::Email.to_string()),
                         Value::Text(DataType::SieveScript.to_string()),

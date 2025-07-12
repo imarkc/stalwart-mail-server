@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,17 +8,13 @@ pub mod metrics;
 pub mod tracers;
 pub mod webhooks;
 
-use std::time::Duration;
-
 use tracers::log::spawn_log_tracer;
 use tracers::otel::spawn_otel_tracer;
 use tracers::stdout::spawn_console_tracer;
-use trc::{ipc::subscriber::SubscriberBuilder, Collector};
+use trc::{Collector, ipc::subscriber::SubscriberBuilder};
 use webhooks::spawn_webhook_tracer;
 
 use crate::config::telemetry::{Telemetry, TelemetrySubscriberType};
-
-pub const LONG_SLUMBER: Duration = Duration::from_secs(60 * 60 * 24 * 365);
 
 impl Telemetry {
     pub fn enable(self, is_enterprise: bool) {

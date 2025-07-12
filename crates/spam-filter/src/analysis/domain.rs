@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,23 +7,24 @@
 use std::{collections::HashSet, future::Future};
 
 use common::{
-    config::spamfilter::{Element, Location},
     Server,
+    config::spamfilter::{Element, Location},
 };
+use compact_str::CompactString;
 use mail_auth::DkimResult;
-use mail_parser::{parsers::MessageStream, HeaderName, HeaderValue, Host};
+use mail_parser::{HeaderName, HeaderValue, Host, parsers::MessageStream};
 use nlp::tokenizers::types::TokenType;
 
 use crate::{
+    Email, Hostname, Recipient, SpamFilterContext, TextPart,
     modules::{
         dnsbl::check_dnsbl,
         expression::StringResolver,
-        html::{HtmlToken, A, HREF},
+        html::{A, HREF, HtmlToken},
     },
-    Email, Hostname, Recipient, SpamFilterContext, TextPart,
 };
 
-use super::{is_trusted_domain, ElementLocation};
+use super::{ElementLocation, is_trusted_domain};
 
 pub trait SpamFilterAnalyzeDomain: Sync + Send {
     fn spam_filter_analyze_domain(
@@ -35,7 +36,7 @@ pub trait SpamFilterAnalyzeDomain: Sync + Send {
 impl SpamFilterAnalyzeDomain for Server {
     async fn spam_filter_analyze_domain(&self, ctx: &mut SpamFilterContext<'_>) {
         // Obtain email addresses and domains
-        let mut domains: HashSet<ElementLocation<String>> = HashSet::new();
+        let mut domains: HashSet<ElementLocation<CompactString>> = HashSet::new();
         let mut emails: HashSet<ElementLocation<Recipient>> = HashSet::new();
 
         // Add DKIM domains
@@ -43,7 +44,7 @@ impl SpamFilterAnalyzeDomain for Server {
             if dkim.result() == &DkimResult::Pass {
                 if let Some(domain) = dkim.signature().map(|s| &s.d) {
                     domains.insert(ElementLocation::new(
-                        domain.to_lowercase(),
+                        CompactString::from_str_to_lowercase(domain),
                         Location::HeaderDkimPass,
                     ));
                 }
@@ -72,11 +73,7 @@ impl SpamFilterAnalyzeDomain for Server {
                         .and_then(|s| s.rsplit_once('@'))
                         .and_then(|(_, d)| {
                             let host = Hostname::new(d);
-                            if host.sld.is_some() {
-                                Some(host)
-                            } else {
-                                None
-                            }
+                            if host.sld.is_some() { Some(host) } else { None }
                         })
                     {
                         domains.insert(ElementLocation::new(mid_domain.fqdn, Location::HeaderMid));
@@ -89,7 +86,7 @@ impl SpamFilterAnalyzeDomain for Server {
                         ctx.input
                             .message
                             .raw_message
-                            .get(header.offset_start..header.offset_end)
+                            .get(header.offset_start as usize..header.offset_end as usize)
                             .unwrap_or_default(),
                     )
                     .parse_address()
@@ -146,6 +143,7 @@ impl SpamFilterAnalyzeDomain for Server {
 
         // Add emails found in the message
         for (part_id, part) in ctx.output.text_parts.iter().enumerate() {
+            let part_id = part_id as u32;
             let is_body = ctx.input.message.text_body.contains(&part_id)
                 || ctx.input.message.html_body.contains(&part_id);
             let tokens = match part {

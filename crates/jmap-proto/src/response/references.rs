@@ -1,26 +1,26 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::collections::HashMap;
 
+use compact_str::format_compact;
 use utils::map::vec_map::VecMap;
 
 use crate::{
     error::set::SetError,
     method::{copy::CopyResponse, set::SetResponse, upload::DataSourceObject},
-    object::Object,
     request::{
-        reference::{MaybeReference, ResultReference},
         RequestMethod,
+        reference::{MaybeReference, ResultReference},
     },
     types::{
         any_id::AnyId,
         id::Id,
         property::Property,
-        value::{MaybePatchValue, SetValue, Value},
+        value::{MaybePatchValue, Object, SetValue, Value},
     },
 };
 
@@ -52,7 +52,7 @@ impl Response {
                                 } else {
                                     return Err(trc::JmapEvent::InvalidResultReference
                                         .into_err()
-                                        .details(format!(
+                                        .details(format_compact!(
                                             "Id reference {reference:?} does not exist."
                                         )));
                                 }
@@ -153,9 +153,9 @@ impl Response {
                                     Some(_) => {
                                         return Err(trc::JmapEvent::InvalidResultReference
                                             .into_err()
-                                            .details(format!(
-                                            "Id reference {parent_id:?} points to invalid type."
-                                        )));
+                                            .details(format_compact!(
+                                                "Id reference {parent_id:?} points to invalid type."
+                                            )));
                                     }
                                     None => {
                                         graph
@@ -193,7 +193,7 @@ impl Response {
                                     response
                                         .list
                                         .iter()
-                                        .filter_map(|obj| obj.properties.get(&property).cloned())
+                                        .filter_map(|obj| obj.0.get(&property).cloned())
                                         .collect(),
                                 )
                             }
@@ -256,7 +256,7 @@ impl Response {
         } else {
             Err(trc::JmapEvent::InvalidResultReference
                 .into_err()
-                .details(format!("Id reference {ir:?} not found.")))
+                .details(format_compact!("Id reference {ir:?} not found.")))
         }
     }
 
@@ -265,7 +265,7 @@ impl Response {
         obj: &mut Object<SetValue>,
         mut graph: Option<(&str, &mut HashMap<String, Vec<String>>)>,
     ) -> trc::Result<()> {
-        for set_value in obj.properties.values_mut() {
+        for set_value in obj.0.values_mut() {
             match set_value {
                 SetValue::IdReference(MaybeReference::Reference(parent_id)) => {
                     if let Some(id) = self.created_ids.get(parent_id) {
@@ -278,7 +278,7 @@ impl Response {
                     } else {
                         return Err(trc::JmapEvent::InvalidResultReference
                             .into_err()
-                            .details(format!("Id reference {parent_id:?} not found.")));
+                            .details(format_compact!("Id reference {parent_id:?} not found.")));
                     }
                 }
                 SetValue::IdReferences(id_refs) => {
@@ -294,7 +294,9 @@ impl Response {
                             } else {
                                 return Err(trc::JmapEvent::InvalidResultReference
                                     .into_err()
-                                    .details(format!("Id reference {parent_id:?} not found.")));
+                                    .details(format_compact!(
+                                        "Id reference {parent_id:?} not found."
+                                    )));
                             }
                         }
                     }
@@ -319,11 +321,11 @@ fn topological_sort<T>(
     for (from_id, to_ids) in graph.iter() {
         for to_id in to_ids {
             if !create.contains_key(to_id) {
-                return Err(trc::JmapEvent::InvalidResultReference
-                    .into_err()
-                    .details(format!(
+                return Err(trc::JmapEvent::InvalidResultReference.into_err().details(
+                    format_compact!(
                         "Invalid reference to non-existing object {to_id:?} from {from_id:?}"
-                    )));
+                    ),
+                ));
             }
         }
     }
@@ -340,7 +342,7 @@ fn topological_sort<T>(
                 if it_stack.len() > 1000 {
                     return Err(trc::JmapEvent::InvalidArguments
                         .into_err()
-                        .details("Cyclical references are not allowed.".to_string()));
+                        .details("Cyclical references are not allowed."));
                 }
                 it = to_ids.iter();
                 continue;
@@ -427,7 +429,7 @@ impl EvalObjectReferences for SetResponse {
     fn get_id(&self, id_ref: &str) -> Option<Value> {
         self.created
             .get(id_ref)
-            .and_then(|obj| obj.properties.get(&Property::Id))
+            .and_then(|obj| obj.0.get(&Property::Id))
             .and_then(|value| match value {
                 Value::Id(id) => Value::Id(*id).into(),
                 Value::BlobId(blob_id) => Value::BlobId(blob_id.clone()).into(),
@@ -456,7 +458,7 @@ impl EvalResult {
                                 _ => {
                                     return Err(trc::JmapEvent::InvalidResultReference
                                         .into_err()
-                                        .details(format!(
+                                        .details(format_compact!(
                                             "Failed to evaluate {rr} result reference."
                                         )));
                                 }
@@ -464,9 +466,9 @@ impl EvalResult {
                         }
                     }
                     _ => {
-                        return Err(trc::JmapEvent::InvalidResultReference
-                            .into_err()
-                            .details(format!("Failed to evaluate {rr} result reference.")))
+                        return Err(trc::JmapEvent::InvalidResultReference.into_err().details(
+                            format_compact!("Failed to evaluate {rr} result reference."),
+                        ));
                     }
                 }
             }
@@ -474,7 +476,7 @@ impl EvalResult {
         } else {
             Err(trc::JmapEvent::InvalidResultReference
                 .into_err()
-                .details(format!("Failed to evaluate {rr} result reference.")))
+                .details(format_compact!("Failed to evaluate {rr} result reference.")))
         }
     }
 
@@ -498,7 +500,7 @@ impl EvalResult {
                                 _ => {
                                     return Err(trc::JmapEvent::InvalidResultReference
                                         .into_err()
-                                        .details(format!(
+                                        .details(format_compact!(
                                             "Failed to evaluate {rr} result reference."
                                         )));
                                 }
@@ -506,9 +508,9 @@ impl EvalResult {
                         }
                     }
                     _ => {
-                        return Err(trc::JmapEvent::InvalidResultReference
-                            .into_err()
-                            .details(format!("Failed to evaluate {rr} result reference.")))
+                        return Err(trc::JmapEvent::InvalidResultReference.into_err().details(
+                            format_compact!("Failed to evaluate {rr} result reference."),
+                        ));
                     }
                 }
             }
@@ -516,7 +518,7 @@ impl EvalResult {
         } else {
             Err(trc::JmapEvent::InvalidResultReference
                 .into_err()
-                .details(format!("Failed to evaluate {rr} result reference.")))
+                .details(format_compact!("Failed to evaluate {rr} result reference.")))
         }
     }
 
@@ -526,7 +528,7 @@ impl EvalResult {
         } else {
             Err(trc::JmapEvent::InvalidResultReference
                 .into_err()
-                .details(format!("Failed to evaluate {rr} result reference.")))
+                .details(format_compact!("Failed to evaluate {rr} result reference.")))
         }
     }
 }
@@ -839,7 +841,7 @@ mod tests {
                 .create
                 .unwrap()
                 .into_iter()
-                .map(|(p, mut v)| (p, v.properties.remove(&Property::ParentId).unwrap()))
+                .map(|(p, mut v)| (p, v.0.remove(&Property::ParentId).unwrap()))
                 .collect::<HashMap<_, _>>();
             assert_eq!(
                 create.get("a").unwrap(),
@@ -875,7 +877,7 @@ mod tests {
                 .create
                 .unwrap()
                 .into_iter()
-                .map(|(p, mut v)| (p, v.properties.remove(&Property::ParentId).unwrap()))
+                .map(|(p, mut v)| (p, v.0.remove(&Property::ParentId).unwrap()))
                 .collect::<HashMap<_, _>>();
             assert_eq!(
                 create.get("a1").unwrap(),

@@ -1,36 +1,28 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{fmt::Display, future::Future, sync::Arc, time::Duration};
+#![warn(clippy::large_futures)]
 
-use changes::state::StateManager;
-use common::{
-    manager::boot::{BootManager, IpcReceivers},
-    Inner, Server,
-};
+use common::Server;
 use jmap_proto::{
     method::{
         query::{QueryRequest, QueryResponse},
         set::{SetRequest, SetResponse},
     },
-    types::collection::Collection,
+    types::{collection::Collection, state::State},
 };
-use services::{
-    housekeeper::spawn_housekeeper, index::spawn_email_queue_task, state::spawn_state_manager,
-};
-
+use std::{fmt::Display, future::Future};
 use store::{
     fts::FtsFilter,
-    query::{sort::Pagination, Comparator, Filter, ResultSet, SortedResultSet},
+    query::{Comparator, Filter, ResultSet, SortedResultSet, sort::Pagination},
     roaring::RoaringBitmap,
 };
 use trc::AddContext;
 
 pub mod api;
-pub mod auth;
 pub mod blob;
 pub mod changes;
 pub mod email;
@@ -39,72 +31,21 @@ pub mod mailbox;
 pub mod principal;
 pub mod push;
 pub mod quota;
-pub mod services;
 pub mod sieve;
 pub mod submission;
 pub mod thread;
 pub mod vacation;
 pub mod websocket;
 
-pub const LONG_SLUMBER: Duration = Duration::from_secs(60 * 60 * 24);
-
-pub trait StartServices: Sync + Send {
-    fn start_services(&mut self) -> impl Future<Output = ()> + Send;
-}
-
-pub trait SpawnServices {
-    fn spawn_services(&mut self, inner: Arc<Inner>);
-}
-
-impl StartServices for BootManager {
-    async fn start_services(&mut self) {
-        // Unpack webadmin
-        if let Err(err) = self
-            .inner
-            .data
-            .webadmin
-            .unpack(&self.inner.shared_core.load().storage.blob)
-            .await
-        {
-            trc::event!(
-                Resource(trc::ResourceEvent::Error),
-                Reason = err,
-                Details = "Failed to unpack webadmin bundle"
-            );
-        }
-
-        self.ipc_rxs.spawn_services(self.inner.clone());
-    }
-}
-
-impl SpawnServices for IpcReceivers {
-    fn spawn_services(&mut self, inner: Arc<Inner>) {
-        // Spawn state manager
-        spawn_state_manager(inner.clone(), self.state_rx.take().unwrap());
-
-        // Spawn housekeeper
-        spawn_housekeeper(inner.clone(), self.housekeeper_rx.take().unwrap());
-
-        // Spawn index task
-        spawn_email_queue_task(inner);
-    }
-}
-
 impl JmapMethods for Server {
     async fn prepare_set_response<T: Sync + Send>(
         &self,
         request: &SetRequest<T>,
-        collection: Collection,
+        asserted_state: State,
     ) -> trc::Result<SetResponse> {
         Ok(
-            SetResponse::from_request(request, self.core.jmap.set_max_objects)?.with_state(
-                self.assert_state(
-                    request.account_id.document_id(),
-                    collection,
-                    &request.if_in_state,
-                )
-                .await?,
-            ),
+            SetResponse::from_request(request, self.core.jmap.set_max_objects)?
+                .with_state(asserted_state),
         )
     }
 
@@ -147,6 +88,7 @@ impl JmapMethods for Server {
     async fn build_query_response<T: Sync + Send>(
         &self,
         result_set: &ResultSet,
+        query_state: State,
         request: &QueryRequest<T>,
     ) -> trc::Result<(QueryResponse, Option<Pagination>)> {
         let total = result_set.results.len() as usize;
@@ -166,9 +108,7 @@ impl JmapMethods for Server {
         Ok((
             QueryResponse {
                 account_id: request.account_id,
-                query_state: self
-                    .get_state(result_set.account_id, result_set.collection)
-                    .await?,
+                query_state,
                 can_calculate_changes: true,
                 position: 0,
                 ids: vec![],
@@ -197,7 +137,7 @@ impl JmapMethods for Server {
         &self,
         result_set: ResultSet,
         comparators: Vec<Comparator>,
-        paginate: Pagination,
+        paginate: Pagination<'_>,
         mut response: QueryResponse,
     ) -> trc::Result<QueryResponse> {
         // Sort results
@@ -218,20 +158,13 @@ impl JmapMethods for Server {
 
         Ok(response)
     }
-
-    fn increment_config_version(&self) {
-        self.inner
-            .data
-            .config_version
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
 }
 
 pub trait JmapMethods: Sync + Send {
     fn prepare_set_response<T: Sync + Send>(
         &self,
         request: &SetRequest<T>,
-        collection: Collection,
+        asserted_state: State,
     ) -> impl Future<Output = trc::Result<SetResponse>> + Send;
 
     fn filter(
@@ -251,6 +184,7 @@ pub trait JmapMethods: Sync + Send {
     fn build_query_response<T: Sync + Send>(
         &self,
         result_set: &ResultSet,
+        query_state: State,
         request: &QueryRequest<T>,
     ) -> impl Future<Output = trc::Result<(QueryResponse, Option<Pagination>)>> + Send;
 
@@ -261,8 +195,6 @@ pub trait JmapMethods: Sync + Send {
         paginate: Pagination,
         response: QueryResponse,
     ) -> impl Future<Output = trc::Result<QueryResponse>> + Send;
-
-    fn increment_config_version(&self);
 }
 
 trait UpdateResults: Sized {

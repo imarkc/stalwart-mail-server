@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: LicenseRef-SEL
  *
@@ -15,11 +15,11 @@ use std::{
 };
 
 use roaring::RoaringBitmap;
-use utils::config::{utils::AsKey, Config};
+use utils::config::{Config, utils::AsKey};
 
 use crate::{
-    write::{AssignedIds, Batch, BitmapClass, ValueClass},
     BitmapKey, Deserialize, IterateParams, Key, Store, Stores, ValueKey,
+    write::{AssignedIds, Batch, BitmapClass, ValueClass},
 };
 
 pub struct SQLReadReplica {
@@ -194,7 +194,7 @@ impl SQLReadReplica {
 
     pub async fn get_bitmap(
         &self,
-        key: BitmapKey<BitmapClass<u32>>,
+        key: BitmapKey<BitmapClass>,
     ) -> trc::Result<Option<RoaringBitmap>> {
         self.run_op(move |store| {
             let key = key.clone();
@@ -242,7 +242,7 @@ impl SQLReadReplica {
 
     pub async fn get_counter(
         &self,
-        key: impl Into<ValueKey<ValueClass<u32>>> + Sync + Send,
+        key: impl Into<ValueKey<ValueClass>> + Sync + Send,
     ) -> trc::Result<i64> {
         let key = key.into();
         self.run_op(move |store| {
@@ -261,7 +261,7 @@ impl SQLReadReplica {
         .await
     }
 
-    pub async fn write(&self, batch: Batch) -> trc::Result<AssignedIds> {
+    pub async fn write(&self, batch: Batch<'_>) -> trc::Result<AssignedIds> {
         match &self.primary {
             #[cfg(feature = "postgres")]
             Store::PostgreSQL(store) => store.write(batch).await,

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,10 +8,8 @@ use std::time::Instant;
 
 use common::listener::SessionStream;
 use directory::Permission;
-use jmap_proto::{
-    object::Object,
-    types::{collection::Collection, property::Property, value::Value},
-};
+use email::sieve::SieveScript;
+use jmap_proto::types::collection::Collection;
 use trc::AddContext;
 
 use crate::core::{Session, StatusResponse};
@@ -38,28 +36,23 @@ impl<T: SessionStream> Session<T> {
         let count = document_ids.len();
 
         for document_id in document_ids {
-            if let Some(script) = self
+            if let Some(script_) = self
                 .server
-                .get_property::<Object<Value>>(
-                    account_id,
-                    Collection::SieveScript,
-                    document_id,
-                    Property::Value,
-                )
+                .get_archive(account_id, Collection::SieveScript, document_id)
                 .await
                 .caused_by(trc::location!())?
             {
+                let script = script_
+                    .unarchive::<SieveScript>()
+                    .caused_by(trc::location!())?;
                 response.push(b'\"');
-                if let Some(name) = script.get(&Property::Name).as_string() {
-                    for ch in name.as_bytes() {
-                        if [b'\\', b'\"'].contains(ch) {
-                            response.push(b'\\');
-                        }
-                        response.push(*ch);
+                for ch in script.name.as_bytes() {
+                    if [b'\\', b'\"'].contains(ch) {
+                        response.push(b'\\');
                     }
+                    response.push(*ch);
                 }
-
-                if script.get(&Property::IsActive).as_bool() == Some(true) {
+                if script.is_active {
                     response.extend_from_slice(b"\" ACTIVE\r\n");
                 } else {
                     response.extend_from_slice(b"\"\r\n");

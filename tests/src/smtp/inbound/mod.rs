@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,16 +7,18 @@
 use std::time::Duration;
 
 use common::{
-    ipc::{DmarcEvent, QueueEvent, QueueEventStatus, ReportingEvent, TlsEvent},
     Server,
+    ipc::{DmarcEvent, QueueEvent, QueueEventStatus, ReportingEvent, TlsEvent},
 };
 use store::{
-    write::{key::DeserializeBigEndian, Bincode, QueueClass, ReportEvent, ValueClass},
-    Deserialize, IterateParams, ValueKey, U64_LEN,
+    Deserialize, IterateParams, U64_LEN, ValueKey,
+    write::{
+        AlignedBytes, Archive, QueueClass, ReportEvent, ValueClass, key::DeserializeBigEndian,
+    },
 };
 use tokio::sync::mpsc::error::TryRecvError;
 
-use smtp::queue::{Message, QueueId, QueuedMessage};
+use smtp::queue::{Message, MessageWrapper, QueueId, QueuedMessage};
 
 use super::{QueueReceiver, ReportReceiver};
 
@@ -116,17 +118,17 @@ impl QueueReceiver {
         }
     }
 
-    pub async fn expect_message(&mut self) -> Message {
+    pub async fn expect_message(&mut self) -> MessageWrapper {
         self.read_event().await.assert_refresh();
         self.last_queued_message().await
     }
 
-    pub async fn consume_message(&mut self, server: &Server) -> Message {
+    pub async fn consume_message(&mut self, server: &Server) -> MessageWrapper {
         self.read_event().await.assert_refresh();
         let message = self.last_queued_message().await;
         message
             .clone()
-            .remove(server, self.last_queued_due().await)
+            .remove(server, self.last_queued_due().await.into())
             .await;
         message
     }
@@ -141,6 +143,7 @@ impl QueueReceiver {
         QueuedMessage {
             due: self.message_due(queue_id).await,
             queue_id,
+            queue_name: Default::default(),
         }
     }
 
@@ -151,12 +154,14 @@ impl QueueReceiver {
             store::write::QueueEvent {
                 due: 0,
                 queue_id: 0,
+                queue_name: [0; 8],
             },
         )));
         let to_key = ValueKey::from(ValueClass::Queue(QueueClass::MessageEvent(
             store::write::QueueEvent {
                 due: u64::MAX,
                 queue_id: u64::MAX,
+                queue_name: [u8::MAX; 8],
             },
         )));
 
@@ -167,6 +172,9 @@ impl QueueReceiver {
                     events.push(store::write::QueueEvent {
                         due: key.deserialize_be_u64(0)?,
                         queue_id: key.deserialize_be_u64(U64_LEN)?,
+                        queue_name: key[U64_LEN + 1..U64_LEN + 9]
+                            .try_into()
+                            .expect("Queue name must be 8 bytes"),
                     });
                     Ok(true)
                 },
@@ -177,7 +185,7 @@ impl QueueReceiver {
         events
     }
 
-    pub async fn read_queued_messages(&self) -> Vec<Message> {
+    pub async fn read_queued_messages(&self) -> Vec<MessageWrapper> {
         let from_key = ValueKey::from(ValueClass::Queue(QueueClass::Message(0)));
         let to_key = ValueKey::from(ValueClass::Queue(QueueClass::Message(u64::MAX)));
         let mut messages = Vec::new();
@@ -186,9 +194,14 @@ impl QueueReceiver {
             .iterate(
                 IterateParams::new(from_key, to_key).descending(),
                 |key, value| {
-                    let value = Bincode::<Message>::deserialize(value)?;
-                    assert_eq!(key.deserialize_be_u64(0)?, value.inner.queue_id);
-                    messages.push(value.inner);
+                    messages.push(MessageWrapper {
+                        queue_id: key.deserialize_be_u64(0)?,
+                        queue_name: Default::default(),
+                        is_multi_queue: false,
+                        span_id: 0,
+                        message: <Archive<AlignedBytes> as Deserialize>::deserialize(value)?
+                            .deserialize::<Message>()?,
+                    });
                     Ok(true)
                 },
             )
@@ -238,7 +251,7 @@ impl QueueReceiver {
         events
     }
 
-    pub async fn last_queued_message(&self) -> Message {
+    pub async fn last_queued_message(&self) -> MessageWrapper {
         self.read_queued_messages()
             .await
             .into_iter()
@@ -268,7 +281,7 @@ impl QueueReceiver {
     pub async fn clear_queue(&self, server: &Server) {
         for message in self.read_queued_messages().await {
             let due = self.message_due(message.queue_id).await;
-            message.remove(server, due).await;
+            message.remove(server, due.into()).await;
         }
     }
 }
@@ -364,11 +377,11 @@ pub trait TestMessage {
     async fn read_lines(&self, core: &QueueReceiver) -> Vec<String>;
 }
 
-impl TestMessage for Message {
+impl TestMessage for MessageWrapper {
     async fn read_message(&self, core: &QueueReceiver) -> String {
         String::from_utf8(
             core.blob_store
-                .get_blob(self.blob_hash.as_slice(), 0..usize::MAX)
+                .get_blob(self.message.blob_hash.as_slice(), 0..usize::MAX)
                 .await
                 .unwrap()
                 .expect("Message blob not found"),

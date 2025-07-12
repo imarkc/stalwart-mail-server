@@ -1,15 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::Server;
-use directory::{backend::internal::PrincipalField, QueryBy};
+use directory::QueryBy;
 use jmap_proto::{
     method::get::{GetRequest, GetResponse, RequestArguments},
-    object::Object,
-    types::{collection::Collection, property::Property, state::State, value::Value},
+    types::{
+        collection::Collection,
+        property::Property,
+        state::State,
+        value::{Object, Value},
+    },
 };
 use std::future::Future;
 
@@ -35,14 +39,14 @@ impl PrincipalGet for Server {
             //Property::Timezone,
             //Property::Capabilities,
         ]);
-        let email_submission_ids = self
-            .get_document_ids(u32::MAX, Collection::EmailSubmission)
+        let principal_ids = self
+            .get_document_ids(u32::MAX, Collection::Principal)
             .await?
             .unwrap_or_default();
         let ids = if let Some(ids) = ids {
             ids
         } else {
-            email_submission_ids
+            principal_ids
                 .iter()
                 .take(self.core.jmap.get_max_objects)
                 .map(Into::into)
@@ -81,9 +85,9 @@ impl PrincipalGet for Server {
                         .map(|v| Value::Text(v.to_string()))
                         .unwrap_or(Value::Null),
                     Property::Email => principal
-                        .iter_str(PrincipalField::Emails)
-                        .next()
-                        .map(|email| Value::Text(email.clone()))
+                        .emails
+                        .first()
+                        .map(|email| Value::Text(email.to_string()))
                         .unwrap_or(Value::Null),
                     _ => Value::Null,
                 };

@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput};
+use syn::{Data, DeriveInput, parse_macro_input};
 
 #[proc_macro_derive(EnumMethods)]
 pub fn enum_id(input: TokenStream) -> TokenStream {

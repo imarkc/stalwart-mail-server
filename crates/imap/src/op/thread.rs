@@ -1,10 +1,8 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
-
-use std::{sync::Arc, time::Instant};
 
 use crate::{
     core::{SelectedMailbox, Session, SessionData},
@@ -13,15 +11,16 @@ use crate::{
 use ahash::AHashMap;
 use common::listener::SessionStream;
 use directory::Permission;
-use email::cache::ThreadCache;
+use email::cache::MessageCacheFetch;
 use imap_proto::{
+    Command, StatusResponse,
     protocol::{
-        thread::{Arguments, Response},
         ImapResponse,
+        thread::{Arguments, Response},
     },
     receiver::Request,
-    Command, StatusResponse,
 };
+use std::{sync::Arc, time::Instant};
 use trc::AddContext;
 
 impl<T: SessionStream> Session<T> {
@@ -80,18 +79,20 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Lock the cache
-        let thread_ids = self
+        let cache = self
             .server
-            .get_cached_thread_ids(mailbox.id.account_id, result_set.results.iter())
+            .get_cached_messages(mailbox.id.account_id)
             .await
             .caused_by(trc::location!())?;
 
         // Group messages by thread
         let mut threads: AHashMap<u32, Vec<u32>> = AHashMap::new();
         let state = mailbox.state.lock();
-        for (document_id, thread_id) in thread_ids {
-            if let Some((imap_id, _)) = state.map_result_id(document_id, is_uid) {
-                threads.entry(thread_id).or_default().push(imap_id);
+        for item in &cache.emails.items {
+            if result_set.results.contains(item.document_id) {
+                if let Some((imap_id, _)) = state.map_result_id(item.document_id, is_uid) {
+                    threads.entry(item.thread_id).or_default().push(imap_id);
+                }
             }
         }
 

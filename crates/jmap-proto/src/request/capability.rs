@@ -1,13 +1,14 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::CompactString;
 use utils::map::vec_map::VecMap;
 
 use crate::{
-    parser::{json::Parser, JsonObjectParser},
+    parser::{JsonObjectParser, json::Parser},
     response::serialize::serialize_hex,
     types::{id::Id, type_state::DataType},
 };
@@ -299,7 +300,7 @@ impl Account {
 impl Default for SieveSessionCapabilities {
     fn default() -> Self {
         Self {
-            implementation: concat!("Stalwart JMAP v", env!("CARGO_PKG_VERSION"),),
+            implementation: "Stalwart v1.0.0",
         }
     }
 }
@@ -351,10 +352,11 @@ impl JsonObjectParser for Capability {
 impl Parser<'_> {
     fn error_capability(&mut self) -> trc::Error {
         if self.is_eof || self.skip_string() {
-            trc::JmapEvent::UnknownCapability.into_err().details(
-                String::from_utf8_lossy(self.bytes[self.pos_marker..self.pos - 1].as_ref())
-                    .into_owned(),
-            )
+            trc::JmapEvent::UnknownCapability
+                .into_err()
+                .details(CompactString::from_utf8_lossy(
+                    self.bytes[self.pos_marker..self.pos - 1].as_ref(),
+                ))
         } else {
             self.error_unterminated()
         }

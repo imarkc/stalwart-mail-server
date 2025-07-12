@@ -1,30 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use crate::{Deserialize, U32_LEN, U64_LEN};
-
-#[derive(Debug, Clone)]
-pub struct HashedValue<T: Deserialize> {
-    pub hash: u64,
-    pub inner: T,
-}
+use super::{Archive, ArchiveVersion};
+use crate::{U32_LEN, U64_LEN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssertValue {
     U32(u32),
     U64(u64),
-    Hash(u64),
+    Archive(ArchiveVersion),
     Some,
     None,
-}
-
-impl<T: Deserialize + Default> HashedValue<T> {
-    pub fn take(&mut self) -> T {
-        std::mem::take(&mut self.inner)
-    }
 }
 
 pub trait ToAssertValue {
@@ -55,24 +44,37 @@ impl ToAssertValue for u32 {
     }
 }
 
-impl<T: Deserialize> ToAssertValue for HashedValue<T> {
+impl<T> ToAssertValue for Archive<T> {
     fn to_assert_value(&self) -> AssertValue {
-        AssertValue::Hash(self.hash)
+        AssertValue::Archive(self.version)
     }
 }
 
-impl<T: Deserialize> ToAssertValue for &HashedValue<T> {
+impl<T> ToAssertValue for &Archive<T> {
     fn to_assert_value(&self) -> AssertValue {
-        AssertValue::Hash(self.hash)
+        AssertValue::Archive(self.version)
     }
 }
 
 impl AssertValue {
     pub fn matches(&self, bytes: &[u8]) -> bool {
         match self {
-            AssertValue::U32(v) => bytes.len() == U32_LEN && u32::deserialize(bytes).unwrap() == *v,
-            AssertValue::U64(v) => bytes.len() == U64_LEN && u64::deserialize(bytes).unwrap() == *v,
-            AssertValue::Hash(v) => xxhash_rust::xxh3::xxh3_64(bytes) == *v,
+            AssertValue::U32(v) => bytes
+                .get(bytes.len() - U32_LEN..)
+                .is_some_and(|b| b == v.to_be_bytes()),
+
+            AssertValue::U64(v) => bytes
+                .get(bytes.len() - U64_LEN..)
+                .is_some_and(|b| b == v.to_be_bytes()),
+            AssertValue::Archive(v) => match v {
+                ArchiveVersion::Versioned { hash, .. } => bytes
+                    .get(bytes.len() - U32_LEN - U64_LEN - 1..bytes.len() - U64_LEN - 1)
+                    .is_some_and(|b| b == hash.to_be_bytes()),
+                ArchiveVersion::Hashed { hash } => bytes
+                    .get(bytes.len() - U32_LEN - 1..bytes.len() - 1)
+                    .is_some_and(|b| b == hash.to_be_bytes()),
+                ArchiveVersion::Unversioned => false,
+            },
             AssertValue::None => false,
             AssertValue::Some => true,
         }
@@ -80,14 +82,5 @@ impl AssertValue {
 
     pub fn is_none(&self) -> bool {
         matches!(self, AssertValue::None)
-    }
-}
-
-impl<T: Deserialize> Deserialize for HashedValue<T> {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        Ok(HashedValue {
-            hash: xxhash_rust::xxh3::xxh3_64(bytes),
-            inner: T::deserialize(bytes)?,
-        })
     }
 }

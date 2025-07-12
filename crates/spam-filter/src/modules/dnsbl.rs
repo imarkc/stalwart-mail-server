@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,11 +11,12 @@ use std::{
 };
 
 use common::{
+    Server,
     config::spamfilter::{DnsBlServer, Element, IpResolver, Location},
     expr::functions::ResolveVariable,
-    Server,
 };
-use mail_auth::{common::resolver::IntoFqdn, Error};
+use compact_str::CompactString;
+use mail_auth::{Error, common::resolver::IntoFqdn};
 use trc::SpamEvent;
 
 use crate::SpamFilterContext;
@@ -80,10 +81,10 @@ async fn is_dnsbl(
     resolver: SpamFilterResolver<'_, impl ResolveVariable>,
     element: Element,
     checks: &mut usize,
-) -> Option<String> {
+) -> Option<CompactString> {
     let time = Instant::now();
     let zone = server
-        .eval_if::<String, _>(&config.zone, &resolver, resolver.ctx.input.span_id)
+        .eval_if::<CompactString, _>(&config.zone, &resolver, resolver.ctx.input.span_id)
         .await?;
 
     #[cfg(feature = "test_mode")]
@@ -112,7 +113,7 @@ async fn is_dnsbl(
         }
     }
 
-    let result = match server.inner.cache.dns_rbl.get(&zone) {
+    let result = match server.inner.cache.dns_rbl.get(zone.as_str()) {
         Some(Some(result)) => result,
         Some(None) => return None,
         None => {
@@ -150,7 +151,7 @@ async fn is_dnsbl(
                     ));
 
                     server.inner.cache.dns_rbl.insert_with_expiry(
-                        zone,
+                        zone.to_string(),
                         Some(entry.clone()),
                         result.expires,
                     );
@@ -166,11 +167,11 @@ async fn is_dnsbl(
                         Elapsed = time.elapsed()
                     );
 
-                    server
-                        .inner
-                        .cache
-                        .dns_rbl
-                        .insert(zone, None, Duration::from_secs(86400));
+                    server.inner.cache.dns_rbl.insert(
+                        zone.to_string(),
+                        None,
+                        Duration::from_secs(86400),
+                    );
 
                     return None;
                 }

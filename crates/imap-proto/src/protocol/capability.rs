@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{authenticate::Mechanism, ImapResponse};
+use super::{ImapResponse, authenticate::Mechanism};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
@@ -52,6 +52,7 @@ pub enum Capability {
     Quota,
     QuotaResource(QuotaResourceName),
     QuotaSet,
+    JmapAccess,
 }
 
 /*
@@ -126,6 +127,7 @@ impl Capability {
                 return;
             }
             Capability::QuotaSet => b"QUOTA=SET",
+            Capability::JmapAccess => b"JMAPACCESS",
         });
     }
 
@@ -138,6 +140,7 @@ impl Capability {
             Capability::LiteralPlus,
             Capability::Id,
             Capability::Utf8Accept,
+            Capability::JmapAccess,
         ];
 
         if is_authenticated {
@@ -173,8 +176,9 @@ impl Capability {
             ]);
         } else {
             capabilities.extend([
-                Capability::Auth(Mechanism::OAuthBearer),
                 Capability::Auth(Mechanism::Plain),
+                Capability::Auth(Mechanism::OAuthBearer),
+                Capability::Auth(Mechanism::XOauth2),
             ]);
         }
         if offer_tls {
@@ -201,8 +205,8 @@ impl ImapResponse for Response {
 #[cfg(test)]
 mod tests {
     use crate::protocol::{
-        capability::{Capability, Response},
         ImapResponse,
+        capability::{Capability, Response},
     };
 
     #[test]

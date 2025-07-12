@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,7 +9,8 @@ pub mod description;
 pub mod level;
 pub mod metrics;
 
-use std::{borrow::Cow, fmt::Display};
+use compact_str::ToCompactString;
+use std::fmt::Display;
 
 use crate::*;
 
@@ -131,7 +132,7 @@ impl Error {
 
     #[inline(always)]
     pub fn reason(self, error: impl Display) -> Self {
-        self.ctx(Key::Reason, error.to_string())
+        self.ctx(Key::Reason, error.to_compact_string())
     }
 
     #[inline(always)]
@@ -653,7 +654,7 @@ impl NetworkEvent {
 impl Value {
     pub fn from_maybe_string(value: &[u8]) -> Self {
         if let Ok(value) = std::str::from_utf8(value) {
-            Self::String(value.to_string())
+            Self::String(value.into())
         } else {
             Self::Bytes(value.to_vec())
         }
@@ -670,15 +671,13 @@ impl Value {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(value) => Some(value.as_str()),
-            Self::Static(value) => Some(value),
             _ => None,
         }
     }
 
-    pub fn into_string(self) -> Option<Cow<'static, str>> {
+    pub fn into_string(self) -> Option<CompactString> {
         match self {
-            Self::String(value) => Some(Cow::Owned(value)),
-            Self::Static(value) => Some(Cow::Borrowed(value)),
+            Self::String(value) => Some(value),
             _ => None,
         }
     }
@@ -729,10 +728,7 @@ impl PartialEq for Error {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Static(l0), Self::Static(r0)) => l0 == r0,
             (Self::String(l0), Self::String(r0)) => l0 == r0,
-            (Self::String(l0), Self::Static(r0)) => l0 == r0,
-            (Self::Static(l0), Self::String(r0)) => l0 == r0,
             (Self::UInt(l0), Self::UInt(r0)) => l0 == r0,
             (Self::Int(l0), Self::Int(r0)) => l0 == r0,
             (Self::Float(l0), Self::Float(r0)) => l0 == r0,

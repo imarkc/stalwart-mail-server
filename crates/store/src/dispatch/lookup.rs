@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,18 +9,19 @@ use std::borrow::Cow;
 use trc::AddContext;
 use utils::config::Rate;
 
-use crate::{
-    backend::http::lookup::HttpStoreGet,
-    write::{assert::AssertValue, InMemoryClass, MaybeDynamicId},
-    Serialize,
-};
 #[allow(unused_imports)]
 use crate::{
+    Deserialize, InMemoryStore, IterateParams, QueryResult, Store, U64_LEN, Value, ValueKey,
     write::{
+        BatchBuilder, Operation, ValueClass, ValueOp,
         key::{DeserializeBigEndian, KeySerializer},
-        now, BatchBuilder, Operation, ValueClass, ValueOp,
+        now,
     },
-    Deserialize, InMemoryStore, IterateParams, QueryResult, Store, Value, ValueKey, U64_LEN,
+};
+use crate::{
+    SerializeInfallible,
+    backend::http::lookup::HttpStoreGet,
+    write::{InMemoryClass, assert::AssertValue},
 };
 
 pub struct KeyValue<T> {
@@ -34,17 +35,17 @@ impl InMemoryStore {
         match self {
             InMemoryStore::Store(store) => {
                 let mut batch = BatchBuilder::new();
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::InMemory(InMemoryClass::Key(kv.key)),
-                    op: ValueOp::Set(
-                        KeySerializer::new(kv.value.len() + U64_LEN)
+                    op: ValueOp::Set {
+                        value: KeySerializer::new(kv.value.len() + U64_LEN)
                             .write(kv.expires.map_or(u64::MAX, |expires| now() + expires))
                             .write(kv.value.as_slice())
-                            .finalize()
-                            .into(),
-                    ),
+                            .finalize(),
+                        version_offset: None,
+                    },
                 });
-                store.write(batch.build()).await.map(|_| ())
+                store.write(batch.build_all()).await.map(|_| ())
             }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_set(&kv.key, &kv.value, kv.expires).await,
@@ -63,35 +64,35 @@ impl InMemoryStore {
                 let mut batch = BatchBuilder::new();
 
                 if let Some(expires) = kv.expires {
-                    batch.ops.push(Operation::Value {
+                    batch.any_op(Operation::Value {
                         class: ValueClass::InMemory(InMemoryClass::Key(kv.key.clone())),
-                        op: ValueOp::Set(
-                            KeySerializer::new(U64_LEN * 2)
+                        op: ValueOp::Set {
+                            value: KeySerializer::new(U64_LEN * 2)
                                 .write(0u64)
                                 .write(now() + expires)
-                                .finalize()
-                                .into(),
-                        ),
+                                .finalize(),
+                            version_offset: None,
+                        },
                     });
                 }
 
                 if return_value {
-                    batch.ops.push(Operation::Value {
+                    batch.any_op(Operation::Value {
                         class: ValueClass::InMemory(InMemoryClass::Counter(kv.key)),
                         op: ValueOp::AddAndGet(kv.value),
                     });
 
                     store
-                        .write(batch.build())
+                        .write(batch.build_all())
                         .await
                         .and_then(|r| r.last_counter_id())
                 } else {
-                    batch.ops.push(Operation::Value {
+                    batch.any_op(Operation::Value {
                         class: ValueClass::InMemory(InMemoryClass::Counter(kv.key)),
                         op: ValueOp::AtomicAdd(kv.value),
                     });
 
-                    store.write(batch.build()).await.map(|_| 0)
+                    store.write(batch.build_all()).await.map(|_| 0)
                 }
             }
             #[cfg(feature = "redis")]
@@ -109,11 +110,11 @@ impl InMemoryStore {
         match self {
             InMemoryStore::Store(store) => {
                 let mut batch = BatchBuilder::new();
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::InMemory(InMemoryClass::Key(key.into().into_bytes())),
                     op: ValueOp::Clear,
                 });
-                store.write(batch.build()).await.map(|_| ())
+                store.write(batch.build_all()).await.map(|_| ())
             }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete(key.into().as_bytes()).await,
@@ -130,11 +131,11 @@ impl InMemoryStore {
         match self {
             InMemoryStore::Store(store) => {
                 let mut batch = BatchBuilder::new();
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::InMemory(InMemoryClass::Counter(key.into().into_bytes())),
                     op: ValueOp::Clear,
                 });
-                store.write(batch.build()).await.map(|_| ())
+                store.write(batch.build_all()).await.map(|_| ())
             }
             #[cfg(feature = "redis")]
             InMemoryStore::Redis(store) => store.key_delete(key.into().as_bytes()).await,
@@ -299,12 +300,12 @@ impl InMemoryStore {
                     {
                         // TODO remove in 1.0
                         let mut batch = BatchBuilder::new();
-                        batch.ops.push(Operation::Value {
+                        batch.any_op(Operation::Value {
                             class: ValueClass::InMemory(InMemoryClass::Key(key.clone())),
                             op: ValueOp::Clear,
                         });
                         store
-                            .write(batch.build())
+                            .write(batch.build_all())
                             .await
                             .caused_by(trc::location!())?;
                         None
@@ -321,7 +322,7 @@ impl InMemoryStore {
                     return Ok(false);
                 }
 
-                let key: ValueClass<MaybeDynamicId> = ValueClass::InMemory(InMemoryClass::Key(key));
+                let key: ValueClass = ValueClass::InMemory(InMemoryClass::Key(key));
                 let mut batch = BatchBuilder::new();
                 batch.assert_value(
                     key.clone(),
@@ -331,7 +332,7 @@ impl InMemoryStore {
                     },
                 );
                 batch.set(key.clone(), (now + duration).serialize());
-                match store.write(batch.build()).await {
+                match store.write(batch.build_all()).await {
                     Ok(_) => Ok(true),
                     Err(err) if err.is_assertion_failure() => Ok(false),
                     Err(err) => Err(err
@@ -393,21 +394,21 @@ impl InMemoryStore {
                 if !expired_keys.is_empty() {
                     let mut batch = BatchBuilder::new();
                     for key in expired_keys {
-                        batch.ops.push(Operation::Value {
+                        batch.any_op(Operation::Value {
                             class: ValueClass::InMemory(InMemoryClass::Key(key)),
                             op: ValueOp::Clear,
                         });
-                        if batch.ops.len() >= 1000 {
+                        if batch.is_large_batch() {
                             store
-                                .write(batch.build())
+                                .write(batch.build_all())
                                 .await
                                 .caused_by(trc::location!())?;
                             batch = BatchBuilder::new();
                         }
                     }
-                    if !batch.ops.is_empty() {
+                    if !batch.is_empty() {
                         store
-                            .write(batch.build())
+                            .write(batch.build_all())
                             .await
                             .caused_by(trc::location!())?;
                     }
@@ -416,25 +417,25 @@ impl InMemoryStore {
                 if !expired_counters.is_empty() {
                     let mut batch = BatchBuilder::new();
                     for key in expired_counters {
-                        batch.ops.push(Operation::Value {
+                        batch.any_op(Operation::Value {
                             class: ValueClass::InMemory(InMemoryClass::Counter(key.clone())),
                             op: ValueOp::Clear,
                         });
-                        batch.ops.push(Operation::Value {
+                        batch.any_op(Operation::Value {
                             class: ValueClass::InMemory(InMemoryClass::Key(key)),
                             op: ValueOp::Clear,
                         });
-                        if batch.ops.len() >= 1000 {
+                        if batch.is_large_batch() {
                             store
-                                .write(batch.build())
+                                .write(batch.build_all())
                                 .await
                                 .caused_by(trc::location!())?;
                             batch = BatchBuilder::new();
                         }
                     }
-                    if !batch.ops.is_empty() {
+                    if !batch.is_empty() {
                         store
-                            .write(batch.build())
+                            .write(batch.build_all())
                             .await
                             .caused_by(trc::location!())?;
                     }

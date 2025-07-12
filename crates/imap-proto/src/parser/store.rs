@@ -1,16 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::{CompactString, ToCompactString, format_compact};
+
 use crate::{
-    protocol::{
-        store::{self, Operation},
-        Flag,
-    },
-    receiver::{bad, Request, Token},
     Command,
+    protocol::{
+        Flag,
+        store::{self, Operation},
+    },
+    receiver::{Request, Token, bad},
 };
 
 use super::{parse_number, parse_sequence_set};
@@ -23,10 +25,10 @@ impl Request<Command> {
         let sequence_set = parse_sequence_set(
             &tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_string(), "Missing sequence set."))?
+                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing sequence set."))?
                 .unwrap_bytes(),
         )
-        .map_err(|v| bad(self.tag.to_string(), v))?;
+        .map_err(|v| bad(self.tag.to_compact_string(), v))?;
         let mut unchanged_since = None;
 
         // CONDSTORE parameters
@@ -39,11 +41,14 @@ impl Request<Command> {
                             &tokens
                                 .next()
                                 .ok_or_else(|| {
-                                    bad(self.tag.to_string(), "Missing UNCHANGEDSINCE parameter.")
+                                    bad(
+                                        self.tag.to_compact_string(),
+                                        "Missing UNCHANGEDSINCE parameter.",
+                                    )
                                 })?
                                 .unwrap_bytes(),
                         )
-                        .map_err(|v| bad(self.tag.to_string(), v))?
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?
                         .into();
                     }
                     Token::ParenthesisClose => {
@@ -51,8 +56,8 @@ impl Request<Command> {
                     }
                     _ => {
                         return Err(bad(
-                            self.tag.to_string(),
-                            format!("Unsupported parameter '{}'.", token),
+                            self.tag.to_compact_string(),
+                            format_compact!("Unsupported parameter '{}'.", token),
                         ));
                     }
                 }
@@ -62,7 +67,12 @@ impl Request<Command> {
         // Operation
         let operation = tokens
             .next()
-            .ok_or_else(|| bad(self.tag.to_string(), "Missing message data item name."))?
+            .ok_or_else(|| {
+                bad(
+                    self.tag.to_compact_string(),
+                    "Missing message data item name.",
+                )
+            })?
             .unwrap_bytes();
         let (is_silent, operation) = hashify::tiny_map_ignore_case!(operation.as_slice(),
             "FLAGS" => (false, Operation::Set),
@@ -74,8 +84,8 @@ impl Request<Command> {
         )
         .ok_or_else(|| {
             bad(
-                self.tag.to_string(),
-                format!(
+                self.tag.to_compact_string(),
+                format_compact!(
                     "Unsupported message data item name: {:?}",
                     String::from_utf8_lossy(&operation)
                 ),
@@ -86,30 +96,36 @@ impl Request<Command> {
         let mut keywords = Vec::new();
         match tokens
             .next()
-            .ok_or_else(|| bad(self.tag.to_string(), "Missing flags to set."))?
+            .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing flags to set."))?
         {
             Token::ParenthesisOpen => {
                 for token in tokens {
                     match token {
                         Token::Argument(flag) => {
                             keywords.push(
-                                Flag::parse_imap(flag).map_err(|v| bad(self.tag.to_string(), v))?,
+                                Flag::parse_imap(flag)
+                                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                             );
                         }
                         Token::ParenthesisClose => {
                             break;
                         }
                         _ => {
-                            return Err(bad(self.tag.to_string(), "Unsupported flag."));
+                            return Err(bad(self.tag.to_compact_string(), "Unsupported flag."));
                         }
                     }
                 }
             }
             Token::Argument(flag) => {
-                keywords.push(Flag::parse_imap(flag).map_err(|v| bad(self.tag.to_string(), v))?);
+                keywords.push(
+                    Flag::parse_imap(flag).map_err(|v| bad(self.tag.to_compact_string(), v))?,
+                );
             }
             _ => {
-                return Err(bad(self.tag, "Invalid flags parameter."));
+                return Err(bad(
+                    CompactString::from_string_buffer(self.tag),
+                    "Invalid flags parameter.",
+                ));
             }
         }
 
@@ -123,7 +139,7 @@ impl Request<Command> {
                 unchanged_since,
             })
         } else {
-            Err(bad(self.tag.to_string(), "Missing flags to set."))
+            Err(bad(self.tag.to_compact_string(), "Missing flags to set."))
         }
     }
 }
@@ -133,8 +149,8 @@ mod tests {
 
     use crate::{
         protocol::{
-            store::{self, Operation},
             Flag, Sequence,
+            store::{self, Operation},
         },
         receiver::Receiver,
     };
@@ -154,7 +170,7 @@ mod tests {
                     is_silent: false,
                     operation: Operation::Add,
                     keywords: vec![Flag::Deleted],
-                    tag: "A003".to_string(),
+                    tag: "A003".into(),
                     unchanged_since: None,
                 },
             ),
@@ -168,7 +184,7 @@ mod tests {
                     is_silent: true,
                     operation: Operation::Clear,
                     keywords: vec![Flag::Phishing, Flag::Junk],
-                    tag: "A004".to_string(),
+                    tag: "A004".into(),
                     unchanged_since: None,
                 },
             ),
@@ -185,7 +201,7 @@ mod tests {
                     is_silent: true,
                     operation: Operation::Add,
                     keywords: vec![Flag::Deleted],
-                    tag: "d105".to_string(),
+                    tag: "d105".into(),
                     unchanged_since: Some(320162338),
                 },
             ),

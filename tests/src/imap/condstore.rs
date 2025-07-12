@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,8 +7,8 @@
 use imap_proto::ResponseType;
 
 use crate::imap::{
-    append::{assert_append_message, build_messages},
     AssertResult,
+    append::{assert_append_message, build_messages},
 };
 
 use super::{ImapConnection, Type};
@@ -166,7 +166,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("VANISHED", 1)
-        .assert_contains("VANISHED (EARLIER) 1:2") // .assert_contains("VANISHED (EARLIER) 2")
+        .assert_contains("VANISHED (EARLIER) 2")
         .assert_count("FETCH (", 3);
 
     // Fetch changes since SEQ 4
@@ -178,7 +178,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("VANISHED", 1)
-        .assert_contains("VANISHED (EARLIER) 1:2") // .assert_contains("VANISHED (EARLIER) 2")
+        .assert_contains("VANISHED (EARLIER) 2")
         .assert_count("FETCH (", 2);
 
     // Fetch changes since SEQ 6
@@ -190,7 +190,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("VANISHED", 1)
-        .assert_contains("VANISHED (EARLIER) 1:2") // .assert_contains("VANISHED (EARLIER) 2")
+        .assert_contains("VANISHED (EARLIER) 2")
         .assert_count("FETCH (", 1);
 
     // Fetch changes since SEQ 7
@@ -202,7 +202,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("VANISHED", 1)
-        .assert_contains("VANISHED (EARLIER) 1:2") // .assert_contains("VANISHED (EARLIER) 2")
+        .assert_contains("VANISHED (EARLIER) 2")
         .assert_count("FETCH (", 0);
 
     // Fetch changes since SEQ 8
@@ -245,7 +245,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_contains("* 1 FETCH")
-        .assert_contains("UID 3)")
+        .assert_contains("(UID 3 MODSEQ")
         .assert_count("FETCH (", 1)
         .assert_contains("[MODIFIED 2,4:5]");
 
@@ -257,7 +257,7 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_contains("* 2 FETCH")
-        .assert_contains("UID 4)")
+        .assert_contains("(UID 4 MODSEQ")
         .assert_count("FETCH (", 1)
         .assert_contains("[MODIFIED 5]");
 
@@ -276,5 +276,5 @@ pub async fn test(imap: &mut ImapConnection, imap_check: &mut ImapConnection) {
     imap.assert_read(Type::Tagged, ResponseType::Ok)
         .await
         .assert_count("FETCH (", 3)
-        .assert_contains("VANISHED (EARLIER) 1:2"); // .assert_contains("VANISHED (EARLIER) 2");
+        .assert_contains("VANISHED (EARLIER) 2");
 }

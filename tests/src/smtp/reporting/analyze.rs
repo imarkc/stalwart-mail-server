@@ -1,16 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::Duration;
 
-use crate::smtp::{inbound::TestQueueEvent, session::TestSession, TestSMTP};
+use crate::smtp::{TestSMTP, inbound::TestQueueEvent, session::TestSession};
 
 use store::{
-    write::{ReportClass, ValueClass},
     IterateParams, ValueKey,
+    write::{ReportClass, ValueClass},
 };
 
 const CONFIG: &str = r#"
@@ -37,7 +37,7 @@ async fn report_analyze() {
     // Create test message
     let mut session = local.new_session();
     let qr = &mut local.queue_receiver;
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
 

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,16 +9,16 @@ use std::{fmt::Debug, net::IpAddr};
 use ahash::AHashSet;
 use utils::{
     config::{
+        Config, ConfigKey, Rate,
         ipmask::{IpAddrMask, IpAddrOrMask},
         utils::ParseValue,
-        Config, ConfigKey, Rate,
     },
     glob::GlobPattern,
 };
 
 use crate::{
-    ip_to_bytes, manager::config::MatchType, Server, KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_LOITER,
-    KV_RATE_LIMIT_RCPT, KV_RATE_LIMIT_SCAN,
+    KV_RATE_LIMIT_AUTH, KV_RATE_LIMIT_LOITER, KV_RATE_LIMIT_RCPT, KV_RATE_LIMIT_SCAN, Server,
+    ip_to_bytes, ipc::BroadcastEvent, manager::config::MatchType,
 };
 
 #[derive(Debug, Clone)]
@@ -226,7 +226,7 @@ impl Server {
         Ok(false)
     }
 
-    async fn block_ip(&self, ip: IpAddr) -> trc::Result<()> {
+    pub async fn block_ip(&self, ip: IpAddr) -> trc::Result<()> {
         // Add IP to blocked list
         self.inner.data.blocked_ips.write().insert(ip);
 
@@ -244,7 +244,8 @@ impl Server {
             .await?;
 
         // Increment version
-        self.increment_blocked_version();
+        self.cluster_broadcast(BroadcastEvent::ReloadBlockedIps)
+            .await;
 
         Ok(())
     }
@@ -275,13 +276,6 @@ impl Server {
                     .allowed_ip_networks
                     .iter()
                     .any(|network| network.matches(ip)))
-    }
-
-    pub fn increment_blocked_version(&self) {
-        self.inner
-            .data
-            .blocked_ips_version
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

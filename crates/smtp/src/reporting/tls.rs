@@ -1,40 +1,36 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{collections::hash_map::Entry, future::Future, sync::Arc, time::Duration};
-
+use super::{AggregateTimestamp, SerializedSize};
+use crate::{queue::RecipientDomain, reporting::SmtpReporting};
 use ahash::AHashMap;
 use common::{
+    Server, USER_AGENT,
     config::smtp::{
         report::AggregateFrequency,
         resolver::{Mode, MxPattern},
     },
     ipc::{TlsEvent, ToHash},
-    Server, USER_AGENT,
 };
 use mail_auth::{
-    flate2::{write::GzEncoder, Compression},
+    flate2::{Compression, write::GzEncoder},
     mta_sts::{ReportUri, TlsRpt},
     report::tlsrpt::{
         DateRange, FailureDetails, Policy, PolicyDetails, PolicyType, Summary, TlsReport,
     },
 };
-
 use mail_parser::DateTime;
 use reqwest::header::CONTENT_TYPE;
 use std::fmt::Write;
+use std::{collections::hash_map::Entry, future::Future, sync::Arc, time::Duration};
 use store::{
-    write::{now, BatchBuilder, Bincode, QueueClass, ReportEvent, ValueClass},
     Deserialize, IterateParams, Serialize, ValueKey,
+    write::{AlignedBytes, Archive, Archiver, BatchBuilder, QueueClass, ReportEvent, ValueClass},
 };
 use trc::{AddContext, OutgoingReportEvent};
-
-use crate::{queue::RecipientDomain, reporting::SmtpReporting};
-
-use super::{AggregateTimestamp, SerializedSize};
 
 #[derive(Debug, Clone)]
 pub struct TlsRptOptions {
@@ -42,7 +38,7 @@ pub struct TlsRptOptions {
     pub interval: AggregateFrequency,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, serde::Serialize)]
 pub struct TlsFormat {
     pub rua: Vec<ReportUri>,
     pub policy: PolicyDetails,
@@ -75,7 +71,7 @@ impl TlsReporting for Server {
             .map(|e| (e.domain.as_str(), e.seq_id, e.due))
             .unwrap();
 
-        let span_id = self.inner.data.span_id_gen.generate().unwrap_or_else(now);
+        let span_id = self.inner.data.span_id_gen.generate();
 
         trc::event!(
             OutgoingReport(OutgoingReportEvent::TlsAggregate),
@@ -113,10 +109,11 @@ impl TlsReporting for Server {
                 return;
             }
             Err(err) => {
-                trc::error!(err
-                    .span_id(span_id)
-                    .caused_by(trc::location!())
-                    .details("Failed to read TLS report"));
+                trc::error!(
+                    err.span_id(span_id)
+                        .caused_by(trc::location!())
+                        .details("Failed to read TLS report")
+                );
                 return;
             }
         };
@@ -266,7 +263,7 @@ impl TlsReporting for Server {
         let config = &self.core.smtp.report.tls;
         let mut report = TlsReport {
             organization_name: self
-                .eval_if(
+                .eval_if::<String, _>(
                     &config.org_name,
                     &RecipientDomain::new(domain_name),
                     span_id,
@@ -278,7 +275,7 @@ impl TlsReporting for Server {
                 end_datetime: DateTime::from_timestamp(event_to as i64),
             },
             contact_info: self
-                .eval_if(
+                .eval_if::<String, _>(
                     &config.contact_info,
                     &RecipientDomain::new(domain_name),
                     span_id,
@@ -295,15 +292,13 @@ impl TlsReporting for Server {
 
         for event in events {
             let tls = if let Some(tls) = self
-                .core
-                .storage
-                .data
-                .get_value::<Bincode<TlsFormat>>(ValueKey::from(ValueClass::Queue(
+                .store()
+                .get_value::<Archive<AlignedBytes>>(ValueKey::from(ValueClass::Queue(
                     QueueClass::TlsReportHeader(event.clone()),
                 )))
                 .await?
             {
-                tls.inner
+                tls.deserialize::<TlsFormat>()?
             } else {
                 continue;
             };
@@ -336,8 +331,9 @@ impl TlsReporting for Server {
                 .storage
                 .data
                 .iterate(IterateParams::new(from_key, to_key).ascending(), |_, v| {
+                    let archive = <Archive<AlignedBytes> as Deserialize>::deserialize(v)?;
                     if let Some(failure_details) =
-                        Bincode::<Option<FailureDetails>>::deserialize(v)?.inner
+                        archive.deserialize::<Option<FailureDetails>>()?
                     {
                         match record_map.entry(failure_details) {
                             Entry::Occupied(mut e) => {
@@ -348,7 +344,7 @@ impl TlsReporting for Server {
                             Entry::Vacant(e) => {
                                 if serialized_size
                                     .as_deref_mut()
-                                    .is_none_or( |serialized_size| {
+                                    .is_none_or(|serialized_size| {
                                         serde::Serialize::serialize(e.key(), serialized_size)
                                             .is_ok()
                                     })
@@ -490,21 +486,40 @@ impl TlsReporting for Server {
             // Write report
             builder.set(
                 ValueClass::Queue(QueueClass::TlsReportHeader(report_event.clone())),
-                Bincode::new(entry).serialize(),
+                match Archiver::new(entry).serialize() {
+                    Ok(data) => data.to_vec(),
+                    Err(err) => {
+                        trc::error!(
+                            err.caused_by(trc::location!())
+                                .details("Failed to serialize TLS report")
+                        );
+                        return;
+                    }
+                },
             );
         }
 
         // Write entry
-        report_event.seq_id = self.inner.data.queue_id_gen.generate().unwrap_or_else(now);
+        report_event.seq_id = self.inner.data.queue_id_gen.generate();
         builder.set(
             ValueClass::Queue(QueueClass::TlsReportEvent(report_event)),
-            Bincode::new(event.failure).serialize(),
+            match Archiver::new(event.failure).serialize() {
+                Ok(data) => data.to_vec(),
+                Err(err) => {
+                    trc::error!(
+                        err.caused_by(trc::location!())
+                            .details("Failed to serialize TLS report")
+                    );
+                    return;
+                }
+            },
         );
 
-        if let Err(err) = self.core.storage.data.write(builder.build()).await {
-            trc::error!(err
-                .caused_by(trc::location!())
-                .details("Failed to write TLS report"));
+        if let Err(err) = self.core.storage.data.write(builder.build_all()).await {
+            trc::error!(
+                err.caused_by(trc::location!())
+                    .details("Failed to write TLS report")
+            );
         }
     }
 
@@ -536,9 +551,10 @@ impl TlsReporting for Server {
                 )
                 .await
             {
-                trc::error!(err
-                    .caused_by(trc::location!())
-                    .details("Failed to delete TLS reports"));
+                trc::error!(
+                    err.caused_by(trc::location!())
+                        .details("Failed to delete TLS reports")
+                );
 
                 return;
             }
@@ -547,10 +563,11 @@ impl TlsReporting for Server {
             batch.clear(ValueClass::Queue(QueueClass::TlsReportHeader(event)));
         }
 
-        if let Err(err) = self.core.storage.data.write(batch.build()).await {
-            trc::error!(err
-                .caused_by(trc::location!())
-                .details("Failed to delete TLS reports"));
+        if let Err(err) = self.core.storage.data.write(batch.build_all()).await {
+            trc::error!(
+                err.caused_by(trc::location!())
+                    .details("Failed to delete TLS reports")
+            );
         }
     }
 }

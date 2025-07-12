@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,16 +8,17 @@ use std::sync::Arc;
 
 use ahash::AHashSet;
 use common::auth::{AccessToken, TenantInfo};
+
 use directory::{
-    backend::internal::{PrincipalField, PrincipalUpdate, PrincipalValue},
-    Permission, Principal, Type,
+    Permission, Type,
+    backend::internal::{PrincipalField, PrincipalSet, PrincipalUpdate, PrincipalValue},
 };
-use email::delivery::{IngestMessage, LocalDeliveryStatus, MailDelivery};
+use email::message::delivery::{IngestMessage, LocalDeliveryStatus, MailDelivery};
 use utils::BlobHash;
 
 use crate::jmap::assert_is_empty;
 
-use super::{enterprise::List, JMAPTest, ManagementApi};
+use super::{JMAPTest, ManagementApi, enterprise::List};
 
 pub async fn test(params: &JMAPTest) {
     println!("Running permissions tests...");
@@ -30,7 +31,7 @@ pub async fn test(params: &JMAPTest) {
     let account_id = api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Individual)
+            &PrincipalSet::new(u32::MAX, Type::Individual)
                 .with_field(PrincipalField::Name, "role_player")
                 .with_field(PrincipalField::Roles, vec!["user".to_string()])
                 .with_field(
@@ -79,7 +80,7 @@ pub async fn test(params: &JMAPTest) {
     ] {
         api.post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Role)
+            &PrincipalSet::new(u32::MAX, Type::Role)
                 .with_field(PrincipalField::Name, role.to_string())
                 .with_field(
                     PrincipalField::EnabledPermissions,
@@ -141,7 +142,7 @@ pub async fn test(params: &JMAPTest) {
         .validate_revision(1);
 
     // Query all principals
-    api.get::<List<Principal>>("/api/principal")
+    api.get::<List<PrincipalSet>>("/api/principal")
         .await
         .unwrap()
         .unwrap_data()
@@ -245,7 +246,7 @@ pub async fn test(params: &JMAPTest) {
     let tenant_id = api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Tenant)
+            &PrincipalSet::new(u32::MAX, Type::Tenant)
                 .with_field(PrincipalField::Name, "foobar")
                 .with_field(
                     PrincipalField::Roles,
@@ -262,7 +263,7 @@ pub async fn test(params: &JMAPTest) {
     let other_tenant_id = api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Tenant)
+            &PrincipalSet::new(u32::MAX, Type::Tenant)
                 .with_field(PrincipalField::Name, "xanadu")
                 .with_field(
                     PrincipalField::Roles,
@@ -276,7 +277,7 @@ pub async fn test(params: &JMAPTest) {
     // Creating a tenant without a valid domain should fail
     api.post::<u32>(
         "/api/principal",
-        &Principal::new(u32::MAX, Type::Individual)
+        &PrincipalSet::new(u32::MAX, Type::Individual)
             .with_field(PrincipalField::Name, "admin-foobar")
             .with_field(PrincipalField::Roles, vec!["tenant-admin".to_string()])
             .with_field(
@@ -295,7 +296,7 @@ pub async fn test(params: &JMAPTest) {
     // Create domain for the tenant and one outside the tenant
     api.post::<u32>(
         "/api/principal",
-        &Principal::new(u32::MAX, Type::Domain)
+        &PrincipalSet::new(u32::MAX, Type::Domain)
             .with_field(PrincipalField::Name, "foobar.org")
             .with_field(
                 PrincipalField::Tenant,
@@ -307,7 +308,7 @@ pub async fn test(params: &JMAPTest) {
     .unwrap_data();
     api.post::<u32>(
         "/api/principal",
-        &Principal::new(u32::MAX, Type::Domain).with_field(PrincipalField::Name, "example.org"),
+        &PrincipalSet::new(u32::MAX, Type::Domain).with_field(PrincipalField::Name, "example.org"),
     )
     .await
     .unwrap()
@@ -317,7 +318,7 @@ pub async fn test(params: &JMAPTest) {
     let tenant_admin_id = api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Individual)
+            &PrincipalSet::new(u32::MAX, Type::Individual)
                 .with_field(PrincipalField::Name, "admin@foobar.org")
                 .with_field(PrincipalField::Roles, vec!["tenant-admin".to_string()])
                 .with_field(
@@ -348,7 +349,8 @@ pub async fn test(params: &JMAPTest) {
     tenant_api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Tenant).with_field(PrincipalField::Name, "subfoobar"),
+            &PrincipalSet::new(u32::MAX, Type::Tenant)
+                .with_field(PrincipalField::Name, "subfoobar"),
         )
         .await
         .unwrap()
@@ -379,7 +381,8 @@ pub async fn test(params: &JMAPTest) {
     tenant_api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Domain).with_field(PrincipalField::Name, "foobar.com"),
+            &PrincipalSet::new(u32::MAX, Type::Domain)
+                .with_field(PrincipalField::Name, "foobar.com"),
         )
         .await
         .unwrap()
@@ -389,7 +392,8 @@ pub async fn test(params: &JMAPTest) {
     tenant_api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Domain).with_field(PrincipalField::Name, "foobar.net"),
+            &PrincipalSet::new(u32::MAX, Type::Domain)
+                .with_field(PrincipalField::Name, "foobar.net"),
         )
         .await
         .unwrap()
@@ -400,7 +404,7 @@ pub async fn test(params: &JMAPTest) {
         tenant_api
             .post::<u32>(
                 "/api/principal",
-                &Principal::new(u32::MAX, Type::Individual)
+                &PrincipalSet::new(u32::MAX, Type::Individual)
                     .with_field(PrincipalField::Name, user.to_string())
                     .with_field(PrincipalField::Roles, vec!["tenant-admin".to_string()]),
             )
@@ -413,7 +417,7 @@ pub async fn test(params: &JMAPTest) {
     let tenant_user_id = tenant_api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Individual)
+            &PrincipalSet::new(u32::MAX, Type::Individual)
                 .with_field(PrincipalField::Name, "john@foobar.org")
                 .with_field(
                     PrincipalField::Roles,
@@ -446,7 +450,7 @@ pub async fn test(params: &JMAPTest) {
     tenant_api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Individual)
+            &PrincipalSet::new(u32::MAX, Type::Individual)
                 .with_field(PrincipalField::Name, "jane@foobar.org")
                 .with_field(PrincipalField::Roles, vec!["tenant-admin".to_string()]),
         )
@@ -458,7 +462,7 @@ pub async fn test(params: &JMAPTest) {
     tenant_api
         .post::<u32>(
             "/api/principal",
-            &Principal::new(u32::MAX, Type::Role)
+            &PrincipalSet::new(u32::MAX, Type::Role)
                 .with_field(PrincipalField::Name, "no-mail-for-you@foobar.com")
                 .with_field(
                     PrincipalField::DisabledPermissions,
@@ -554,7 +558,7 @@ pub async fn test(params: &JMAPTest) {
 
     // Tenants should only see their own principals
     tenant_api
-        .get::<List<Principal>>("/api/principal?types=individual,group,role,list")
+        .get::<List<PrincipalSet>>("/api/principal?types=individual,group,role,list")
         .await
         .unwrap()
         .unwrap_data()
@@ -597,7 +601,7 @@ pub async fn test(params: &JMAPTest) {
         );
 
     // John should not be allowed to receive email
-    let message_blob = BlobHash::from(TEST_MESSAGE.as_bytes());
+    let message_blob = BlobHash::generate(TEST_MESSAGE.as_bytes());
     server
         .blob_store()
         .put_blob(message_blob.as_ref(), TEST_MESSAGE.as_bytes())
@@ -607,9 +611,10 @@ pub async fn test(params: &JMAPTest) {
         server
             .deliver_message(IngestMessage {
                 sender_address: "bill@foobar.org".to_string(),
+                sender_authenticated: true,
                 recipients: vec!["john@foobar.org".to_string()],
                 message_blob: message_blob.clone(),
-                message_size: TEST_MESSAGE.len(),
+                message_size: TEST_MESSAGE.len() as u64,
                 session_id: 0,
             })
             .await
@@ -645,9 +650,10 @@ pub async fn test(params: &JMAPTest) {
         server
             .deliver_message(IngestMessage {
                 sender_address: "bill@foobar.org".to_string(),
+                sender_authenticated: true,
                 recipients: vec!["john@foobar.org".to_string()],
                 message_blob: message_blob.clone(),
-                message_size: TEST_MESSAGE.len(),
+                message_size: TEST_MESSAGE.len() as u64,
                 session_id: 0,
             })
             .await
@@ -670,9 +676,10 @@ pub async fn test(params: &JMAPTest) {
         server
             .deliver_message(IngestMessage {
                 sender_address: "bill@foobar.org".to_string(),
+                sender_authenticated: true,
                 recipients: vec!["john@foobar.org".to_string()],
                 message_blob,
-                message_size: TEST_MESSAGE.len(),
+                message_size: TEST_MESSAGE.len() as u64,
                 session_id: 0,
             })
             .await
@@ -768,7 +775,7 @@ trait ValidatePrincipalList {
     fn assert_count(self, count: usize) -> Self;
 }
 
-impl ValidatePrincipalList for List<Principal> {
+impl ValidatePrincipalList for List<PrincipalSet> {
     fn assert_exists<'x>(
         self,
         name: &str,
@@ -800,7 +807,7 @@ trait ValidatePrincipal {
     );
 }
 
-impl ValidatePrincipal for Principal {
+impl ValidatePrincipal for PrincipalSet {
     fn validate<'x>(
         &self,
         typ: Type,

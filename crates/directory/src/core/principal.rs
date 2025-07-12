@@ -1,24 +1,325 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{collections::hash_map::Entry, fmt, str::FromStr};
 
+use ahash::AHashSet;
+use nlp::tokenizers::word::WordTokenizer;
 use serde::{
     Deserializer, Serializer,
     de::{self, IgnoredAny, Visitor},
     ser::SerializeMap,
 };
-use store::U64_LEN;
+use store::{
+    U64_LEN,
+    backend::MAX_TOKEN_LENGTH,
+    write::{BatchBuilder, DirectoryClass},
+};
 
 use crate::{
-    Permission, Principal, ROLE_ADMIN, Type,
-    backend::internal::{PrincipalField, PrincipalUpdate, PrincipalValue},
+    ArchivedPrincipal, Permission, PermissionGrant, Principal, PrincipalData, ROLE_ADMIN, Type,
+    backend::internal::{PrincipalField, PrincipalSet, PrincipalUpdate, PrincipalValue},
 };
 
 impl Principal {
+    pub fn new(id: u32, typ: Type) -> Self {
+        Self {
+            id,
+            typ,
+            name: "".into(),
+            description: None,
+            secrets: Default::default(),
+            emails: Default::default(),
+            quota: Default::default(),
+            tenant: Default::default(),
+            data: Default::default(),
+        }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn typ(&self) -> Type {
+        self.typ
+    }
+
+    pub fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    pub fn quota(&self) -> u64 {
+        self.quota.unwrap_or_default()
+    }
+
+    pub fn principal_quota(&self, typ: &Type) -> Option<u64> {
+        self.data
+            .iter()
+            .find_map(|d| {
+                if let PrincipalData::PrincipalQuota(q) = d {
+                    Some(q)
+                } else {
+                    None
+                }
+            })
+            .and_then(|quotas| {
+                quotas
+                    .iter()
+                    .find_map(|q| if q.typ == *typ { Some(q.quota) } else { None })
+            })
+    }
+
+    // SPDX-SnippetBegin
+    // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
+    // SPDX-License-Identifier: LicenseRef-SEL
+    pub fn tenant(&self) -> Option<u32> {
+        self.tenant
+    }
+    // SPDX-SnippetEnd
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn member_of(&self) -> &[u32] {
+        self.data
+            .iter()
+            .find_map(|item| {
+                if let PrincipalData::MemberOf(items) = item {
+                    items.as_slice().into()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn member_of_mut(&mut self) -> Option<&mut Vec<u32>> {
+        self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::MemberOf(items) = item {
+                items.into()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn roles(&self) -> &[u32] {
+        self.data
+            .iter()
+            .find_map(|item| {
+                if let PrincipalData::Roles(items) = item {
+                    items.as_slice().into()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn permissions(&self) -> &[PermissionGrant] {
+        self.data
+            .iter()
+            .find_map(|item| {
+                if let PrincipalData::Permissions(items) = item {
+                    items.as_slice().into()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn urls(&self) -> &[String] {
+        self.data
+            .iter()
+            .find_map(|item| {
+                if let PrincipalData::Urls(items) = item {
+                    items.as_slice().into()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn roles_mut(&mut self) -> Option<&mut Vec<u32>> {
+        self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::Roles(items) = item {
+                items.into()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn lists(&self) -> &[u32] {
+        self.data
+            .iter()
+            .find_map(|item| {
+                if let PrincipalData::Lists(items) = item {
+                    items.as_slice().into()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn picture(&self) -> Option<&String> {
+        self.data.iter().find_map(|item| {
+            if let PrincipalData::Picture(picture) = item {
+                picture.into()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn picture_mut(&mut self) -> Option<&mut String> {
+        self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::Picture(picture) = item {
+                picture.into()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn add_permission(&mut self, permission: Permission, grant: bool) {
+        if let Some(permissions) = self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::Permissions(permissions) = item {
+                Some(permissions)
+            } else {
+                None
+            }
+        }) {
+            if let Some(current) = permissions.iter_mut().find(|p| p.permission == permission) {
+                current.grant = grant;
+            } else {
+                permissions.push(PermissionGrant { permission, grant });
+            }
+        } else {
+            self.data
+                .push(PrincipalData::Permissions(vec![PermissionGrant {
+                    permission,
+                    grant,
+                }]));
+        }
+    }
+
+    pub fn add_permissions(&mut self, iter: impl Iterator<Item = PermissionGrant>) {
+        if let Some(permissions) = self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::Permissions(permissions) = item {
+                Some(permissions)
+            } else {
+                None
+            }
+        }) {
+            permissions.extend(iter);
+        } else {
+            self.data.push(PrincipalData::Permissions(iter.collect()));
+        }
+    }
+
+    pub fn remove_permission(&mut self, permission: Permission, grant: bool) {
+        if let Some(permissions) = self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::Permissions(permissions) = item {
+                Some(permissions)
+            } else {
+                None
+            }
+        }) {
+            if let Some(idx) = permissions
+                .iter_mut()
+                .position(|p| p.permission == permission && p.grant == grant)
+            {
+                permissions.swap_remove(idx);
+            }
+        }
+    }
+
+    pub fn remove_permissions(&mut self, grant: bool) {
+        if let Some(permissions) = self.data.iter_mut().find_map(|item| {
+            if let PrincipalData::Permissions(permissions) = item {
+                Some(permissions)
+            } else {
+                None
+            }
+        }) {
+            permissions.retain(|p| p.grant != grant);
+        }
+    }
+
+    pub fn update_external(&mut self, mut external: Principal) -> Vec<PrincipalUpdate> {
+        let mut updates = Vec::new();
+
+        // Add external members
+        if let Some(member_of) = external.member_of_mut().filter(|s| !s.is_empty()) {
+            self.data
+                .push(PrincipalData::MemberOf(std::mem::take(member_of)));
+        }
+
+        // If the principal has no roles, take the ones from the external principal
+        if let Some(roles) = external.roles_mut().filter(|s| !s.is_empty()) {
+            if self.roles().is_empty() {
+                self.data.push(PrincipalData::Roles(std::mem::take(roles)));
+            }
+        }
+
+        if external.description.as_ref().is_some_and(|v| !v.is_empty())
+            && self.description != external.description
+        {
+            self.description = external.description;
+            updates.push(PrincipalUpdate::set(
+                PrincipalField::Description,
+                PrincipalValue::String(self.description.clone().unwrap()),
+            ));
+        }
+
+        for (name, field, external_field) in [
+            (PrincipalField::Secrets, &mut self.secrets, external.secrets),
+            (PrincipalField::Emails, &mut self.emails, external.emails),
+        ] {
+            if !external_field.is_empty() && &external_field != field {
+                *field = external_field;
+                updates.push(PrincipalUpdate::set(
+                    name,
+                    PrincipalValue::StringList(field.clone()),
+                ));
+            }
+        }
+
+        if external.quota.is_some() && self.quota != external.quota {
+            self.quota = external.quota;
+            updates.push(PrincipalUpdate::set(
+                PrincipalField::Quota,
+                PrincipalValue::Integer(self.quota.unwrap()),
+            ));
+        }
+
+        updates
+    }
+
+    pub fn fallback_admin(fallback_pass: impl Into<String>) -> Self {
+        Principal {
+            id: u32::MAX,
+            typ: Type::Individual,
+            name: "Fallback Administrator".into(),
+            secrets: vec![fallback_pass.into()],
+            data: vec![PrincipalData::Roles(vec![ROLE_ADMIN])],
+            description: Default::default(),
+            emails: Default::default(),
+            quota: Default::default(),
+            tenant: Default::default(),
+        }
+    }
+}
+
+impl PrincipalSet {
     pub fn new(id: u32, typ: Type) -> Self {
         Self {
             id,
@@ -48,7 +349,7 @@ impl Principal {
     }
 
     // SPDX-SnippetBegin
-    // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+    // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
     // SPDX-License-Identifier: LicenseRef-SEL
     pub fn tenant(&self) -> Option<u32> {
         self.get_int(PrincipalField::Tenant).map(|v| v as u32)
@@ -301,7 +602,7 @@ impl Principal {
     pub fn has_int_value(&self, key: PrincipalField, value: u64) -> bool {
         self.fields.get(&key).is_some_and(|v| match v {
             PrincipalValue::Integer(v) => *v == value,
-            PrincipalValue::IntegerList(l) => l.iter().any(|v| *v == value),
+            PrincipalValue::IntegerList(l) => l.contains(&value),
             PrincipalValue::String(_) | PrincipalValue::StringList(_) => false,
         })
     }
@@ -365,82 +666,6 @@ impl Principal {
                 _ => {}
             }
         }
-    }
-
-    pub fn update_external(&mut self, mut external: Principal) -> Vec<PrincipalUpdate> {
-        let mut updates = Vec::new();
-        if let Some(name) = external
-            .take_str(PrincipalField::Description)
-            .filter(|s| !s.is_empty())
-        {
-            if self.get_str(PrincipalField::Description) != Some(name.as_str()) {
-                updates.push(PrincipalUpdate::set(
-                    PrincipalField::Description,
-                    PrincipalValue::String(name.clone()),
-                ));
-                self.set(PrincipalField::Description, name);
-            }
-        }
-
-        for field in [PrincipalField::Secrets, PrincipalField::Emails] {
-            if let Some(secrets) = external.take_str_array(field).filter(|s| !s.is_empty()) {
-                if self.get_str_array(field) != Some(secrets.as_ref()) {
-                    updates.push(PrincipalUpdate::set(
-                        field,
-                        PrincipalValue::StringList(secrets.clone()),
-                    ));
-                    self.set(field, secrets);
-                }
-            }
-        }
-
-        if let Some(quota) = external.take_int(PrincipalField::Quota) {
-            if self.get_int(PrincipalField::Quota) != Some(quota) {
-                updates.push(PrincipalUpdate::set(
-                    PrincipalField::Quota,
-                    PrincipalValue::Integer(quota),
-                ));
-                self.set(PrincipalField::Quota, quota);
-            }
-        }
-
-        // Add external members
-        if let Some(member_of) = external
-            .take_int_array(PrincipalField::MemberOf)
-            .filter(|s| !s.is_empty())
-        {
-            self.set(PrincipalField::MemberOf, member_of);
-        }
-
-        // If the principal has no roles, take the ones from the external principal
-        if let Some(member_of) = external
-            .take_int_array(PrincipalField::Roles)
-            .filter(|s| !s.is_empty())
-        {
-            if self
-                .get_int_array(PrincipalField::Roles)
-                .filter(|s| !s.is_empty())
-                .is_none()
-            {
-                self.set(PrincipalField::Roles, member_of);
-            }
-        }
-
-        updates
-    }
-
-    pub fn fallback_admin(fallback_pass: impl Into<String>) -> Self {
-        Principal {
-            id: u32::MAX,
-            typ: Type::Individual,
-            ..Default::default()
-        }
-        .with_field(PrincipalField::Name, "Fallback Administrator")
-        .with_field(
-            PrincipalField::Secrets,
-            PrincipalValue::String(fallback_pass.into()),
-        )
-        .with_field(PrincipalField::Roles, ROLE_ADMIN)
     }
 }
 
@@ -554,7 +779,7 @@ impl From<String> for PrincipalValue {
 
 impl From<&str> for PrincipalValue {
     fn from(v: &str) -> Self {
-        Self::String(v.to_string())
+        Self::String(v.into())
     }
 }
 
@@ -579,6 +804,53 @@ impl From<u32> for PrincipalValue {
 impl From<Vec<u32>> for PrincipalValue {
     fn from(v: Vec<u32>) -> Self {
         Self::IntegerList(v.into_iter().map(|v| v as u64).collect())
+    }
+}
+
+pub(crate) fn build_search_index(
+    batch: &mut BatchBuilder,
+    principal_id: u32,
+    current: Option<&ArchivedPrincipal>,
+    new: Option<&Principal>,
+) {
+    let mut current_words = AHashSet::new();
+    let mut new_words = AHashSet::new();
+
+    if let Some(current) = current {
+        for word in [Some(current.name.as_str()), current.description.as_deref()]
+            .into_iter()
+            .chain(current.emails.iter().map(|s| Some(s.as_str())))
+            .flatten()
+        {
+            current_words.extend(WordTokenizer::new(word, MAX_TOKEN_LENGTH).map(|t| t.word));
+        }
+    }
+
+    if let Some(new) = new {
+        for word in [Some(new.name.as_str()), new.description.as_deref()]
+            .into_iter()
+            .chain(new.emails.iter().map(|s| Some(s.as_str())))
+            .flatten()
+        {
+            new_words.extend(WordTokenizer::new(word, MAX_TOKEN_LENGTH).map(|t| t.word));
+        }
+    }
+
+    for word in new_words.difference(&current_words) {
+        batch.set(
+            DirectoryClass::Index {
+                word: word.as_bytes().to_vec(),
+                principal_id,
+            },
+            vec![],
+        );
+    }
+
+    for word in current_words.difference(&new_words) {
+        batch.clear(DirectoryClass::Index {
+            word: word.as_bytes().to_vec(),
+            principal_id,
+        });
     }
 }
 
@@ -632,6 +904,8 @@ impl Type {
         }
     }
 
+    pub const MAX_ID: usize = 11;
+
     pub fn from_u8(value: u8) -> Self {
         match value {
             0 => Type::Individual,
@@ -659,7 +933,7 @@ impl FromStr for Type {
     }
 }
 
-impl serde::Serialize for Principal {
+impl serde::Serialize for PrincipalSet {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -702,7 +976,7 @@ impl<'de> serde::Deserialize<'de> for PrincipalValue {
             where
                 E: de::Error,
             {
-                Ok(PrincipalValue::String(String::new()))
+                Ok(PrincipalValue::String("".into()))
             }
 
             fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
@@ -735,7 +1009,7 @@ impl<'de> serde::Deserialize<'de> for PrincipalValue {
                 E: de::Error,
             {
                 if value.len() <= MAX_STRING_LEN {
-                    Ok(PrincipalValue::String(value.to_string()))
+                    Ok(PrincipalValue::String(value.into()))
                 } else {
                     Err(serde::de::Error::custom("string too long"))
                 }
@@ -774,7 +1048,7 @@ impl<'de> serde::Deserialize<'de> for PrincipalValue {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for Principal {
+impl<'de> serde::Deserialize<'de> for PrincipalSet {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -783,7 +1057,7 @@ impl<'de> serde::Deserialize<'de> for Principal {
 
         // Deserialize the principal
         impl<'de> Visitor<'de> for PrincipalVisitor {
-            type Value = Principal;
+            type Value = PrincipalSet;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("a valid principal")
@@ -793,7 +1067,7 @@ impl<'de> serde::Deserialize<'de> for Principal {
             where
                 A: de::MapAccess<'de>,
             {
-                let mut principal = Principal::default();
+                let mut principal = PrincipalSet::default();
 
                 while let Some(key) = map.next_key::<&str>()? {
                     let key = PrincipalField::try_parse(key)
@@ -821,7 +1095,8 @@ impl<'de> serde::Deserialize<'de> for Principal {
                         }
                         PrincipalField::Description
                         | PrincipalField::Tenant
-                        | PrincipalField::Picture => {
+                        | PrincipalField::Picture
+                        | PrincipalField::Locale => {
                             if let Some(v) = map.next_value::<Option<String>>()? {
                                 if v.len() <= MAX_STRING_LEN {
                                     PrincipalValue::String(v)
@@ -867,7 +1142,7 @@ impl<'de> serde::Deserialize<'de> for Principal {
                         }
                     };
 
-                    principal.set(key, value);
+                    principal.fields.insert(key, value);
                 }
 
                 Ok(principal)
@@ -957,7 +1232,7 @@ impl<'de> serde::Deserialize<'de> for StringOrMany {
                 E: de::Error,
             {
                 if value.len() <= MAX_STRING_LEN {
-                    Ok(StringOrMany::One(value.to_string()))
+                    Ok(StringOrMany::One(value.into()))
                 } else {
                     Err(serde::de::Error::custom("string too long"))
                 }
@@ -1093,11 +1368,54 @@ impl Permission {
                 | Permission::SieveHaveSpace
                 | Permission::SpamFilterClassify
                 | Permission::SpamFilterTrain
+                | Permission::DavSyncCollection
+                | Permission::DavExpandProperty
+                | Permission::DavPrincipalAcl
+                | Permission::DavPrincipalMatch
+                | Permission::DavPrincipalSearchPropSet
+                | Permission::DavFilePropFind
+                | Permission::DavFilePropPatch
+                | Permission::DavFileGet
+                | Permission::DavFileMkCol
+                | Permission::DavFileDelete
+                | Permission::DavFilePut
+                | Permission::DavFileCopy
+                | Permission::DavFileMove
+                | Permission::DavFileLock
+                | Permission::DavFileAcl
+                | Permission::DavCardPropFind
+                | Permission::DavCardPropPatch
+                | Permission::DavCardGet
+                | Permission::DavCardMkCol
+                | Permission::DavCardDelete
+                | Permission::DavCardPut
+                | Permission::DavCardCopy
+                | Permission::DavCardMove
+                | Permission::DavCardLock
+                | Permission::DavCardAcl
+                | Permission::DavCardQuery
+                | Permission::DavCardMultiGet
+                | Permission::DavCalPropFind
+                | Permission::DavCalPropPatch
+                | Permission::DavCalGet
+                | Permission::DavCalMkCol
+                | Permission::DavCalDelete
+                | Permission::DavCalPut
+                | Permission::DavCalCopy
+                | Permission::DavCalMove
+                | Permission::DavCalLock
+                | Permission::DavCalAcl
+                | Permission::DavCalQuery
+                | Permission::DavCalMultiGet
+                | Permission::DavCalFreeBusyQuery
+                | Permission::CalendarAlarms
+                | Permission::CalendarSchedulingSend
+                | Permission::CalendarSchedulingReceive
         )
     }
 
     // SPDX-SnippetBegin
-    // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+    // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
     // SPDX-License-Identifier: LicenseRef-SEL
 
     pub const fn is_tenant_admin_permission(&self) -> bool {

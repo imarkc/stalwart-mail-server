@@ -1,11 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{borrow::Cow, fmt::Debug, str::FromStr, time::Duration};
 
+use compact_str::{CompactString, ToCompactString, format_compact};
 use mail_auth::common::verify::VerifySignature;
 
 use crate::*;
@@ -18,12 +19,18 @@ impl AsRef<EventType> for Error {
 
 impl From<&'static str> for Value {
     fn from(value: &'static str) -> Self {
-        Self::Static(value)
+        Self::String(CompactString::const_new(value))
     }
 }
 
 impl From<String> for Value {
     fn from(value: String) -> Self {
+        Self::String(CompactString::from_string_buffer(value))
+    }
+}
+
+impl From<CompactString> for Value {
+    fn from(value: CompactString) -> Self {
         Self::String(value)
     }
 }
@@ -139,8 +146,8 @@ impl From<&[u8]> for Value {
 impl From<Cow<'static, str>> for Value {
     fn from(value: Cow<'static, str>) -> Self {
         match value {
-            Cow::Borrowed(value) => Self::Static(value),
-            Cow::Owned(value) => Self::String(value),
+            Cow::Borrowed(value) => Self::String(CompactString::const_new(value)),
+            Cow::Owned(value) => Self::String(value.into()),
         }
     }
 }
@@ -151,7 +158,7 @@ where
 {
     fn from(value: &crate::Result<T>) -> Self {
         match value {
-            Ok(value) => format!("{:?}", value).into(),
+            Ok(value) => format_compact!("{:?}", value).into(),
             Err(err) => Value::Event(err.clone()),
         }
     }
@@ -190,13 +197,12 @@ impl EventType {
 
     pub fn from_http_error(self, err: reqwest::Error) -> Error {
         self.into_err()
-            .ctx_opt(Key::Url, err.url().map(|url| url.as_ref().to_string()))
+            .ctx_opt(
+                Key::Url,
+                err.url().map(|url| url.as_ref().to_compact_string()),
+            )
             .ctx_opt(Key::Code, err.status().map(|status| status.as_u16()))
             .reason(err)
-    }
-
-    pub fn from_bincode_error(self, err: bincode::Error) -> Error {
-        self.reason(err).details("Bincode deserialization failed")
     }
 
     pub fn from_http_str_error(self, err: reqwest::header::ToStrError) -> Error {
@@ -219,10 +225,10 @@ impl From<mail_auth::Error> for Error {
             }
             mail_auth::Error::CryptoError(details) => EventType::MailAuth(MailAuthEvent::Crypto)
                 .into_err()
-                .details(details),
+                .details(CompactString::from(details)),
             mail_auth::Error::Io(details) => EventType::MailAuth(MailAuthEvent::Io)
                 .into_err()
-                .details(details),
+                .details(CompactString::from(details)),
             mail_auth::Error::Base64 => EventType::MailAuth(MailAuthEvent::Base64).into_err(),
             mail_auth::Error::UnsupportedVersion => {
                 EventType::Dkim(DkimEvent::UnsupportedVersion).into_err()
@@ -259,7 +265,7 @@ impl From<mail_auth::Error> for Error {
             }
             mail_auth::Error::DnsError(details) => EventType::MailAuth(MailAuthEvent::DnsError)
                 .into_err()
-                .details(details),
+                .details(CompactString::from(details)),
             mail_auth::Error::DnsRecordNotFound(code) => {
                 EventType::MailAuth(MailAuthEvent::DnsRecordNotFound)
                     .into_err()
@@ -325,7 +331,7 @@ impl From<&mail_auth::DkimOutput<'_>> for Error {
     fn from(value: &mail_auth::DkimOutput<'_>) -> Self {
         Error::from(value.result()).ctx_opt(
             Key::Domain,
-            value.signature().map(|s| s.domain().to_string()),
+            value.signature().map(|s| s.domain().to_compact_string()),
         )
     }
 }
@@ -349,7 +355,7 @@ impl From<&mail_auth::IprevOutput> for Error {
             Key::Details,
             value.ptr.as_ref().map(|s| {
                 s.iter()
-                    .map(|v| Value::String(v.to_string()))
+                    .map(|v| Value::String(v.into()))
                     .collect::<Vec<_>>()
             }),
         )
@@ -367,7 +373,18 @@ impl From<&mail_auth::SpfOutput> for Error {
             mail_auth::SpfResult::TempError => SpfEvent::TempError,
             mail_auth::SpfResult::None => SpfEvent::None,
         }))
-        .ctx_opt(Key::Details, value.explanation().map(|s| s.to_string()))
+        .ctx_opt(
+            Key::Details,
+            value.explanation().map(|s| s.to_compact_string()),
+        )
+    }
+}
+
+impl From<rkyv::rancor::Error> for Error {
+    fn from(value: rkyv::rancor::Error) -> Self {
+        Error::new(EventType::Store(StoreEvent::DeserializeError))
+            .reason(value)
+            .details("Rkyv de/serialization failed")
     }
 }
 
@@ -390,7 +407,7 @@ impl AssertSuccess for reqwest::Response {
             Err(cause
                 .ctx(Key::Code, status.as_u16())
                 .details("HTTP request failed")
-                .ctx_opt(Key::Reason, self.text().await.ok()))
+                .ctx_opt(Key::Reason, self.text().await.map(CompactString::from).ok()))
         }
     }
 }

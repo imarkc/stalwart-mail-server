@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,7 +11,7 @@ use sha2::{Sha256, Sha512};
 use trc::DaneEvent;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::queue::{Error, ErrorDetails, Status};
+use crate::queue::{Error, ErrorDetails, HostResponse, Status};
 
 pub trait TlsaVerify {
     fn verify(
@@ -19,7 +19,7 @@ pub trait TlsaVerify {
         session_id: u64,
         hostname: &str,
         certificates: Option<&[CertificateDer<'_>]>,
-    ) -> Result<(), Status<(), Error>>;
+    ) -> Result<(), Status<HostResponse<String>, ErrorDetails>>;
 }
 
 impl TlsaVerify for Tlsa {
@@ -28,7 +28,7 @@ impl TlsaVerify for Tlsa {
         session_id: u64,
         hostname: &str,
         certificates: Option<&[CertificateDer<'_>]>,
-    ) -> Result<(), Status<(), Error>> {
+    ) -> Result<(), Status<HostResponse<String>, ErrorDetails>> {
         let certificates = if let Some(certificates) = certificates {
             certificates
         } else {
@@ -38,10 +38,10 @@ impl TlsaVerify for Tlsa {
                 Hostname = hostname.to_string(),
             );
 
-            return Err(Status::TemporaryFailure(Error::DaneError(ErrorDetails {
-                entity: hostname.to_string(),
-                details: "No certificates were provided by host".to_string(),
-            })));
+            return Err(Status::TemporaryFailure(ErrorDetails {
+                entity: hostname.into(),
+                details: Error::DaneError("No certificates were provided by host".into()),
+            }));
         };
 
         let mut matched_end_entity = false;
@@ -58,10 +58,10 @@ impl TlsaVerify for Tlsa {
                         Reason = err.to_string(),
                     );
 
-                    return Err(Status::TemporaryFailure(Error::DaneError(ErrorDetails {
-                        entity: hostname.to_string(),
-                        details: "Failed to parse X.509 certificate".to_string(),
-                    })));
+                    return Err(Status::TemporaryFailure(ErrorDetails {
+                        entity: hostname.into(),
+                        details: Error::DaneError("Failed to parse X.509 certificate".into()),
+                    }));
                 }
             };
 
@@ -142,10 +142,10 @@ impl TlsaVerify for Tlsa {
                 Hostname = hostname.to_string(),
             );
 
-            Err(Status::PermanentFailure(Error::DaneError(ErrorDetails {
-                entity: hostname.to_string(),
-                details: "No matching certificates found in TLSA records".to_string(),
-            })))
+            Err(Status::PermanentFailure(ErrorDetails {
+                entity: hostname.into(),
+                details: Error::DaneError("No matching certificates found in TLSA records".into()),
+            }))
         }
     }
 }

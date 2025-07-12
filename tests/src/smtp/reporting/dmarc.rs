@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -20,9 +20,9 @@ use smtp::reporting::dmarc::DmarcReporting;
 use store::write::QueueClass;
 
 use crate::smtp::{
-    inbound::{sign::SIGNATURES, TestMessage},
-    session::VerifyResponse,
     DnsCache, TestSMTP,
+    inbound::{TestMessage, sign::SIGNATURES},
+    session::VerifyResponse,
 };
 
 const CONFIG: &str = r#"
@@ -111,12 +111,12 @@ async fn report_dmarc() {
     // Expect report
     let message = qr.expect_message().await;
     qr.assert_no_events();
-    assert_eq!(message.recipients.len(), 1);
+    assert_eq!(message.message.recipients.len(), 1);
     assert_eq!(
-        message.recipients.last().unwrap().address,
+        message.message.recipients.last().unwrap().address,
         "reports@foobar.net"
     );
-    assert_eq!(message.return_path, "reports@example.org");
+    assert_eq!(message.message.return_path, "reports@example.org");
     message
         .read_lines(qr)
         .await

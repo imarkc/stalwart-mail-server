@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,12 +10,12 @@ use common::config::server::ServerProtocol;
 use mail_auth::MX;
 use store::write::now;
 
-use crate::smtp::{session::TestSession, DnsCache, TestSMTP};
+use crate::smtp::{DnsCache, TestSMTP, session::TestSession};
 
 const LOCAL: &str = r#"
-[queue.outbound]
-next-hop = [{if = "retry_num > 0", then = "'fallback'"},
-            {else = false}]
+[queue.strategy]
+gateway = [{if = "retry_num > 0", then = "'fallback'"},
+            {else = "'mx'"}]
 
 [session.rcpt]
 relay = true
@@ -24,13 +24,14 @@ max-recipients = 100
 [session.extensions]
 dsn = true
 
-[remote.fallback]
+[queue.gateway.fallback]
+type = "relay"
 address = fallback.foobar.org
 port = 9925
 protocol = 'smtp'
 concurrency = 5
 
-[remote.fallback.tls]
+[queue.gateway.fallback.tls]
 implicit = false
 allow-invalid-certs = true
 
@@ -81,7 +82,7 @@ async fn fallback_relay() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -93,13 +94,11 @@ async fn fallback_relay() {
         .await
         .try_deliver(core.clone());
     let mut retry = local.queue_receiver.expect_message().await;
-    let prev_due = retry.domains[0].retry.due;
+    let prev_due = retry.message.recipients[0].retry.due;
     let next_due = now();
     let queue_id = retry.queue_id;
-    retry.domains[0].retry.due = next_due;
-    retry
-        .save_changes(&core, prev_due.into(), next_due.into())
-        .await;
+    retry.message.recipients[0].retry.due = next_due;
+    retry.save_changes(&core, prev_due.into()).await;
     local
         .queue_receiver
         .delivery_attempt(queue_id)

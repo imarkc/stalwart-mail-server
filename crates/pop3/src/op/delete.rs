@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,12 +8,11 @@ use std::time::Instant;
 
 use common::listener::SessionStream;
 use directory::Permission;
-use jmap::email::delete::EmailDeletion;
-use jmap_proto::types::{state::StateChange, type_state::DataType};
-use store::roaring::RoaringBitmap;
+use email::message::delete::EmailDeletion;
+use store::{roaring::RoaringBitmap, write::BatchBuilder};
 use trc::AddContext;
 
-use crate::{protocol::response::Response, Session, State};
+use crate::{Session, State, protocol::response::Response};
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_dele(&mut self, msgs: Vec<u32>) -> trc::Result<()> {
@@ -87,27 +86,18 @@ impl<T: SessionStream> Session<T> {
 
             if !deleted.is_empty() {
                 let num_deleted = deleted.len();
-                let (changes, not_deleted) = self
+                let mut batch = BatchBuilder::new();
+                let not_deleted = self
                     .server
-                    .emails_tombstone(mailbox.account_id, deleted)
+                    .emails_tombstone(mailbox.account_id, &mut batch, deleted)
                     .await
                     .caused_by(trc::location!())?;
 
-                if !changes.is_empty() {
-                    if let Ok(change_id) = self
-                        .server
-                        .commit_changes(mailbox.account_id, changes)
+                if !batch.is_empty() {
+                    self.server
+                        .commit_batch(batch)
                         .await
-                    {
-                        self.server
-                            .broadcast_state_change(
-                                StateChange::new(mailbox.account_id)
-                                    .with_change(DataType::Email, change_id)
-                                    .with_change(DataType::Mailbox, change_id)
-                                    .with_change(DataType::Thread, change_id),
-                            )
-                            .await;
-                    }
+                        .caused_by(trc::location!())?;
                 }
                 if not_deleted.is_empty() {
                     self.write_ok(format!(

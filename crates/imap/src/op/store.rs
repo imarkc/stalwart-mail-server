@@ -1,43 +1,38 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{sync::Arc, time::Instant};
-
+use super::{FromModSeq, ImapContext};
 use crate::{
-    core::{message::MAX_RETRIES, SelectedMailbox, Session, SessionData},
+    core::{SelectedMailbox, Session, SessionData},
     spawn_op,
 };
 use ahash::AHashSet;
-use common::listener::SessionStream;
+use common::{listener::SessionStream, storage::index::ObjectIndexBuilder};
 use directory::Permission;
-use email::{ingest::EmailIngest, mailbox::UidMailbox};
+use email::message::{bayes::EmailBayesTrain, ingest::EmailIngest, metadata::MessageData};
 use imap_proto::{
+    Command, ResponseCode, ResponseType, StatusResponse,
     protocol::{
+        Flag, ImapResponse,
         fetch::{DataItem, FetchItem},
         store::{Arguments, Operation, Response},
-        Flag, ImapResponse,
     },
     receiver::Request,
-    Command, ResponseCode, ResponseType, StatusResponse,
-};
-use jmap::{
-    changes::get::ChangesLookup,
-    email::{bayes::EmailBayesTrain, set::TagManager},
 };
 use jmap_proto::types::{
-    acl::Acl, collection::Collection, id::Id, keyword::Keyword, property::Property,
-    state::StateChange, type_state::DataType,
+    acl::Acl,
+    collection::{Collection, SyncCollection},
+    keyword::Keyword,
 };
+use std::{sync::Arc, time::Instant};
 use store::{
     query::log::{Change, Query},
-    write::{assert::HashedValue, log::ChangeLogBuilder, BatchBuilder, ValueClass, F_VALUE},
+    write::{BatchBuilder, ValueClass},
 };
 use trc::AddContext;
-
-use super::{FromModSeq, ImapContext};
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_store(
@@ -116,9 +111,10 @@ impl<T: SessionStream> SessionData<T> {
             // Obtain changes since the modseq.
             let changelog = self
                 .server
-                .changes_(
+                .store()
+                .changes(
                     account_id,
-                    Collection::Email,
+                    SyncCollection::Email,
                     Query::from_modseq(unchanged_since),
                 )
                 .await
@@ -129,18 +125,20 @@ impl<T: SessionStream> SessionData<T> {
                 .await;
 
             // Add all IDs that changed in this mailbox
-            for change in changelog.changes {
-                let (Change::Insert(id)
-                | Change::Update(id)
-                | Change::ChildUpdate(id)
-                | Change::Delete(id)) = change;
-                let id = (id & u32::MAX as u64) as u32;
+            for (id, is_delete) in changelog.changes.into_iter().filter_map(|change| {
+                change.item_id().map(|id| {
+                    (
+                        (id & u32::MAX as u64) as u32,
+                        matches!(change, Change::DeleteItem(_)),
+                    )
+                })
+            }) {
                 if let Some(imap_id) = ids.remove(&id) {
                     if is_uid {
                         modified.push(imap_id.uid);
                     } else {
                         modified.push(imap_id.seqnum);
-                        if matches!(change, Change::Delete(_)) {
+                        if is_delete {
                             unchanged_failed = true;
                         }
                     }
@@ -190,203 +188,162 @@ impl<T: SessionStream> SessionData<T> {
             .iter()
             .map(|k| Keyword::from(k.clone()))
             .collect::<Vec<_>>();
-        let mut changelog = ChangeLogBuilder::new();
-        let mut changed_mailboxes = AHashSet::new();
         let access_token = self
             .server
             .get_access_token(account_id)
             .await
             .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?;
+        let mut changed_mailboxes = AHashSet::new();
         let can_spam_train = self.server.email_bayes_can_train(&access_token);
         let mut has_spam_train_tasks = false;
+        let mut batch = BatchBuilder::new();
 
-        'outer: for (id, imap_id) in &ids {
-            let mut try_count = 0;
-            loop {
-                // Obtain current keywords
-                let (mut keywords, thread_id) = if let (Some(keywords), Some(thread_id)) = (
-                    self.server
-                        .get_property::<HashedValue<Vec<Keyword>>>(
-                            account_id,
-                            Collection::Email,
-                            *id,
-                            Property::Keywords,
-                        )
-                        .await
-                        .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?,
-                    self.server
-                        .get_property::<u32>(account_id, Collection::Email, *id, Property::ThreadId)
-                        .await
-                        .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?,
-                ) {
-                    (TagManager::new(keywords), thread_id)
-                } else {
-                    continue 'outer;
-                };
+        for (id, imap_id) in &ids {
+            // Obtain message data
+            let data_ = if let Some(data) = self
+                .server
+                .get_archive(account_id, Collection::Email, *id)
+                .await
+                .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?
+            {
+                data
+            } else {
+                continue;
+            };
 
-                // Apply changes
-                match arguments.operation {
-                    Operation::Set => {
-                        keywords.set(set_keywords.clone());
-                    }
-                    Operation::Add => {
-                        for keyword in &set_keywords {
-                            keywords.update(keyword.clone(), true);
-                        }
-                    }
-                    Operation::Clear => {
-                        for keyword in &set_keywords {
-                            keywords.update(keyword.clone(), false);
+            // Deserialize
+            let data = data_
+                .to_unarchived::<MessageData>()
+                .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?;
+            let mut new_data = data
+                .deserialize()
+                .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?;
+
+            // Apply changes
+            let mut seen_changed = false;
+            match arguments.operation {
+                Operation::Set => {
+                    seen_changed = set_keywords.contains(&Keyword::Seen)
+                        != new_data.has_keyword(&Keyword::Seen);
+                    new_data.set_keywords(set_keywords.clone());
+                }
+                Operation::Add => {
+                    for keyword in &set_keywords {
+                        if new_data.add_keyword(keyword.clone()) && keyword == &Keyword::Seen {
+                            seen_changed = true;
                         }
                     }
                 }
-
-                if keywords.has_changes() {
-                    // Train spam filter
-                    let mut train_spam = None;
-                    if can_spam_train {
-                        for keyword in keywords.added() {
-                            if keyword == &Keyword::Junk {
-                                train_spam = Some(true);
-                                break;
-                            } else if keyword == &Keyword::NotJunk {
-                                train_spam = Some(false);
-                                break;
-                            }
+                Operation::Clear => {
+                    for keyword in &set_keywords {
+                        if new_data.remove_keyword(keyword) && keyword == &Keyword::Seen {
+                            seen_changed = true;
                         }
-                        if train_spam.is_none() {
-                            for keyword in keywords.removed() {
-                                if keyword == &Keyword::Junk {
-                                    train_spam = Some(false);
-                                    break;
-                                }
-                            }
-                        }
-                    };
+                    }
+                }
+            }
 
-                    // Convert keywords to flags
-                    let seen_changed = keywords
-                        .changed_tags()
-                        .any(|keyword| keyword == &Keyword::Seen);
-                    let flags = if !arguments.is_silent {
-                        keywords
-                            .current()
-                            .iter()
-                            .cloned()
-                            .map(Flag::from)
-                            .collect::<Vec<_>>()
+            if !new_data.has_keyword_changes(data.inner) {
+                continue;
+            }
+
+            // Train spam filter
+            let mut train_spam = None;
+            if can_spam_train {
+                for keyword in new_data.added_keywords(data.inner) {
+                    if keyword == &Keyword::Junk {
+                        train_spam = Some(true);
+                        break;
+                    } else if keyword == &Keyword::NotJunk {
+                        train_spam = Some(false);
+                        break;
+                    }
+                }
+                if train_spam.is_none() {
+                    for keyword in new_data.removed_keywords(data.inner) {
+                        if keyword == &Keyword::Junk {
+                            train_spam = Some(false);
+                            break;
+                        }
+                    }
+                }
+            };
+
+            // Convert keywords to flags
+            let flags = if !arguments.is_silent {
+                new_data
+                    .keywords
+                    .iter()
+                    .cloned()
+                    .map(Flag::from)
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+
+            // Set all current mailboxes as changed if the Seen tag changed
+            if seen_changed {
+                for mailbox_id in new_data.mailboxes.iter() {
+                    changed_mailboxes.insert(mailbox_id.mailbox_id);
+                }
+            }
+
+            // Write changes
+            batch
+                .with_account_id(account_id)
+                .with_collection(Collection::Email)
+                .update_document(*id)
+                .custom(
+                    ObjectIndexBuilder::new()
+                        .with_current(data)
+                        .with_changes(new_data),
+                )
+                .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?;
+
+            // Add spam train task
+            if let Some(learn_spam) = train_spam {
+                batch.set(
+                    ValueClass::TaskQueue(
+                        self.server
+                            .email_bayes_queue_task_build(account_id, *id, learn_spam)
+                            .await
+                            .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?,
+                    ),
+                    vec![],
+                );
+                has_spam_train_tasks = true;
+            }
+
+            // Set commit point
+            batch.commit_point();
+
+            // Add item to response
+            if !arguments.is_silent {
+                let mut data_items = vec![DataItem::Flags { flags }];
+                if is_uid {
+                    data_items.push(DataItem::Uid { uid: imap_id.uid });
+                }
+                items.items.push(FetchItem {
+                    id: imap_id.seqnum,
+                    items: data_items,
+                });
+            } else if is_condstore {
+                items.items.push(FetchItem {
+                    id: imap_id.seqnum,
+                    items: if is_uid {
+                        vec![DataItem::Uid { uid: imap_id.uid }]
                     } else {
                         vec![]
-                    };
-
-                    // Write changes
-                    let mut batch = BatchBuilder::new();
-                    batch
-                        .with_account_id(account_id)
-                        .with_collection(Collection::Email)
-                        .update_document(*id);
-                    keywords.update_batch(&mut batch, Property::Keywords);
-                    if changelog.change_id == u64::MAX {
-                        changelog.change_id = self
-                            .server
-                            .assign_change_id(account_id)
-                            .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?
-                    }
-                    batch.value(Property::Cid, changelog.change_id, F_VALUE);
-
-                    // Add spam train task
-                    if let Some(learn_spam) = train_spam {
-                        batch.set(
-                            ValueClass::TaskQueue(
-                                self.server
-                                    .email_bayes_queue_task_build(account_id, *id, learn_spam)
-                                    .await
-                                    .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?,
-                            ),
-                            vec![],
-                        );
-                        has_spam_train_tasks = true;
-                    }
-
-                    match self
-                        .server
-                        .store()
-                        .write(batch)
-                        .await
-                        .caused_by(trc::location!())
-                    {
-                        Ok(_) => {
-                            // Set all current mailboxes as changed if the Seen tag changed
-                            if seen_changed {
-                                if let Some(mailboxes) = self
-                                    .server
-                                    .get_property::<Vec<UidMailbox>>(
-                                        account_id,
-                                        Collection::Email,
-                                        *id,
-                                        Property::MailboxIds,
-                                    )
-                                    .await
-                                    .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?
-                                {
-                                    for mailbox_id in mailboxes {
-                                        changed_mailboxes.insert(mailbox_id.mailbox_id);
-                                    }
-                                }
-                            }
-
-                            // Update changelog
-                            changelog.log_update(Collection::Email, Id::from_parts(thread_id, *id));
-
-                            // Add item to response
-                            let modseq = changelog.change_id + 1;
-                            if !arguments.is_silent {
-                                let mut data_items = vec![DataItem::Flags { flags }];
-                                if is_uid {
-                                    data_items.push(DataItem::Uid { uid: imap_id.uid });
-                                }
-                                if is_condstore {
-                                    data_items.push(DataItem::ModSeq { modseq });
-                                }
-                                items.items.push(FetchItem {
-                                    id: imap_id.seqnum,
-                                    items: data_items,
-                                });
-                            } else if is_condstore {
-                                items.items.push(FetchItem {
-                                    id: imap_id.seqnum,
-                                    items: if is_uid {
-                                        vec![
-                                            DataItem::ModSeq { modseq },
-                                            DataItem::Uid { uid: imap_id.uid },
-                                        ]
-                                    } else {
-                                        vec![DataItem::ModSeq { modseq }]
-                                    },
-                                });
-                            }
-                        }
-                        Err(err) if err.is_assertion_failure() => {
-                            if try_count < MAX_RETRIES {
-                                try_count += 1;
-                                continue;
-                            } else {
-                                response.rtype = ResponseType::No;
-                                response.message = "Some messages could not be updated.".into();
-                            }
-                        }
-                        Err(err) => {
-                            return Err(err.id(response.tag.unwrap()));
-                        }
-                    }
-                }
-                break;
+                    },
+                });
             }
         }
 
         // Log mailbox changes
-        for mailbox_id in &changed_mailboxes {
-            changelog.log_child_update(Collection::Mailbox, *mailbox_id);
+        if !changed_mailboxes.is_empty() {
+            for parent_id in changed_mailboxes {
+                batch.log_container_property_change(SyncCollection::Email, parent_id);
+            }
         }
 
         // Trigger Bayes training
@@ -395,21 +352,31 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Write changes
-        if !changelog.is_empty() {
-            let change_id = self
+        if !batch.is_empty() {
+            match self
                 .server
-                .commit_changes(account_id, changelog)
+                .commit_batch(batch)
                 .await
-                .imap_ctx(response.tag.as_ref().unwrap(), trc::location!())?;
-            self.server
-                .broadcast_state_change(if !changed_mailboxes.is_empty() {
-                    StateChange::new(account_id)
-                        .with_change(DataType::Email, change_id)
-                        .with_change(DataType::Mailbox, change_id)
-                } else {
-                    StateChange::new(account_id).with_change(DataType::Email, change_id)
-                })
-                .await;
+                .and_then(|ids| ids.last_change_id(mailbox.id.account_id))
+                .caused_by(trc::location!())
+            {
+                Ok(change_id) => {
+                    if is_condstore {
+                        let modseq = change_id + 1;
+                        for item in items.items.iter_mut() {
+                            item.items.push(DataItem::ModSeq { modseq });
+                        }
+                    }
+                }
+                Err(err) if err.is_assertion_failure() => {
+                    items.items.clear();
+                    response.rtype = ResponseType::No;
+                    response.message = "Some messages were modified by another process.".into();
+                }
+                Err(err) => {
+                    return Err(err.id(response.tag.unwrap()));
+                }
+            }
         }
 
         trc::event!(

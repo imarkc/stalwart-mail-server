@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::{backend::postgres::tls::MakeRustlsConnect, *};
 
-use super::{into_error, PostgresStore};
+use super::{PostgresStore, into_error};
 
 use deadpool_postgres::{Config, ManagerConfig, PoolConfig, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;

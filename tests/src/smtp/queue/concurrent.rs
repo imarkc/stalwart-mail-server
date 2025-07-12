@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::{config::server::ServerProtocol, core::BuildServer, ipc::QueueEvent};
 use mail_auth::MX;
 
-use crate::smtp::{session::TestSession, DnsCache, TestSMTP};
+use crate::smtp::{DnsCache, TestSMTP, session::TestSession};
 use smtp::queue::manager::Queue;
 
 const LOCAL: &str = r#"
@@ -22,13 +22,14 @@ relay = true
 [session.data.limits]
 messages = 2000
 
-[queue.threads]
-remote = 4
+[queue.virtual.default]
+threads-per-node = 4
 
-[queue.schedule]
+[queue.schedule.default]
 retry = "1s"
 notify = "1d"
 expire = "1d"
+queue-name = "default"
 "#;
 
 const REMOTE: &str = r#"
@@ -75,7 +76,7 @@ async fn concurrent_queue() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
 
@@ -136,12 +137,7 @@ async fn concurrent_queue() {
         if m + e != 0 {
             println!("Queue still has {} messages and {} events", m, e);
             /*for inner in &inners {
-                inner
-                    .ipc
-                    .queue_tx
-                    .send(QueueEvent::Refresh)
-                    .await
-                    .unwrap();
+                inner.ipc.queue_tx.send(QueueEvent::Refresh).await.unwrap();
             }*/
         } else {
             break;

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -18,9 +18,14 @@ impl EventType {
                 | StoreEvent::BlobWrite
                 | StoreEvent::BlobDelete
                 | StoreEvent::SqlQuery
-                | StoreEvent::LdapQuery
-                | StoreEvent::LdapBind => Level::Trace,
-                StoreEvent::NotFound | StoreEvent::HttpStoreFetch => Level::Debug,
+                | StoreEvent::LdapQuery => Level::Trace,
+                StoreEvent::CacheMiss
+                | StoreEvent::CacheHit
+                | StoreEvent::CacheStale
+                | StoreEvent::CacheUpdate
+                | StoreEvent::NotFound
+                | StoreEvent::HttpStoreFetch
+                | StoreEvent::LdapWarning => Level::Debug,
                 StoreEvent::AssertValueFailed
                 | StoreEvent::FoundationdbError
                 | StoreEvent::MysqlError
@@ -157,7 +162,7 @@ impl EventType {
                 | SmtpEvent::UnsupportedParameter
                 | SmtpEvent::SyntaxError
                 | SmtpEvent::Error => Level::Debug,
-                SmtpEvent::MissingLocalHostname | SmtpEvent::RemoteIdNotFound => Level::Warn,
+                SmtpEvent::MissingLocalHostname | SmtpEvent::IdNotFound => Level::Warn,
                 SmtpEvent::ConcurrencyLimitExceeded
                 | SmtpEvent::TransferLimitExceeded
                 | SmtpEvent::RateLimitExceeded
@@ -340,6 +345,7 @@ impl EventType {
                 | SpamEvent::DnsblError
                 | SpamEvent::Pyzor
                 | SpamEvent::Train
+                | SpamEvent::TrainAccount
                 | SpamEvent::Classify
                 | SpamEvent::ClassifyError
                 | SpamEvent::TrainBalance
@@ -356,28 +362,24 @@ impl EventType {
                 PushSubscriptionEvent::Success => Level::Trace,
             },
             EventType::Cluster(event) => match event {
-                ClusterEvent::PeerAlive
-                | ClusterEvent::PeerDiscovered
-                | ClusterEvent::PeerOffline
-                | ClusterEvent::PeerSuspected
-                | ClusterEvent::PeerSuspectedIsAlive
-                | ClusterEvent::PeerBackOnline
-                | ClusterEvent::PeerLeaving => Level::Info,
-                ClusterEvent::PeerHasChanges | ClusterEvent::OneOrMorePeersOffline => Level::Debug,
-                ClusterEvent::EmptyPacket
-                | ClusterEvent::Error
-                | ClusterEvent::DecryptionError
-                | ClusterEvent::InvalidPacket => Level::Warn,
+                ClusterEvent::SubscriberStart
+                | ClusterEvent::SubscriberStop
+                | ClusterEvent::PublisherStart
+                | ClusterEvent::PublisherStop => Level::Info,
+                ClusterEvent::SubscriberDisconnected => Level::Warn,
+                ClusterEvent::MessageReceived | ClusterEvent::MessageSkipped => Level::Trace,
+                ClusterEvent::PublisherError
+                | ClusterEvent::SubscriberError
+                | ClusterEvent::MessageInvalid => Level::Error,
             },
             EventType::Housekeeper(event) => match event {
                 HousekeeperEvent::Start | HousekeeperEvent::Stop => Level::Info,
                 HousekeeperEvent::Run | HousekeeperEvent::Schedule => Level::Debug,
             },
             EventType::TaskQueue(event) => match event {
-                TaskQueueEvent::Index => Level::Info,
                 TaskQueueEvent::BlobNotFound
-                | TaskQueueEvent::Locked
-                | TaskQueueEvent::BayesTrain
+                | TaskQueueEvent::TaskAcquired
+                | TaskQueueEvent::TaskLocked
                 | TaskQueueEvent::MetadataNotFound => Level::Debug,
             },
             EventType::Dmarc(_) => Level::Debug,
@@ -524,13 +526,25 @@ impl EventType {
                 | MessageIngestEvent::Spam
                 | MessageIngestEvent::ImapAppend
                 | MessageIngestEvent::JmapAppend
-                | MessageIngestEvent::Duplicate => Level::Info,
+                | MessageIngestEvent::Duplicate
+                | MessageIngestEvent::FtsIndex => Level::Info,
                 MessageIngestEvent::Error => Level::Error,
             },
             EventType::Security(_) => Level::Info,
             EventType::Ai(event) => match event {
                 AiEvent::LlmResponse => Level::Trace,
                 AiEvent::ApiError => Level::Warn,
+            },
+            EventType::WebDav(_) => Level::Debug,
+            EventType::Calendar(event) => match event {
+                CalendarEvent::ItipMessageSent
+                | CalendarEvent::ItipMessageReceived
+                | CalendarEvent::AlarmSent => Level::Info,
+                CalendarEvent::AlarmFailed => Level::Warn,
+                CalendarEvent::RuleExpansionError
+                | CalendarEvent::AlarmSkipped
+                | CalendarEvent::AlarmRecipientOverride
+                | CalendarEvent::ItipMessageError => Level::Debug,
             },
         }
     }

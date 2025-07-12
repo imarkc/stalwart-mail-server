@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -12,12 +12,10 @@ use crate::{
 };
 use common::listener::SessionStream;
 use directory::Permission;
+use email::mailbox::destroy::MailboxDestroy;
 use imap_proto::{
-    protocol::delete::Arguments, receiver::Request, Command, ResponseCode, StatusResponse,
+    Command, ResponseCode, StatusResponse, protocol::delete::Arguments, receiver::Request,
 };
-use jmap::mailbox::set::MailboxSet;
-use jmap_proto::types::{state::StateChange, type_state::DataType};
-use store::write::log::ChangeLogBuilder;
 
 use super::ImapContext;
 
@@ -75,41 +73,19 @@ impl<T: SessionStream> SessionData<T> {
             .get_access_token()
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
-        let mut changelog = ChangeLogBuilder::new();
-        let did_remove_emails = match self
+
+        if let Err(err) = self
             .server
-            .mailbox_destroy(account_id, mailbox_id, &mut changelog, &access_token, true)
+            .mailbox_destroy(account_id, mailbox_id, &access_token, true)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?
         {
-            Ok(did_remove_emails) => did_remove_emails,
-            Err(err) => {
-                return Err(trc::ImapEvent::Error
-                    .into_err()
-                    .details(err.description.unwrap_or("Delete failed".into()))
-                    .code(ResponseCode::from(err.type_))
-                    .id(arguments.tag));
-            }
-        };
-
-        // Write changes
-        let change_id = self
-            .server
-            .commit_changes(account_id, changelog)
-            .await
-            .imap_ctx(&arguments.tag, trc::location!())?;
-
-        // Broadcast changes
-        self.server
-            .broadcast_state_change(if did_remove_emails {
-                StateChange::new(account_id)
-                    .with_change(DataType::Mailbox, change_id)
-                    .with_change(DataType::Email, change_id)
-                    .with_change(DataType::Thread, change_id)
-            } else {
-                StateChange::new(account_id).with_change(DataType::Mailbox, change_id)
-            })
-            .await;
+            return Err(trc::ImapEvent::Error
+                .into_err()
+                .details(err.description.unwrap_or("Delete failed".into()))
+                .code(ResponseCode::from(err.type_))
+                .id(arguments.tag));
+        }
 
         // Update mailbox cache
         for account in self.mailboxes.lock().iter_mut() {

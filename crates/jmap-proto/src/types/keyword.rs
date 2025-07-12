@@ -1,20 +1,14 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::fmt::Display;
 
-use store::{
-    write::{
-        BitmapClass, DeserializeFrom, MaybeDynamicId, Operation, SerializeInto, TagValue, ToBitmaps,
-    },
-    Serialize,
-};
-use utils::codec::leb128::{Leb128Iterator, Leb128Vec};
+use store::{Serialize, write::TagValue};
 
-use crate::parser::{json::Parser, JsonObjectParser};
+use crate::parser::{JsonObjectParser, json::Parser};
 
 pub const SEEN: usize = 0;
 pub const DRAFT: usize = 1;
@@ -30,8 +24,20 @@ pub const FORWARDED: usize = 10;
 pub const MDN_SENT: usize = 11;
 pub const OTHER: usize = 12;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    serde::Serialize,
+)]
 #[serde(untagged)]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub enum Keyword {
     #[serde(rename(serialize = "$seen"))]
     Seen,
@@ -41,6 +47,7 @@ pub enum Keyword {
     Flagged,
     #[serde(rename(serialize = "$answered"))]
     Answered,
+    #[default]
     #[serde(rename(serialize = "$recent"))]
     Recent,
     #[serde(rename(serialize = "$important"))]
@@ -110,8 +117,9 @@ impl JsonObjectParser for Keyword {
     }
 }
 
-impl From<String> for Keyword {
-    fn from(value: String) -> Self {
+impl<T: AsRef<str>> From<T> for Keyword {
+    fn from(value: T) -> Self {
+        let value = value.as_ref();
         if value
             .as_bytes()
             .first()
@@ -146,7 +154,7 @@ impl From<String> for Keyword {
             }
         }
 
-        Keyword::Other(value)
+        Keyword::Other(String::from(value))
     }
 }
 
@@ -170,41 +178,29 @@ impl Display for Keyword {
     }
 }
 
-impl ToBitmaps for Keyword {
-    fn to_bitmaps(&self, ops: &mut Vec<store::write::Operation>, field: u8, set: bool) {
-        ops.push(Operation::Bitmap {
-            class: BitmapClass::Tag {
-                field,
-                value: self.into(),
-            },
-            set,
-        });
-    }
-}
-
-impl Serialize for Keyword {
-    fn serialize(self) -> Vec<u8> {
+impl Display for ArchivedKeyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Keyword::Seen => vec![SEEN as u8],
-            Keyword::Draft => vec![DRAFT as u8],
-            Keyword::Flagged => vec![FLAGGED as u8],
-            Keyword::Answered => vec![ANSWERED as u8],
-            Keyword::Recent => vec![RECENT as u8],
-            Keyword::Important => vec![IMPORTANT as u8],
-            Keyword::Phishing => vec![PHISHING as u8],
-            Keyword::Junk => vec![JUNK as u8],
-            Keyword::NotJunk => vec![NOTJUNK as u8],
-            Keyword::Deleted => vec![DELETED as u8],
-            Keyword::Forwarded => vec![FORWARDED as u8],
-            Keyword::MdnSent => vec![MDN_SENT as u8],
-            Keyword::Other(string) => string.into_bytes(),
+            ArchivedKeyword::Seen => write!(f, "$seen"),
+            ArchivedKeyword::Draft => write!(f, "$draft"),
+            ArchivedKeyword::Flagged => write!(f, "$flagged"),
+            ArchivedKeyword::Answered => write!(f, "$answered"),
+            ArchivedKeyword::Recent => write!(f, "$recent"),
+            ArchivedKeyword::Important => write!(f, "$important"),
+            ArchivedKeyword::Phishing => write!(f, "$phishing"),
+            ArchivedKeyword::Junk => write!(f, "$junk"),
+            ArchivedKeyword::NotJunk => write!(f, "$notjunk"),
+            ArchivedKeyword::Deleted => write!(f, "$deleted"),
+            ArchivedKeyword::Forwarded => write!(f, "$forwarded"),
+            ArchivedKeyword::MdnSent => write!(f, "$mdnsent"),
+            ArchivedKeyword::Other(s) => write!(f, "{}", s),
         }
     }
 }
 
-impl Serialize for &Keyword {
-    fn serialize(self) -> Vec<u8> {
-        match self {
+impl Serialize for Keyword {
+    fn serialize(&self) -> trc::Result<Vec<u8>> {
+        Ok(match self {
             Keyword::Seen => vec![SEEN as u8],
             Keyword::Draft => vec![DRAFT as u8],
             Keyword::Flagged => vec![FLAGGED as u8],
@@ -218,64 +214,12 @@ impl Serialize for &Keyword {
             Keyword::Forwarded => vec![FORWARDED as u8],
             Keyword::MdnSent => vec![MDN_SENT as u8],
             Keyword::Other(string) => string.as_bytes().to_vec(),
-        }
-    }
-}
-
-impl SerializeInto for Keyword {
-    fn serialize_into(&self, buf: &mut Vec<u8>) {
-        match self {
-            Keyword::Seen => buf.push(SEEN as u8),
-            Keyword::Draft => buf.push(DRAFT as u8),
-            Keyword::Flagged => buf.push(FLAGGED as u8),
-            Keyword::Answered => buf.push(ANSWERED as u8),
-            Keyword::Recent => buf.push(RECENT as u8),
-            Keyword::Important => buf.push(IMPORTANT as u8),
-            Keyword::Phishing => buf.push(PHISHING as u8),
-            Keyword::Junk => buf.push(JUNK as u8),
-            Keyword::NotJunk => buf.push(NOTJUNK as u8),
-            Keyword::Deleted => buf.push(DELETED as u8),
-            Keyword::Forwarded => buf.push(FORWARDED as u8),
-            Keyword::MdnSent => buf.push(MDN_SENT as u8),
-            Keyword::Other(string) => {
-                buf.push_leb128(OTHER + string.len());
-                if !string.is_empty() {
-                    buf.extend_from_slice(string.as_bytes())
-                }
-            }
-        }
-    }
-}
-
-impl DeserializeFrom for Keyword {
-    fn deserialize_from(bytes: &mut std::slice::Iter<'_, u8>) -> Option<Self> {
-        match bytes.next_leb128::<usize>()? {
-            SEEN => Some(Keyword::Seen),
-            DRAFT => Some(Keyword::Draft),
-            FLAGGED => Some(Keyword::Flagged),
-            ANSWERED => Some(Keyword::Answered),
-            RECENT => Some(Keyword::Recent),
-            IMPORTANT => Some(Keyword::Important),
-            PHISHING => Some(Keyword::Phishing),
-            JUNK => Some(Keyword::Junk),
-            NOTJUNK => Some(Keyword::NotJunk),
-            DELETED => Some(Keyword::Deleted),
-            FORWARDED => Some(Keyword::Forwarded),
-            MDN_SENT => Some(Keyword::MdnSent),
-            other => {
-                let len = other - OTHER;
-                let mut keyword = Vec::with_capacity(len);
-                for _ in 0..len {
-                    keyword.push(*bytes.next()?);
-                }
-                Some(Keyword::Other(String::from_utf8(keyword).ok()?))
-            }
-        }
+        })
     }
 }
 
 impl Keyword {
-    pub fn id(&self) -> Result<u32, String> {
+    pub fn id(&self) -> Result<u32, &str> {
         match self {
             Keyword::Seen => Ok(SEEN as u32),
             Keyword::Draft => Ok(DRAFT as u32),
@@ -289,7 +233,7 @@ impl Keyword {
             Keyword::Deleted => Ok(DELETED as u32),
             Keyword::Forwarded => Ok(FORWARDED as u32),
             Keyword::MdnSent => Ok(MDN_SENT as u32),
-            Keyword::Other(string) => Err(string.clone()),
+            Keyword::Other(string) => Err(string.as_str()),
         }
     }
 
@@ -310,40 +254,89 @@ impl Keyword {
             Keyword::Other(string) => Err(string),
         }
     }
+
+    pub fn try_from_id(id: usize) -> Result<Self, usize> {
+        match id {
+            SEEN => Ok(Keyword::Seen),
+            DRAFT => Ok(Keyword::Draft),
+            FLAGGED => Ok(Keyword::Flagged),
+            ANSWERED => Ok(Keyword::Answered),
+            RECENT => Ok(Keyword::Recent),
+            IMPORTANT => Ok(Keyword::Important),
+            PHISHING => Ok(Keyword::Phishing),
+            JUNK => Ok(Keyword::Junk),
+            NOTJUNK => Ok(Keyword::NotJunk),
+            DELETED => Ok(Keyword::Deleted),
+            FORWARDED => Ok(Keyword::Forwarded),
+            MDN_SENT => Ok(Keyword::MdnSent),
+            _ => Err(id),
+        }
+    }
 }
 
-impl From<Keyword> for TagValue<u32> {
+impl ArchivedKeyword {
+    pub fn id(&self) -> Result<u32, &str> {
+        match self {
+            ArchivedKeyword::Seen => Ok(SEEN as u32),
+            ArchivedKeyword::Draft => Ok(DRAFT as u32),
+            ArchivedKeyword::Flagged => Ok(FLAGGED as u32),
+            ArchivedKeyword::Answered => Ok(ANSWERED as u32),
+            ArchivedKeyword::Recent => Ok(RECENT as u32),
+            ArchivedKeyword::Important => Ok(IMPORTANT as u32),
+            ArchivedKeyword::Phishing => Ok(PHISHING as u32),
+            ArchivedKeyword::Junk => Ok(JUNK as u32),
+            ArchivedKeyword::NotJunk => Ok(NOTJUNK as u32),
+            ArchivedKeyword::Deleted => Ok(DELETED as u32),
+            ArchivedKeyword::Forwarded => Ok(FORWARDED as u32),
+            ArchivedKeyword::MdnSent => Ok(MDN_SENT as u32),
+            ArchivedKeyword::Other(string) => Err(string.as_str()),
+        }
+    }
+}
+
+impl From<Keyword> for TagValue {
     fn from(value: Keyword) -> Self {
         match value.into_id() {
             Ok(id) => TagValue::Id(id),
-            Err(string) => TagValue::Text(string.into_bytes()),
+            Err(string) => TagValue::Text(string.as_bytes().to_vec()),
         }
     }
 }
 
-impl From<&Keyword> for TagValue<u32> {
+impl From<&Keyword> for TagValue {
     fn from(value: &Keyword) -> Self {
         match value.id() {
             Ok(id) => TagValue::Id(id),
-            Err(string) => TagValue::Text(string.into_bytes()),
+            Err(string) => TagValue::Text(string.as_bytes().to_vec()),
         }
     }
 }
 
-impl From<Keyword> for TagValue<MaybeDynamicId> {
-    fn from(value: Keyword) -> Self {
-        match value.into_id() {
-            Ok(id) => TagValue::Id(MaybeDynamicId::Static(id)),
-            Err(string) => TagValue::Text(string.into_bytes()),
-        }
-    }
-}
-
-impl From<&Keyword> for TagValue<MaybeDynamicId> {
-    fn from(value: &Keyword) -> Self {
+impl From<&ArchivedKeyword> for TagValue {
+    fn from(value: &ArchivedKeyword) -> Self {
         match value.id() {
-            Ok(id) => TagValue::Id(MaybeDynamicId::Static(id)),
-            Err(string) => TagValue::Text(string.into_bytes()),
+            Ok(id) => TagValue::Id(id),
+            Err(string) => TagValue::Text(string.as_bytes().to_vec()),
+        }
+    }
+}
+
+impl From<&ArchivedKeyword> for Keyword {
+    fn from(value: &ArchivedKeyword) -> Self {
+        match value {
+            ArchivedKeyword::Seen => Keyword::Seen,
+            ArchivedKeyword::Draft => Keyword::Draft,
+            ArchivedKeyword::Flagged => Keyword::Flagged,
+            ArchivedKeyword::Answered => Keyword::Answered,
+            ArchivedKeyword::Recent => Keyword::Recent,
+            ArchivedKeyword::Important => Keyword::Important,
+            ArchivedKeyword::Phishing => Keyword::Phishing,
+            ArchivedKeyword::Junk => Keyword::Junk,
+            ArchivedKeyword::NotJunk => Keyword::NotJunk,
+            ArchivedKeyword::Deleted => Keyword::Deleted,
+            ArchivedKeyword::Forwarded => Keyword::Forwarded,
+            ArchivedKeyword::MdnSent => Keyword::MdnSent,
+            ArchivedKeyword::Other(string) => Keyword::Other(string.as_str().into()),
         }
     }
 }

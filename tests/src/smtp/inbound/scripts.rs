@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,19 +8,18 @@ use core::panic;
 use std::{fmt::Write, fs, path::PathBuf};
 
 use crate::{
-    enable_logging,
+    AssertConfig, enable_logging,
     smtp::{
-        inbound::{sign::SIGNATURES, TestMessage, TestQueueEvent},
-        session::{TestSession, VerifyResponse},
         TempDir, TestSMTP,
+        inbound::{TestMessage, TestQueueEvent, sign::SIGNATURES},
+        session::{TestSession, VerifyResponse},
     },
-    AssertConfig,
 };
 use common::Core;
 
 use smtp::{
     core::Session,
-    scripts::{event_loop::RunScript, ScriptResult},
+    scripts::{ScriptResult, event_loop::RunScript},
 };
 use store::Stores;
 use utils::config::Config;
@@ -156,11 +155,7 @@ async fn sieve_scripts() {
             .set_variable("from", "john.doe@example.org")
             .with_envelope(&test.server, &session, 0)
             .await;
-        match test
-            .server
-            .run_script(name.to_string(), script, params)
-            .await
-        {
+        match test.server.run_script(name.into(), script, params).await {
             ScriptResult::Accept { .. } => (),
             ScriptResult::Reject(message) => panic!("{}", message),
             err => {
@@ -248,14 +243,14 @@ async fn sieve_scripts() {
     assert_eq!(messages.len(), 2);
     let mut messages = messages.into_iter();
     let notification = messages.next().unwrap();
-    assert_eq!(notification.return_path, "");
-    assert_eq!(notification.recipients.len(), 2);
+    assert_eq!(notification.message.return_path, "");
+    assert_eq!(notification.message.recipients.len(), 2);
     assert_eq!(
-        notification.recipients.first().unwrap().address,
+        notification.message.recipients.first().unwrap().address,
         "john@example.net"
     );
     assert_eq!(
-        notification.recipients.last().unwrap().address,
+        notification.message.recipients.last().unwrap().address,
         "jane@example.org"
     );
     notification
@@ -328,10 +323,10 @@ async fn sieve_scripts() {
         .await;
 
     let redirect = qr.expect_message().await;
-    assert_eq!(redirect.return_path, "");
-    assert_eq!(redirect.recipients.len(), 1);
+    assert_eq!(redirect.message.return_path, "");
+    assert_eq!(redirect.message.recipients.len(), 1);
     assert_eq!(
-        redirect.recipients.first().unwrap().address,
+        redirect.message.recipients.first().unwrap().address,
         "redirect@here.email"
     );
     redirect
@@ -356,10 +351,10 @@ async fn sieve_scripts() {
         .await;
 
     let redirect = qr.expect_message().await;
-    assert_eq!(redirect.return_path, "");
-    assert_eq!(redirect.recipients.len(), 1);
+    assert_eq!(redirect.message.return_path, "");
+    assert_eq!(redirect.message.recipients.len(), 1);
     assert_eq!(
-        redirect.recipients.first().unwrap().address,
+        redirect.message.recipients.first().unwrap().address,
         "redirect@somewhere.email"
     );
     redirect

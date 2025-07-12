@@ -1,17 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use mail_send::Credentials;
-
-use crate::{
-    backend::{internal::PrincipalField, RcptType},
-    Principal, QueryBy,
-};
-
 use super::{EmailType, MemoryDirectory};
+use crate::{Principal, QueryBy, backend::RcptType};
+
+use mail_send::Credentials;
 
 impl MemoryDirectory {
     pub async fn query(&self, by: QueryBy<'_>) -> trc::Result<Option<Principal>> {
@@ -70,7 +66,7 @@ impl MemoryDirectory {
         let mut result = Vec::new();
         for (key, value) in &self.emails_to_ids {
             if key.contains(address) && value.iter().any(|t| matches!(t, EmailType::Primary(_))) {
-                result.push(key.clone())
+                result.push(key.into())
             }
         }
         Ok(result)
@@ -84,10 +80,8 @@ impl MemoryDirectory {
                     if let EmailType::List(uid) = item {
                         for principal in &self.principals {
                             if principal.id == *uid {
-                                if let Some(addr) =
-                                    principal.iter_str(PrincipalField::Emails).next()
-                                {
-                                    result.push(addr.to_string())
+                                if let Some(addr) = principal.emails.first() {
+                                    result.push(addr.clone())
                                 }
                                 break;
                             }

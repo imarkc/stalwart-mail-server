@@ -1,29 +1,30 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::{QueueEnvelope, QuotaKey, Status};
+use crate::{
+    core::throttle::NewKey,
+    queue::{DomainPart, MessageWrapper},
+};
+use ahash::AHashSet;
+use common::{Server, config::smtp::queue::QueueQuota, expr::functions::ResolveVariable};
 use std::future::Future;
-
-use common::{config::smtp::queue::QueueQuota, expr::functions::ResolveVariable, Server};
 use store::{
-    write::{BatchBuilder, QueueClass, ValueClass},
     ValueKey,
+    write::{BatchBuilder, QueueClass, ValueClass},
 };
 use trc::QueueEvent;
 
-use crate::core::throttle::NewKey;
-
-use super::{Message, QueueEnvelope, QuotaKey, Status};
-
 pub trait HasQueueQuota: Sync + Send {
-    fn has_quota(&self, message: &mut Message) -> impl Future<Output = bool> + Send;
+    fn has_quota(&self, message: &mut MessageWrapper) -> impl Future<Output = bool> + Send;
     fn check_quota<'x>(
         &'x self,
         quota: &'x QueueQuota,
         envelope: &impl ResolveVariable,
-        size: usize,
+        size: u64,
         id: u64,
         refs: &mut Vec<QuotaKey>,
         session_id: u64,
@@ -31,7 +32,7 @@ pub trait HasQueueQuota: Sync + Send {
 }
 
 impl HasQueueQuota for Server {
-    async fn has_quota(&self, message: &mut Message) -> bool {
+    async fn has_quota(&self, message: &mut MessageWrapper) -> bool {
         let mut quota_keys = Vec::new();
 
         if !self.core.smtp.queue.quota.sender.is_empty() {
@@ -39,8 +40,8 @@ impl HasQueueQuota for Server {
                 if !self
                     .check_quota(
                         quota,
-                        message,
-                        message.size,
+                        &message.message,
+                        message.message.size,
                         0,
                         &mut quota_keys,
                         message.span_id,
@@ -59,38 +60,42 @@ impl HasQueueQuota for Server {
             }
         }
 
-        for quota in &self.core.smtp.queue.quota.rcpt_domain {
-            for domain_idx in 0..message.domains.len() {
-                if !self
-                    .check_quota(
-                        quota,
-                        &QueueEnvelope::new(message, domain_idx),
-                        message.size,
-                        ((domain_idx + 1) << 32) as u64,
-                        &mut quota_keys,
-                        message.span_id,
-                    )
-                    .await
-                {
-                    trc::event!(
-                        Queue(QueueEvent::QuotaExceeded),
-                        SpanId = message.span_id,
-                        Id = quota.id.clone(),
-                        Type = "Domain"
-                    );
+        if !self.core.smtp.queue.quota.rcpt_domain.is_empty() {
+            let mut seen_domains = AHashSet::new();
+            for quota in &self.core.smtp.queue.quota.rcpt_domain {
+                for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
+                    if seen_domains.insert(rcpt.address_lcase.domain_part())
+                        && !self
+                            .check_quota(
+                                quota,
+                                &QueueEnvelope::new(&message.message, rcpt),
+                                message.message.size,
+                                ((rcpt_idx + 1) << 32) as u64,
+                                &mut quota_keys,
+                                message.span_id,
+                            )
+                            .await
+                    {
+                        trc::event!(
+                            Queue(QueueEvent::QuotaExceeded),
+                            SpanId = message.span_id,
+                            Id = quota.id.clone(),
+                            Type = "Domain"
+                        );
 
-                    return false;
+                        return false;
+                    }
                 }
             }
         }
 
         for quota in &self.core.smtp.queue.quota.rcpt {
-            for (rcpt_idx, rcpt) in message.recipients.iter().enumerate() {
+            for (rcpt_idx, rcpt) in message.message.recipients.iter().enumerate() {
                 if !self
                     .check_quota(
                         quota,
-                        &QueueEnvelope::new_rcpt(message, rcpt.domain_idx, rcpt_idx),
-                        message.size,
+                        &QueueEnvelope::new(&message.message, rcpt),
+                        message.message.size,
                         (rcpt_idx + 1) as u64,
                         &mut quota_keys,
                         message.span_id,
@@ -109,7 +114,7 @@ impl HasQueueQuota for Server {
             }
         }
 
-        message.quota_keys = quota_keys;
+        message.message.quota_keys = quota_keys;
 
         true
     }
@@ -118,7 +123,7 @@ impl HasQueueQuota for Server {
         &'x self,
         quota: &'x QueueQuota,
         envelope: &impl ResolveVariable,
-        size: usize,
+        size: u64,
         id: u64,
         refs: &mut Vec<QuotaKey>,
         session_id: u64,
@@ -139,7 +144,7 @@ impl HasQueueQuota for Server {
                         key.as_ref().to_vec(),
                     ))))
                     .await
-                    .unwrap_or(0) as usize;
+                    .unwrap_or(0) as u64;
                 if used_size + size > max_size {
                     return false;
                 } else {
@@ -159,7 +164,7 @@ impl HasQueueQuota for Server {
                         key.as_ref().to_vec(),
                     ))))
                     .await
-                    .unwrap_or(0) as usize;
+                    .unwrap_or(0) as u64;
                 if total_messages + 1 > max_messages {
                     return false;
                 } else {
@@ -174,32 +179,29 @@ impl HasQueueQuota for Server {
     }
 }
 
-impl Message {
+impl MessageWrapper {
     pub fn release_quota(&mut self, batch: &mut BatchBuilder) {
-        if self.quota_keys.is_empty() {
+        if self.message.quota_keys.is_empty() {
             return;
         }
-        let mut quota_ids = Vec::with_capacity(self.domains.len() + self.recipients.len());
-        for (pos, domain) in self.domains.iter().enumerate() {
-            if matches!(
-                &domain.status,
-                Status::Completed(_) | Status::PermanentFailure(_)
-            ) {
-                quota_ids.push(((pos + 1) as u64) << 32);
-            }
-        }
-        for (pos, rcpt) in self.recipients.iter().enumerate() {
+        let mut quota_ids = Vec::with_capacity(self.message.recipients.len());
+
+        let mut seen_domains = AHashSet::new();
+        for (pos, rcpt) in self.message.recipients.iter().enumerate() {
             if matches!(
                 &rcpt.status,
                 Status::Completed(_) | Status::PermanentFailure(_)
             ) {
+                if seen_domains.insert(rcpt.address_lcase.domain_part()) {
+                    quota_ids.push(((pos + 1) as u64) << 32);
+                }
                 quota_ids.push((pos + 1) as u64);
             }
         }
 
         if !quota_ids.is_empty() {
             let mut quota_keys = Vec::new();
-            for quota_key in std::mem::take(&mut self.quota_keys) {
+            for quota_key in std::mem::take(&mut self.message.quota_keys) {
                 match quota_key {
                     QuotaKey::Count { id, key } if quota_ids.contains(&id) => {
                         batch.add(ValueClass::Queue(QueueClass::QuotaCount(key)), -1);
@@ -207,7 +209,7 @@ impl Message {
                     QuotaKey::Size { id, key } if quota_ids.contains(&id) => {
                         batch.add(
                             ValueClass::Queue(QueueClass::QuotaSize(key)),
-                            -(self.size as i64),
+                            -(self.message.size as i64),
                         );
                     }
                     _ => {
@@ -215,7 +217,7 @@ impl Message {
                     }
                 }
             }
-            self.quota_keys = quota_keys;
+            self.message.quota_keys = quota_keys;
         }
     }
 }

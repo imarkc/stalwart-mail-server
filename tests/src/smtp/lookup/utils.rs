@@ -1,141 +1,192 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::time::{Duration, Instant};
+use std::net::IpAddr;
 
+use crate::smtp::TestSMTP;
+use ::smtp::outbound::NextHop;
 use common::{
+    Core,
     config::smtp::{
+        queue::{MxConfig, QueueExpiry, QueueName},
         report::AggregateFrequency,
         resolver::{Mode, MxPattern, Policy},
     },
-    Core,
 };
-use mail_auth::MX;
-
-use ::smtp::outbound::NextHop;
+use mail_auth::{IpLookupStrategy, MX};
 use mail_parser::DateTime;
 use smtp::{
     outbound::{
-        lookup::{DnsLookup, ToNextHop},
+        lookup::{SourceIp, ToNextHop},
         mta_sts::parse::ParsePolicy,
     },
-    queue::RecipientDomain,
+    queue::{
+        Error, ErrorDetails, FROM_AUTHENTICATED, Message, QueueEnvelope, Recipient, Schedule,
+        Status,
+    },
     reporting::AggregateTimestamp,
 };
+use store::write::now;
 use utils::config::Config;
 
-use crate::smtp::{DnsCache, TestSMTP};
+const CONFIG: &str = r#"
+[queue.connection.test.timeout]
+connect = "10s"
 
-const CONFIG_V4: &str = r#"
-[queue.outbound.source-ip]
-v4 = "['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4']"
-v6 = "['a:b::1', 'a:b::2', 'a:b::3', 'a:b::4']"
+[[queue.connection.test.source-ip]]
+address = "10.0.0.1"
+ehlo-hostname = "test1.example.com"
 
-[queue.outbound]
-ip-strategy = "ipv4_then_ipv6"
+[[queue.connection.test.source-ip]]
+address = "10.0.0.2"
+ehlo-hostname = "test2.example.com"
 
-"#;
+[[queue.connection.test.source-ip]]
+address = "10.0.0.3"
+ehlo-hostname = "test3.example.com"
 
-const CONFIG_V6: &str = r#"
-[queue.outbound.source-ip]
-v4 = "['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4']"
-v6 = "['a:b::1', 'a:b::2', 'a:b::3', 'a:b::4']"
+[[queue.connection.test.source-ip]]
+address = "10.0.0.4"
+ehlo-hostname = "test4.example.com"
 
-[queue.outbound]
-ip-strategy = "ipv6_then_ipv4"
+[[queue.connection.test.source-ip]]
+address = "a:b::1"
+ehlo-hostname = "test5.example.com"
+
+[[queue.connection.test.source-ip]]
+address = "a:b::2"
+ehlo-hostname = "test6.example.com"
+
+[[queue.connection.test.source-ip]]
+address = "a:b::3"
+ehlo-hostname = "test7.example.com"
+
+[[queue.connection.test.source-ip]]
+address = "a:b::4"
+ehlo-hostname = "test8.example.com"
+
+[queue.connection.test]
+ehlo-hostname = "test.example.com"
+
+[queue.test-v4.type]
+type = "mx"
+ip-lookup-strategy = "ipv4_then_ipv6"
+
+[queue.test-v6.type]
+type = "mx"
+ip-lookup-strategy = "ipv6_then_ipv4"
+
+[queue.strategy]
+schedule = "source + ' ' + received_from_ip + ' ' + received_via_port + ' ' + queue_name + ' ' + last_error + ' ' + rcpt_domain + ' ' + size + ' ' + queue_age"
 
 "#;
 
 #[tokio::test]
-async fn lookup_ip() {
+async fn strategies() {
     // Enable logging
     crate::enable_logging();
 
-    let ipv6 = [
+    let ipv6: [IpAddr; 4] = [
         "a:b::1".parse().unwrap(),
         "a:b::2".parse().unwrap(),
         "a:b::3".parse().unwrap(),
         "a:b::4".parse().unwrap(),
     ];
-    let ipv4 = [
+    let ipv4: [IpAddr; 4] = [
         "10.0.0.1".parse().unwrap(),
         "10.0.0.2".parse().unwrap(),
         "10.0.0.3".parse().unwrap(),
         "10.0.0.4".parse().unwrap(),
     ];
-    let mut config = Config::new(CONFIG_V4).unwrap();
+    let ipv4_hosts = [
+        "test1.example.com".to_string(),
+        "test2.example.com".to_string(),
+        "test3.example.com".to_string(),
+        "test4.example.com".to_string(),
+    ];
+    let ipv6_hosts = [
+        "test5.example.com".to_string(),
+        "test6.example.com".to_string(),
+        "test7.example.com".to_string(),
+        "test8.example.com".to_string(),
+    ];
+
+    let mut config = Config::new(CONFIG).unwrap();
     let test =
         TestSMTP::from_core(Core::parse(&mut config, Default::default(), Default::default()).await);
-    test.server.ipv4_add(
-        "mx.foobar.org",
-        vec![
-            "172.168.0.100".parse().unwrap(),
-            "172.168.0.101".parse().unwrap(),
-        ],
-        Instant::now() + Duration::from_secs(10),
-    );
-    test.server.ipv6_add(
-        "mx.foobar.org",
-        vec!["e:f::a".parse().unwrap(), "e:f::b".parse().unwrap()],
-        Instant::now() + Duration::from_secs(10),
-    );
 
-    // Ipv4 strategy
-    let resolve_result = test
+    let conn = test
         .server
-        .resolve_host(
-            &NextHop::MX("mx.foobar.org"),
-            &RecipientDomain::new("envelope"),
-            2,
-            0,
-        )
-        .await
+        .core
+        .smtp
+        .queue
+        .connection_strategy
+        .get("test")
         .unwrap();
-    assert!(ipv4.contains(&match resolve_result.source_ipv4.unwrap() {
-        std::net::IpAddr::V4(v4) => v4,
-        _ => unreachable!(),
-    }));
-    assert!(resolve_result
-        .remote_ips
-        .contains(&"172.168.0.100".parse().unwrap()));
 
-    // Ipv6 strategy
-    let mut config = Config::new(CONFIG_V6).unwrap();
-    let test =
-        TestSMTP::from_core(Core::parse(&mut config, Default::default(), Default::default()).await);
-    test.server.ipv4_add(
-        "mx.foobar.org",
-        vec![
-            "172.168.0.100".parse().unwrap(),
-            "172.168.0.101".parse().unwrap(),
-        ],
-        Instant::now() + Duration::from_secs(10),
+    assert_eq!(conn.ehlo_hostname.as_ref().unwrap(), "test.example.com");
+
+    for is_ipv4 in [true, false] {
+        for _ in 0..10 {
+            let ip_host = conn.source_ip(is_ipv4).unwrap();
+            if is_ipv4 {
+                assert_eq!(
+                    &ipv4_hosts[ipv4.iter().position(|&ip| ip == ip_host.ip).unwrap()],
+                    ip_host.host.as_ref().unwrap()
+                );
+            } else {
+                assert_eq!(
+                    &ipv6_hosts[ipv6.iter().position(|&ip| ip == ip_host.ip).unwrap()],
+                    ip_host.host.as_ref().unwrap()
+                );
+            }
+        }
+    }
+
+    // Test strategy resolution
+    let message = Message {
+        created: now() - 123,
+        blob_hash: Default::default(),
+        received_from_ip: "1.2.3.4".parse().unwrap(),
+        received_via_port: 7911,
+        return_path: "test@example.com".to_string(),
+        return_path_lcase: "test@example.com".to_string(),
+        return_path_domain: "example.com".to_string(),
+        recipients: vec![Recipient {
+            address: "recipient@foobar.com".to_string(),
+            address_lcase: "recipient@foobar.com".to_string(),
+            retry: Schedule::now(),
+            notify: Schedule::now(),
+            expires: QueueExpiry::Duration(3600),
+            queue: QueueName::new("test").unwrap(),
+            status: Status::TemporaryFailure(ErrorDetails {
+                entity: "test.example.com".to_string(),
+                details: Error::TlsError("TLS handshake failed".to_string()),
+            }),
+            flags: 0,
+            orcpt: None,
+        }],
+        flags: FROM_AUTHENTICATED,
+        env_id: None,
+        priority: 0,
+        size: 978,
+        quota_keys: vec![],
+    };
+
+    assert_eq!(
+        test.server
+            .eval_if::<String, _>(
+                &test.server.core.smtp.queue.queue,
+                &QueueEnvelope::new(&message, &message.recipients[0]),
+                0,
+            )
+            .await
+            .unwrap_or_else(|| "default".to_string()),
+        "authenticated 1.2.3.4 7911 test tls foobar.com 978 123"
     );
-    test.server.ipv6_add(
-        "mx.foobar.org",
-        vec!["e:f::a".parse().unwrap(), "e:f::b".parse().unwrap()],
-        Instant::now() + Duration::from_secs(10),
-    );
-    let resolve_result = test
-        .server
-        .resolve_host(
-            &NextHop::MX("mx.foobar.org"),
-            &RecipientDomain::new("envelope"),
-            2,
-            0,
-        )
-        .await
-        .unwrap();
-    assert!(ipv6.contains(&match resolve_result.source_ipv6.unwrap() {
-        std::net::IpAddr::V6(v6) => v6,
-        _ => unreachable!(),
-    }));
-    assert!(resolve_result
-        .remote_ips
-        .contains(&"e:f::a".parse().unwrap()));
 }
 
 #[test]
@@ -163,10 +214,15 @@ fn to_remote_hosts() {
             preference: 10,
         },
     ];
-    let hosts = mx.to_remote_hosts("domain", 7).unwrap();
+    let mx_config = MxConfig {
+        max_mx: 7,
+        max_multi_homed: 2,
+        ip_lookup_strategy: IpLookupStrategy::Ipv4thenIpv6,
+    };
+    let hosts = mx.to_remote_hosts("domain", &mx_config).unwrap();
     assert_eq!(hosts.len(), 7);
     for host in hosts {
-        if let NextHop::MX(host) = host {
+        if let NextHop::MX { host, .. } = host {
             assert!((*host.as_bytes().last().unwrap() - b'0') <= 8);
         }
     }
@@ -174,7 +230,7 @@ fn to_remote_hosts() {
         exchanges: vec![".".to_string()],
         preference: 0,
     }];
-    assert!(mx.to_remote_hosts("domain", 10).is_none());
+    assert!(mx.to_remote_hosts("domain", &mx_config).is_none());
 }
 
 #[test]

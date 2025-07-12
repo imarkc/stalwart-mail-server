@@ -1,23 +1,24 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{borrow::Borrow, cmp::Ordering, fmt, hash::Hash};
 
-use serde::{de::DeserializeOwned, ser::SerializeMap, Deserialize, Serialize};
+use rkyv::Archive;
+use serde::{Deserialize, Serialize, de::DeserializeOwned, ser::SerializeMap};
 
 // A map implemented using vectors
 // used for small datasets of less than 20 items
 // and when deserializing from JSON
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct VecMap<K: Eq + PartialEq, V> {
     inner: Vec<KeyValue<K, V>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyValue<K: Eq + PartialEq, V> {
     key: K,
     value: V,
@@ -54,6 +55,12 @@ impl<K: Eq + PartialEq, V> VecMap<K, V> {
     #[inline(always)]
     pub fn append(&mut self, key: K, value: V) {
         self.inner.push(KeyValue { key, value });
+    }
+
+    #[inline(always)]
+    pub fn with_append(mut self, key: K, value: V) -> Self {
+        self.append(key, value);
+        self
     }
 
     #[inline(always)]
@@ -222,6 +229,28 @@ impl<K: Eq + PartialEq, V: Default> VecMap<K, V> {
             });
             &mut self.inner.last_mut().unwrap().value
         }
+    }
+}
+
+impl<K: Archive + Eq + PartialEq, V: Archive> ArchivedVecMap<K, V> {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    #[inline(always)]
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &<K as rkyv::Archive>::Archived,
+            &<V as rkyv::Archive>::Archived,
+        ),
+    > {
+        self.inner.iter().map(|kv| (&kv.key, &kv.value))
     }
 }
 

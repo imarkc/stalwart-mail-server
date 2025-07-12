@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,9 +8,22 @@ use std::fmt::{self, Display};
 
 use utils::map::bitmap::BitmapItem;
 
-use crate::parser::{json::Parser, JsonObjectParser};
+use crate::parser::{JsonObjectParser, json::Parser};
 
-#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(
+    rkyv::Archive,
+    rkyv::Deserialize,
+    rkyv::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Copy,
+)]
+#[rkyv(compare(PartialEq), derive(Debug))]
 #[repr(u8)]
 pub enum Acl {
     Read = 0,
@@ -23,7 +36,12 @@ pub enum Acl {
     CreateChild = 7,
     Administer = 8,
     Submit = 9,
-    None = 10,
+    SchedulingReadFreeBusy = 10,
+    SchedulingInvite = 11,
+    SchedulingReply = 12,
+    ModifyItemsOwn = 13,
+    ModifyPrivateProperties = 14,
+    None = 15,
 }
 
 impl JsonObjectParser for Acl {
@@ -72,7 +90,12 @@ impl Acl {
             Acl::CreateChild => "createChild",
             Acl::Administer => "administer",
             Acl::Submit => "submit",
+            Acl::ModifyItemsOwn => "modifyItemsOwn",
+            Acl::ModifyPrivateProperties => "modifyPrivateProperties",
             Acl::None => "",
+            Acl::SchedulingReadFreeBusy => "schedulingReadFreeBusy",
+            Acl::SchedulingInvite => "schedulingInvite",
+            Acl::SchedulingReply => "schedulingReply",
         }
     }
 }
@@ -121,31 +144,12 @@ impl From<u64> for Acl {
             7 => Acl::CreateChild,
             8 => Acl::Administer,
             9 => Acl::Submit,
+            10 => Acl::SchedulingReadFreeBusy,
+            11 => Acl::SchedulingInvite,
+            12 => Acl::SchedulingReply,
+            13 => Acl::ModifyItemsOwn,
+            14 => Acl::ModifyPrivateProperties,
             _ => Acl::None,
         }
     }
 }
-
-/*impl SerializeInto for Acl {
-    fn serialize_into(&self, buf: &mut Vec<u8>) {
-        buf.push(*self as u8);
-    }
-}
-
-impl DeserializeFrom for Acl {
-    fn deserialize_from(bytes: &mut std::slice::Iter<'_, u8>) -> Option<Self> {
-        match *bytes.next()? {
-            0 => Some(Acl::Read),
-            1 => Some(Acl::Modify),
-            2 => Some(Acl::Delete),
-            3 => Some(Acl::ReadItems),
-            4 => Some(Acl::AddItems),
-            5 => Some(Acl::ModifyItems),
-            6 => Some(Acl::RemoveItems),
-            7 => Some(Acl::CreateChild),
-            8 => Some(Acl::Administer),
-            9 => Some(Acl::Submit),
-            _ => None,
-        }
-    }
-}*/

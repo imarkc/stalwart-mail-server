@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -40,7 +40,7 @@ impl Base32Writer {
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_raw_capacity((capacity + 3) / 4 * 5)
+        Self::with_raw_capacity(capacity.div_ceil(4) * 5)
     }
 
     pub fn with_raw_capacity(capacity: usize) -> Self {

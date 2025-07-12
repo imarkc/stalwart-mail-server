@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -27,7 +27,8 @@ impl SpamFilterAnalyzeMid for Server {
             if let (HeaderName::MessageId, value) = (&header.name, &header.value) {
                 mid = value.as_text().unwrap_or_default();
                 mid_raw = std::str::from_utf8(
-                    &ctx.input.message.raw_message()[header.offset_start..header.offset_end],
+                    &ctx.input.message.raw_message()
+                        [header.offset_start as usize..header.offset_end as usize],
                 )
                 .unwrap_or_default()
                 .trim();
@@ -64,7 +65,7 @@ impl SpamFilterAnalyzeMid for Server {
                     ("ENV_FROM", &ctx.output.env_from_addr),
                 ] {
                     if !sender.address.is_empty() {
-                        if mid.contains(&sender.address) {
+                        if mid.contains(sender.address.as_str()) {
                             ctx.result.add_tag(format!("MID_CONTAINS_{part}"));
                         } else if mid_host.fqdn == sender.domain_part.fqdn {
                             ctx.result.add_tag(format!("MID_RHS_MATCH_{part}"));
@@ -77,7 +78,7 @@ impl SpamFilterAnalyzeMid for Server {
 
                 // To/Cc addresses present in Message-ID checks
                 for rcpt in ctx.output.all_recipients() {
-                    if mid.contains(&rcpt.email.address) {
+                    if mid.contains(rcpt.email.address.as_str()) {
                         ctx.result.add_tag("MID_CONTAINS_TO");
                     } else if mid_host.fqdn == rcpt.email.domain_part.fqdn {
                         ctx.result.add_tag("MID_RHS_MATCH_TO");

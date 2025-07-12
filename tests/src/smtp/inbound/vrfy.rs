@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -12,11 +12,11 @@ use utils::config::Config;
 use smtp::core::Session;
 
 use crate::{
-    smtp::{
-        session::{TestSession, VerifyResponse},
-        TempDir, TestSMTP,
-    },
     AssertConfig,
+    smtp::{
+        TempDir, TestSMTP,
+        session::{TestSession, VerifyResponse},
+    },
 };
 
 const CONFIG: &str = r#"
@@ -79,7 +79,7 @@ async fn vrfy_expn() {
 
     // EHLO should not advertise VRFY/EXPN to 10.0.0.2
     let mut session = Session::test(TestSMTP::from_core(core).server);
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.eval_session_params().await;
     session
         .ehlo("mx.foobar.org")
@@ -90,7 +90,7 @@ async fn vrfy_expn() {
     session.cmd("EXPN sales@foobar.org", "252 2.5.1").await;
 
     // EHLO should advertise VRFY/EXPN for 10.0.0.1
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session
         .ehlo("mx.foobar.org")

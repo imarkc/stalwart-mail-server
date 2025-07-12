@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use trc::{AddContext, AuthEvent, EventType};
 
-use crate::{auth::AccessToken, Server};
+use crate::{Server, auth::AccessToken};
 
 #[derive(Debug, Default, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct OAuthIntrospect {
@@ -67,7 +67,7 @@ impl Server {
                         .clone()
                 }
                 .into(),
-                token_type: "bearer".to_string().into(),
+                token_type: Some("bearer".into()),
                 exp: Some(token_info.expiry as i64),
                 iat: Some(token_info.issued_at as i64),
                 ..Default::default()

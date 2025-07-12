@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,11 +8,10 @@ use utils::map::vec_map::VecMap;
 
 use crate::{
     error::set::SetError,
-    object::Object,
-    parser::{json::Parser, JsonObjectParser, Token},
+    parser::{JsonObjectParser, Token, json::Parser},
     request::{
-        reference::{MaybeReference, ResultReference},
         RequestProperty,
+        reference::{MaybeReference, ResultReference},
     },
     response::Response,
     types::{
@@ -21,8 +20,8 @@ use crate::{
         id::Id,
         keyword::Keyword,
         property::Property,
-        state::{State, StateChange},
-        value::{SetValueMap, Value},
+        state::State,
+        value::{Object, SetValueMap, Value},
     },
 };
 
@@ -60,9 +59,6 @@ pub struct ImportEmailResponse {
     #[serde(rename = "notCreated")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
     pub not_created: VecMap<String, SetError>,
-
-    #[serde(skip)]
-    pub state_change: Option<StateChange>,
 }
 
 impl JsonObjectParser for ImportEmailRequest {

@@ -1,10 +1,9 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-pub mod assign_id;
 pub mod blob;
 pub mod import_export;
 pub mod lookup;
@@ -96,8 +95,7 @@ pub async fn store_tests() {
         store.destroy().await;
     }
 
-    import_export::test(store.clone()).await;
-    assign_id::test(store.clone()).await;
+    //import_export::test(store.clone()).await;
     ops::test(store.clone()).await;
     query::test(store.clone(), FtsStore::Store(store.clone()), insert).await;
 

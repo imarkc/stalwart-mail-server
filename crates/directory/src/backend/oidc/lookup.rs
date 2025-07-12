@@ -1,25 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use ahash::HashMap;
+
 use mail_send::Credentials;
-use reqwest::{header::AUTHORIZATION, StatusCode};
+use reqwest::{StatusCode, header::AUTHORIZATION};
 use trc::{AddContext, AuthEvent};
 
 use crate::{
+    Principal, PrincipalData, QueryBy, ROLE_USER, Type,
     backend::{
+        RcptType,
         internal::{
             lookup::DirectoryStore,
             manage::{self, ManageDirectory, UpdatePrincipal},
-            PrincipalField,
         },
         oidc::{Authentication, EndpointType},
-        RcptType,
     },
-    Principal, QueryBy, Type, ROLE_USER,
 };
 
 use super::{OpenIdConfig, OpenIdDirectory};
@@ -185,11 +185,17 @@ impl BuildPrincipal for OpenIdResponse {
             .as_ref()
             .and_then(|field| self.take_field(field));
 
-        Ok(Principal::new(u32::MAX, Type::Individual)
-            .with_field(PrincipalField::Name, username)
-            .with_field(PrincipalField::Emails, email)
-            .with_field(PrincipalField::Roles, ROLE_USER)
-            .with_opt_field(PrincipalField::Description, full_name))
+        Ok(Principal {
+            id: u32::MAX,
+            typ: Type::Individual,
+            name: username,
+            description: full_name,
+            secrets: Default::default(),
+            emails: vec![email],
+            quota: Default::default(),
+            tenant: Default::default(),
+            data: vec![PrincipalData::Roles(vec![ROLE_USER])],
+        })
     }
 
     fn take_required_field(&mut self, field: &str) -> trc::Result<String> {

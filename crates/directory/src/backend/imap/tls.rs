@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,7 +9,7 @@ use std::time::Duration;
 use rustls_pki_types::ServerName;
 use smtp_proto::IntoString;
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio_rustls::{client::TlsStream, TlsConnector};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use super::{ImapClient, ImapError};
 

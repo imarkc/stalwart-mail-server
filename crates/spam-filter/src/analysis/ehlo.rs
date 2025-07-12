@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -32,7 +32,7 @@ impl SpamFilterAnalyzeEhlo for Server {
                 .output
                 .iprev_ptr
                 .as_ref()
-                .is_some_and(|ptr| ptr != &ctx.output.ehlo_host.fqdn)
+                .is_some_and(|ptr| ptr != ctx.output.ehlo_host.fqdn)
             {
                 // Helo does not match reverse IP
                 ctx.result.add_tag("HELO_IPREV_MISMATCH");

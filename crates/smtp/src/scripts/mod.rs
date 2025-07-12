@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,10 +8,11 @@ use std::borrow::Cow;
 
 use ahash::AHashMap;
 use common::{
-    auth::AccessToken, expr::functions::ResolveVariable, scripts::ScriptModification, Server,
+    Server, auth::AccessToken, expr::functions::ResolveVariable, scripts::ScriptModification,
 };
+
 use mail_parser::Message;
-use sieve::{runtime::Variable, Envelope};
+use sieve::{Envelope, runtime::Variable};
 
 pub mod envelope;
 pub mod event_loop;

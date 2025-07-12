@@ -1,14 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+#![warn(clippy::large_futures)]
+
 use std::sync::Arc;
 
 use common::{
-    manager::boot::{BootManager, IpcReceivers},
     Inner,
+    manager::boot::{BootManager, IpcReceivers},
 };
 use queue::manager::SpawnQueue;
 use reporting::scheduler::SpawnReport;

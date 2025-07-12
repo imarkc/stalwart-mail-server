@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,8 +10,8 @@ use utils::map::vec_map::VecMap;
 
 use crate::{
     error::set::SetError,
-    parser::{json::Parser, Ignore, JsonObjectParser, Token},
-    request::{reference::MaybeReference, RequestProperty},
+    parser::{Ignore, JsonObjectParser, Token, json::Parser},
+    request::{RequestProperty, reference::MaybeReference},
     response::Response,
     types::{blob::BlobId, id::Id},
 };

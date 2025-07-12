@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -25,6 +25,7 @@ pub enum GrantType {
     LiveTracing,
     LiveMetrics,
     Troubleshoot,
+    Rsvp,
 }
 
 impl GrantType {
@@ -35,6 +36,7 @@ impl GrantType {
             GrantType::LiveTracing => "live_tracing",
             GrantType::LiveMetrics => "live_metrics",
             GrantType::Troubleshoot => "troubleshoot",
+            GrantType::Rsvp => "rsvp",
         }
     }
 
@@ -45,6 +47,7 @@ impl GrantType {
             GrantType::LiveTracing => 2,
             GrantType::LiveMetrics => 3,
             GrantType::Troubleshoot => 4,
+            GrantType::Rsvp => 5,
         }
     }
 
@@ -55,6 +58,7 @@ impl GrantType {
             2 => Some(GrantType::LiveTracing),
             3 => Some(GrantType::LiveMetrics),
             4 => Some(GrantType::Troubleshoot),
+            5 => Some(GrantType::Rsvp),
             _ => None,
         }
     }

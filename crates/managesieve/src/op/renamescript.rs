@@ -1,20 +1,17 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::Instant;
 
-use common::listener::SessionStream;
+use common::{listener::SessionStream, storage::index::ObjectIndexBuilder};
 use directory::Permission;
+use email::sieve::SieveScript;
 use imap_proto::receiver::Request;
-use jmap::sieve::set::SCHEMA;
-use jmap_proto::{
-    object::{index::ObjectIndexBuilder, Object},
-    types::{collection::Collection, property::Property, value::Value},
-};
-use store::write::{assert::HashedValue, log::ChangeLogBuilder, BatchBuilder};
+use jmap_proto::types::collection::Collection;
+use store::write::BatchBuilder;
 use trc::AddContext;
 
 use crate::core::{Command, ResponseCode, Session, StatusResponse};
@@ -63,12 +60,7 @@ impl<T: SessionStream> Session<T> {
         // Obtain script values
         let script = self
             .server
-            .get_property::<HashedValue<Object<Value>>>(
-                account_id,
-                Collection::SieveScript,
-                document_id,
-                Property::Value,
-            )
+            .get_archive(account_id, Collection::SieveScript, document_id)
             .await
             .caused_by(trc::location!())?
             .ok_or_else(|| {
@@ -76,7 +68,9 @@ impl<T: SessionStream> Session<T> {
                     .into_err()
                     .details("Script not found")
                     .code(ResponseCode::NonExistent)
-            })?;
+            })?
+            .into_deserialized::<SieveScript>()
+            .caused_by(trc::location!())?;
 
         // Write record
         let mut batch = BatchBuilder::new();
@@ -85,22 +79,14 @@ impl<T: SessionStream> Session<T> {
             .with_collection(Collection::SieveScript)
             .update_document(document_id)
             .custom(
-                ObjectIndexBuilder::new(SCHEMA)
-                    .with_current(script)
-                    .with_changes(
-                        Object::with_capacity(1).with_property(Property::Name, new_name.clone()),
-                    ),
-            );
+                ObjectIndexBuilder::new()
+                    .with_changes(script.inner.clone().with_name(new_name.clone()))
+                    .with_current(script),
+            )
+            .caused_by(trc::location!())?;
         if !batch.is_empty() {
             self.server
-                .store()
-                .write(batch)
-                .await
-                .caused_by(trc::location!())?;
-            let mut changelog = ChangeLogBuilder::new();
-            changelog.log_update(Collection::SieveScript, document_id);
-            self.server
-                .commit_changes(account_id, changelog)
+                .commit_batch(batch)
                 .await
                 .caused_by(trc::location!())?;
         }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -15,8 +15,8 @@ use utils::config::Config;
 use smtp::core::{Session, State};
 
 use crate::smtp::{
-    session::{TestSession, VerifyResponse},
     TempDir, TestSMTP,
+    session::{TestSession, VerifyResponse},
 };
 
 const CONFIG: &str = r#"
@@ -94,7 +94,7 @@ async fn rcpt() {
 
     // RCPT without MAIL FROM
     let mut session = Session::test(TestSMTP::from_core(core).server);
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx1.foobar.org").await;
     session.rcpt_to("jane@foobar.org", "503 5.5.1").await;
@@ -147,7 +147,7 @@ async fn rcpt() {
     }
 
     // Relaying should be allowed for 10.0.0.2
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.eval_session_params().await;
     session.rset().await;
     session.mail_from("john@example.net", "250").await;

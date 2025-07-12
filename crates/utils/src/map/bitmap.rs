@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,11 +7,26 @@
 use std::ops::Deref;
 
 #[derive(
-    Debug, serde::Serialize, serde::Deserialize, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash,
+    Debug,
+    rkyv::Archive,
+    rkyv::Deserialize,
+    rkyv::Serialize,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Copy,
+    PartialOrd,
+    Ord,
+    PartialEq,
+    Eq,
+    Hash,
 )]
+#[rkyv(compare(PartialEq), derive(Debug))]
+#[repr(transparent)]
 pub struct Bitmap<T: BitmapItem> {
     pub bitmap: u64,
     #[serde(skip)]
+    #[rkyv(omit_bounds)]
     _state: std::marker::PhantomData<T>,
 }
 
@@ -36,6 +51,11 @@ impl<T: BitmapItem> Bitmap<T> {
     #[inline(always)]
     pub fn union(&mut self, items: &Bitmap<T>) {
         self.bitmap |= items.bitmap;
+    }
+
+    #[inline(always)]
+    pub fn union_raw(&mut self, items: impl Into<u64>) {
+        self.bitmap |= items.into();
     }
 
     #[inline(always)]
@@ -88,6 +108,20 @@ impl<T: BitmapItem> Bitmap<T> {
     }
 
     #[inline(always)]
+    pub fn contains_all(&self, items: impl Iterator<Item = T>) -> bool {
+        if !self.is_empty() {
+            for item in items {
+                if self.bitmap & (1 << item.into()) == 0 {
+                    return false;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.bitmap == 0
     }
@@ -98,6 +132,24 @@ impl<T: BitmapItem> Bitmap<T> {
         self.bitmap = 0;
         Bitmap {
             bitmap,
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: BitmapItem> From<ArchivedBitmap<T>> for Bitmap<T> {
+    fn from(value: ArchivedBitmap<T>) -> Self {
+        Self {
+            bitmap: value.bitmap.into(),
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: BitmapItem> From<&ArchivedBitmap<T>> for Bitmap<T> {
+    fn from(value: &ArchivedBitmap<T>) -> Self {
+        Self {
+            bitmap: value.bitmap.into(),
             _state: std::marker::PhantomData,
         }
     }
@@ -206,5 +258,31 @@ impl<T: BitmapItem> Default for Bitmap<T> {
             bitmap: 0,
             _state: std::marker::PhantomData,
         }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ShortId(pub u8);
+
+impl BitmapItem for ShortId {
+    fn max() -> u64 {
+        u8::MAX as u64
+    }
+
+    fn is_valid(&self) -> bool {
+        true
+    }
+}
+
+impl From<u64> for ShortId {
+    fn from(value: u64) -> Self {
+        ShortId(value as u8)
+    }
+}
+
+impl From<ShortId> for u64 {
+    fn from(value: ShortId) -> Self {
+        value.0 as u64
     }
 }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,19 +10,12 @@ use crate::{
     core::{Session, SessionData},
     spawn_op,
 };
-use common::listener::SessionStream;
+use common::{listener::SessionStream, storage::index::ObjectIndexBuilder};
+
 use directory::Permission;
-use email::mailbox::SCHEMA;
-use imap_proto::{receiver::Request, Command, ResponseCode, StatusResponse};
-use jmap::mailbox::set::MailboxSubscribe;
-use jmap_proto::{
-    object::{index::ObjectIndexBuilder, Object},
-    types::{
-        collection::Collection, property::Property, state::StateChange, type_state::DataType,
-        value::Value,
-    },
-};
-use store::write::{assert::HashedValue, BatchBuilder};
+use imap_proto::{Command, ResponseCode, StatusResponse, receiver::Request};
+use jmap_proto::types::collection::Collection;
+use store::write::BatchBuilder;
 
 use super::ImapContext;
 
@@ -100,14 +93,9 @@ impl<T: SessionStream> SessionData<T> {
         }
 
         // Obtain mailbox
-        let mailbox = self
+        let mailbox_ = self
             .server
-            .get_property::<HashedValue<Object<Value>>>(
-                account_id,
-                Collection::Mailbox,
-                mailbox_id,
-                Property::Value,
-            )
+            .get_archive(account_id, Collection::Mailbox, mailbox_id)
             .await
             .imap_ctx(&tag, trc::location!())?
             .ok_or_else(|| {
@@ -118,47 +106,39 @@ impl<T: SessionStream> SessionData<T> {
                     .id(tag.clone())
                     .caused_by(trc::location!())
             })?;
+        let mailbox = mailbox_
+            .to_unarchived::<email::mailbox::Mailbox>()
+            .imap_ctx(&tag, trc::location!())?;
 
-        // Subscribe/unsubscribe to mailbox
-        if let Some(value) = mailbox.inner.mailbox_subscribe(self.account_id, subscribe) {
+        if (subscribe && !mailbox.inner.is_subscribed(self.account_id))
+            || (!subscribe && mailbox.inner.is_subscribed(self.account_id))
+        {
             // Build batch
-            let mut changes = self
-                .server
-                .begin_changes(account_id)
-                .imap_ctx(&tag, trc::location!())?;
+            let mut new_mailbox = mailbox.deserialize().imap_ctx(&tag, trc::location!())?;
+            if subscribe {
+                new_mailbox.subscribers.push(self.account_id);
+            } else {
+                new_mailbox.remove_subscriber(self.account_id);
+            }
             let mut batch = BatchBuilder::new();
             batch
                 .with_account_id(account_id)
                 .with_collection(Collection::Mailbox)
                 .update_document(mailbox_id)
                 .custom(
-                    ObjectIndexBuilder::new(SCHEMA)
+                    ObjectIndexBuilder::new()
                         .with_current(mailbox)
-                        .with_changes(
-                            Object::with_capacity(1).with_property(Property::IsSubscribed, value),
-                        ),
-                );
-            changes.log_update(Collection::Mailbox, mailbox_id);
-
-            let change_id = changes.change_id;
-            batch.custom(changes);
+                        .with_changes(new_mailbox),
+                )
+                .imap_ctx(&tag, trc::location!())?;
             self.server
-                .store()
-                .write(batch)
+                .commit_batch(batch)
                 .await
                 .imap_ctx(&tag, trc::location!())?;
-
-            // Broadcast changes
-            self.server
-                .broadcast_state_change(
-                    StateChange::new(account_id).with_change(DataType::Mailbox, change_id),
-                )
-                .await;
 
             // Update mailbox cache
             for account in self.mailboxes.lock().iter_mut() {
                 if account.account_id == account_id {
-                    account.state_mailbox = change_id.into();
                     if let Some(mailbox) = account.mailbox_state.get_mut(&mailbox_id) {
                         mailbox.is_subscribed = subscribe;
                     }

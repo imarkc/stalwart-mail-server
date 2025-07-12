@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,24 +7,25 @@
 use std::{future::Future, io, time::SystemTime};
 
 use common::{
+    Server, USER_AGENT,
     config::smtp::report::{AddressMatch, AggregateFrequency},
     expr::if_block::IfBlock,
     ipc::ReportingEvent,
-    Server, USER_AGENT,
 };
+
 use mail_auth::{
     common::headers::HeaderWriter,
     report::{AuthFailureType, DeliveryResult, Feedback, FeedbackType},
 };
 use mail_parser::DateTime;
 
-use store::write::{key::KeySerializer, ReportEvent};
+use store::write::{ReportEvent, key::KeySerializer};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     core::Session,
     inbound::DkimSign,
-    queue::{spool::SmtpSpool, DomainPart, Message, MessageSource},
+    queue::{DomainPart, FROM_REPORT, MessageSource, MessageWrapper, spool::SmtpSpool},
 };
 
 pub mod analysis;
@@ -58,10 +59,10 @@ impl<T: AsyncWrite + AsyncRead + Unpin> Session<T> {
             for addr in &self.data.rcpt_to {
                 match addr_match {
                     AddressMatch::StartsWith(prefix) if addr.address_lcase.starts_with(prefix) => {
-                        return true
+                        return true;
                     }
                     AddressMatch::EndsWith(suffix) if addr.address_lcase.ends_with(suffix) => {
-                        return true
+                        return true;
                     }
                     AddressMatch::Equals(value) if addr.address_lcase.eq(value) => return true,
                     _ => (),
@@ -100,7 +101,7 @@ pub trait SmtpReporting: Sync + Send {
 
     fn sign_message(
         &self,
-        message: &mut Message,
+        message: &mut MessageWrapper,
         config: &IfBlock,
         bytes: &[u8],
     ) -> impl Future<Output = Option<Vec<u8>>> + Send;
@@ -148,6 +149,7 @@ impl SmtpReporting for Server {
         }
 
         // Queue message
+        message.message.flags |= FROM_REPORT;
         message
             .queue(
                 signature.as_deref(),
@@ -213,12 +215,12 @@ impl SmtpReporting for Server {
 
     async fn sign_message(
         &self,
-        message: &mut Message,
+        message: &mut MessageWrapper,
         config: &IfBlock,
         bytes: &[u8],
     ) -> Option<Vec<u8>> {
         let signers = self
-            .eval_if::<Vec<String>, _>(config, message, message.span_id)
+            .eval_if::<Vec<String>, _>(config, &message.message, message.span_id)
             .await
             .unwrap_or_default();
         if !signers.is_empty() {
@@ -230,10 +232,12 @@ impl SmtpReporting for Server {
                             signature.write_header(&mut headers);
                         }
                         Err(err) => {
-                            trc::error!(trc::Error::from(err)
-                                .span_id(message.span_id)
-                                .details("Failed to sign message")
-                                .caused_by(trc::location!()));
+                            trc::error!(
+                                trc::Error::from(err)
+                                    .span_id(message.span_id)
+                                    .details("Failed to sign message")
+                                    .caused_by(trc::location!())
+                            );
                         }
                     }
                 }
@@ -318,7 +322,7 @@ impl io::Write for SerializedSize {
             self.bytes_left -= buf_len;
             Ok(buf_len)
         } else {
-            Err(io::Error::new(io::ErrorKind::Other, "Size exceeded"))
+            Err(io::Error::other("Size exceeded"))
         }
     }
 

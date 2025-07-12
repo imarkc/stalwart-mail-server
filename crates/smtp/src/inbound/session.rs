@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,6 +9,8 @@ use common::{
     expr::{self, functions::ResolveVariable, *},
     listener::SessionStream,
 };
+
+use compact_str::ToCompactString;
 use smtp_proto::{
     request::receiver::{
         BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver, LineReceiver,
@@ -255,9 +257,10 @@ impl<T: SessionStream> Session<T> {
                                         }
                                         Ok(false) => {}
                                         Err(err) => {
-                                            trc::error!(err
-                                                .span_id(self.data.session_id)
-                                                .details("Failed to check for fail2ban"));
+                                            trc::error!(
+                                                err.span_id(self.data.session_id)
+                                                    .details("Failed to check for fail2ban")
+                                            );
                                         }
                                     }
                                 }
@@ -296,11 +299,16 @@ impl<T: SessionStream> Session<T> {
                                     Details = syntax
                                 );
 
-                                self.write(
-                                    format!("501 5.5.2 Syntax error, expected: {syntax}\r\n")
-                                        .as_bytes(),
-                                )
-                                .await?;
+                                if !self.params.ehlo_reject_non_fqdn && syntax.starts_with("EHLO ")
+                                {
+                                    self.handle_ehlo("null".to_string(), true).await?
+                                } else {
+                                    self.write(
+                                        format!("501 5.5.2 Syntax error, expected: {syntax}\r\n")
+                                            .as_bytes(),
+                                    )
+                                    .await?;
+                                }
                             }
                             Error::InvalidParameter { param } => {
                                 trc::event!(
@@ -551,7 +559,7 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
                 .data
                 .rcpt_to
                 .iter()
-                .map(|r| Variable::String(r.address_lcase.as_str().into()))
+                .map(|r| Variable::from(r.address_lcase.as_str()))
                 .collect::<Vec<_>>()
                 .into(),
             V_SENDER => self
@@ -576,7 +584,7 @@ impl<T: SessionStream> ResolveVariable for Session<T> {
             V_LOCAL_IP => self.data.local_ip_str.as_str().into(),
             V_LOCAL_PORT => self.data.local_port.into(),
             V_TLS => self.stream.is_tls().into(),
-            V_PRIORITY => self.data.priority.to_string().into(),
+            V_PRIORITY => self.data.priority.to_compact_string().into(),
             V_PROTOCOL => self.instance.protocol.as_str().into(),
             V_ASN => self
                 .data

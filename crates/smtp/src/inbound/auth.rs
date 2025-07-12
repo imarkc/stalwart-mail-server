@@ -1,22 +1,21 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::{
     auth::{
-        sasl::{
-            sasl_decode_challenge_oauth, sasl_decode_challenge_plain, sasl_decode_challenge_xoauth,
-        },
         AuthRequest,
+        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
     },
     listener::SessionStream,
 };
+
 use directory::Permission;
 use mail_parser::decoders::base64::base64_decode;
 use mail_send::Credentials;
-use smtp_proto::{IntoString, AUTH_LOGIN, AUTH_OAUTHBEARER, AUTH_PLAIN, AUTH_XOAUTH2};
+use smtp_proto::{AUTH_LOGIN, AUTH_OAUTHBEARER, AUTH_PLAIN, AUTH_XOAUTH2, IntoString};
 use trc::{AuthEvent, SmtpEvent};
 
 use crate::core::Session;
@@ -37,18 +36,10 @@ impl SaslToken {
                 },
             }
             .into(),
-            AUTH_OAUTHBEARER => SaslToken {
+            AUTH_OAUTHBEARER | AUTH_XOAUTH2 => SaslToken {
                 mechanism,
                 credentials: Credentials::OAuthBearer {
                     token: String::new(),
-                },
-            }
-            .into(),
-            AUTH_XOAUTH2 => SaslToken {
-                mechanism,
-                credentials: Credentials::XOauth2 {
-                    username: String::new(),
-                    secret: String::new(),
                 },
             }
             .into(),
@@ -95,17 +86,11 @@ impl<T: SessionStream> Session<T> {
                             .await
                     };
                 }
-                (AUTH_OAUTHBEARER, _) => {
+                (AUTH_OAUTHBEARER | AUTH_XOAUTH2, _) => {
                     if let Some(credentials) = sasl_decode_challenge_oauth(&response) {
                         return self.authenticate(credentials).await;
                     }
                 }
-                (AUTH_XOAUTH2, _) => {
-                    if let Some(credentials) = sasl_decode_challenge_xoauth(&response) {
-                        return self.authenticate(credentials).await;
-                    }
-                }
-
                 _ => (),
             }
         }

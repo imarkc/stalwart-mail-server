@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,14 +9,12 @@ use std::cmp::Ordering;
 use ahash::{AHashMap, AHashSet};
 use trc::AddContext;
 
-use crate::{
-    write::{key::DeserializeBigEndian, ValueClass},
-    IndexKeyPrefix, IterateParams, Store, ValueKey, U32_LEN,
-};
+use crate::{IndexKeyPrefix, IterateParams, Store, U32_LEN, write::key::DeserializeBigEndian};
 
 use super::{Comparator, ResultSet, SortedResultSet};
 
-pub struct Pagination {
+#[derive(Debug)]
+pub struct Pagination<'x> {
     requested_position: i32,
     position: i32,
     pub limit: usize,
@@ -25,7 +23,7 @@ pub struct Pagination {
     has_anchor: bool,
     anchor_found: bool,
     pub ids: Vec<u64>,
-    prefix_key: Option<ValueKey<ValueClass<u32>>>,
+    prefix_map: Option<&'x AHashMap<u32, u32>>,
     prefix_unique: bool,
 }
 
@@ -34,7 +32,7 @@ impl Store {
         &self,
         result_set: ResultSet,
         mut comparators: Vec<Comparator>,
-        mut paginate: Pagination,
+        mut paginate: Pagination<'_>,
     ) -> trc::Result<SortedResultSet> {
         paginate.limit = match (result_set.results.len(), paginate.limit) {
             (0, _) => {
@@ -102,19 +100,34 @@ impl Store {
                         }
                     }
                 }
+                Comparator::SortedList { list, ascending } => {
+                    if ascending {
+                        for document_id in list {
+                            if result_set.results.contains(document_id)
+                                && !paginate.add(0, document_id)
+                            {
+                                break;
+                            }
+                        }
+                    } else {
+                        for document_id in list.into_iter().rev() {
+                            if result_set.results.contains(document_id)
+                                && !paginate.add(0, document_id)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             // Obtain prefixes
-            let prefix_key = paginate.prefix_key.take();
+            let prefix_map = paginate.prefix_map.take();
             let mut sorted_results = paginate.build();
-            if let Some(prefix_key) = prefix_key {
+            if let Some(prefix_map) = prefix_map {
                 for id in sorted_results.ids.iter_mut() {
-                    if let Some(prefix_id) = self
-                        .get_value::<u32>(prefix_key.clone().with_document_id(*id as u32))
-                        .await
-                        .caused_by(trc::location!())?
-                    {
-                        *id |= (prefix_id as u64) << 32;
+                    if let Some(prefix_id) = prefix_map.get(&(*id as u32)) {
+                        *id |= (*prefix_id as u64) << 32;
                     }
                 }
             }
@@ -202,6 +215,23 @@ impl Store {
                             }
                         }
                     }
+                    Comparator::SortedList { list, ascending } => {
+                        if ascending {
+                            for (idx, document_id) in list.into_iter().enumerate() {
+                                if result_set.results.contains(document_id) {
+                                    sorted_ids.entry(document_id).or_insert([0u32; 4])[pos] =
+                                        idx as u32;
+                                }
+                            }
+                        } else {
+                            for (idx, document_id) in list.into_iter().rev().enumerate() {
+                                if result_set.results.contains(document_id) {
+                                    sorted_ids.entry(document_id).or_insert([0u32; 4])[pos] =
+                                        idx as u32;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -213,16 +243,12 @@ impl Store {
             });
             for (document_id, _) in sorted_ids {
                 // Obtain document prefixId
-                let prefix_id = if let Some(prefix_key) = &paginate.prefix_key {
-                    if let Some(prefix_id) = self
-                        .get_value(prefix_key.clone().with_document_id(document_id))
-                        .await
-                        .caused_by(trc::location!())?
-                    {
-                        if paginate.prefix_unique && !seen_prefixes.insert(prefix_id) {
+                let prefix_id = if let Some(prefix_map) = paginate.prefix_map {
+                    if let Some(prefix_id) = prefix_map.get(&document_id) {
+                        if paginate.prefix_unique && !seen_prefixes.insert(*prefix_id) {
                             continue;
                         }
-                        prefix_id
+                        *prefix_id
                     } else {
                         // Document no longer exists?
                         continue;
@@ -242,16 +268,12 @@ impl Store {
             let mut seen_prefixes = AHashSet::new();
             for document_id in result_set.results {
                 // Obtain document prefixId
-                let prefix_id = if let Some(prefix_key) = &paginate.prefix_key {
-                    if let Some(prefix_id) = self
-                        .get_value(prefix_key.clone().with_document_id(document_id))
-                        .await
-                        .caused_by(trc::location!())?
-                    {
-                        if paginate.prefix_unique && !seen_prefixes.insert(prefix_id) {
+                let prefix_id = if let Some(prefix_map) = paginate.prefix_map {
+                    if let Some(prefix_id) = prefix_map.get(&document_id) {
+                        if paginate.prefix_unique && !seen_prefixes.insert(*prefix_id) {
                             continue;
                         }
-                        prefix_id
+                        *prefix_id
                     } else {
                         // Document no longer exists?
                         continue;
@@ -270,7 +292,7 @@ impl Store {
     }
 }
 
-impl Pagination {
+impl<'x> Pagination<'x> {
     pub fn new(limit: usize, position: i32, anchor: Option<u32>, anchor_offset: i32) -> Self {
         let (has_anchor, anchor) = anchor.map(|anchor| (true, anchor)).unwrap_or((false, 0));
 
@@ -283,13 +305,13 @@ impl Pagination {
             has_anchor,
             anchor_found: false,
             ids: Vec::with_capacity(limit),
-            prefix_key: None,
+            prefix_map: None,
             prefix_unique: false,
         }
     }
 
-    pub fn with_prefix_key(mut self, prefix_key: ValueKey<ValueClass<u32>>) -> Self {
-        self.prefix_key = Some(prefix_key);
+    pub fn with_prefix_map(mut self, prefix_map: &'x AHashMap<u32, u32>) -> Self {
+        self.prefix_map = Some(prefix_map);
         self
     }
 

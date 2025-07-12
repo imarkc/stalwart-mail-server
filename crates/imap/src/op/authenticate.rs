@@ -1,21 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::{
     auth::{
-        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
         AuthRequest,
+        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
     },
-    listener::{limiter::LimiterResult, SessionStream},
+    listener::{SessionStream, limiter::LimiterResult},
 };
+
 use directory::Permission;
 use imap_proto::{
+    Command, ResponseCode, StatusResponse,
     protocol::{authenticate::Mechanism, capability::Capability},
     receiver::{self, Request},
-    Command, ResponseCode, StatusResponse,
 };
 use mail_parser::decoders::base64::base64_decode;
 use mail_send::Credentials;
@@ -28,7 +29,7 @@ impl<T: SessionStream> Session<T> {
         let mut args = request.parse_authenticate()?;
 
         match args.mechanism {
-            Mechanism::Plain | Mechanism::OAuthBearer => {
+            Mechanism::Plain | Mechanism::OAuthBearer | Mechanism::XOauth2 => {
                 if !args.params.is_empty() {
                     let challenge = base64_decode(args.params.pop().unwrap().as_bytes())
                         .ok_or_else(|| {
@@ -110,7 +111,7 @@ impl<T: SessionStream> Session<T> {
             LimiterResult::Forbidden => {
                 return Err(trc::LimitEvent::ConcurrentRequest
                     .into_err()
-                    .id(tag.clone()))
+                    .id(tag.clone()));
             }
             LimiterResult::Disabled => None,
         };

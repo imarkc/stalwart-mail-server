@@ -1,13 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::Duration;
 
-use mail_send::{smtp::tls::build_tls_connector, SmtpClientBuilder};
-use utils::config::{utils::AsKey, Config};
+use mail_send::{SmtpClientBuilder, smtp::tls::build_tls_connector};
+use utils::config::{Config, utils::AsKey};
 
 use crate::core::config::build_pool;
 

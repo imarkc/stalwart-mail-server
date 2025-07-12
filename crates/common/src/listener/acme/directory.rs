@@ -1,7 +1,10 @@
 // Adapted from rustls-acme (https://github.com/FlorianUekermann/rustls-acme), licensed under MIT/Apache-2.0.
 
-use std::time::Duration;
-
+use super::AcmeProvider;
+use super::jose::{
+    Body, eab_sign, key_authorization, key_authorization_sha256, key_authorization_sha256_base64,
+    sign,
+};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hyper::header::USER_AGENT;
@@ -11,16 +14,11 @@ use reqwest::{Method, Response};
 use ring::rand::SystemRandom;
 use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, EcdsaSigningAlgorithm};
 use serde::Deserialize;
+use std::time::Duration;
 use store::Serialize;
-use store::write::Bincode;
+use store::write::Archiver;
 use trc::AddContext;
 use trc::event::conv::AssertSuccess;
-
-use super::AcmeProvider;
-use super::jose::{
-    Body, eab_sign, key_authorization, key_authorization_sha256, key_authorization_sha256_base64,
-    sign,
-};
 
 pub const LETS_ENCRYPT_STAGING_DIRECTORY: &str =
     "https://acme-staging-v02.api.letsencrypt.org/directory";
@@ -190,7 +188,7 @@ impl Account {
                 .reason(err)
         })?;
 
-        Ok(Bincode::new(SerializedCert {
+        Archiver::new(SerializedCert {
             certificate: cert.serialize_der().map_err(|err| {
                 trc::EventType::Acme(trc::AcmeEvent::Error)
                     .caused_by(trc::location!())
@@ -198,11 +196,14 @@ impl Account {
             })?,
             private_key: cert.serialize_private_key_der(),
         })
-        .serialize())
+        .untrusted()
+        .serialize()
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[derive(
+    rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, Debug, Clone, serde::Serialize, Deserialize,
+)]
 pub struct SerializedCert {
     pub certificate: Vec<u8>,
     pub private_key: Vec<u8>,
@@ -243,6 +244,8 @@ pub enum ChallengeType {
     Dns01,
     #[serde(rename = "tls-alpn-01")]
     TlsAlpn01,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,7 +350,7 @@ async fn https(
 }
 
 fn get_header(response: &Response, header: &'static str) -> trc::Result<String> {
-    match response.headers().get_all(header).iter().last() {
+    match response.headers().get_all(header).iter().next_back() {
         Some(value) => Ok(value
             .to_str()
             .map_err(|err| trc::EventType::Acme(trc::AcmeEvent::Error).from_http_str_error(err))?
@@ -365,6 +368,7 @@ impl ChallengeType {
             Self::Http01 => "http-01",
             Self::Dns01 => "dns-01",
             Self::TlsAlpn01 => "tls-alpn-01",
+            Self::Unknown => "unknown",
         }
     }
 }

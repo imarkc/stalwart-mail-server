@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,8 +7,8 @@
 use trc::AddContext;
 
 use crate::{
-    backend::{internal::lookup::DirectoryStore, RcptType},
     Directory, DirectoryInner, Principal, QueryBy,
+    backend::{RcptType, internal::lookup::DirectoryStore},
 };
 
 impl Directory {

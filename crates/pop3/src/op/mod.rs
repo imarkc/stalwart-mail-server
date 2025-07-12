@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,8 +7,8 @@
 use common::listener::SessionStream;
 
 use crate::{
-    protocol::{response::Response, Mechanism},
     Session,
+    protocol::{Mechanism, response::Response},
 };
 
 pub mod authenticate;
@@ -19,9 +19,9 @@ pub mod list;
 impl<T: SessionStream> Session<T> {
     pub async fn handle_capa(&mut self) -> trc::Result<()> {
         let mechanisms = if self.stream.is_tls() || self.server.core.imap.allow_plain_auth {
-            vec![Mechanism::Plain, Mechanism::OAuthBearer]
+            vec![Mechanism::Plain, Mechanism::OAuthBearer, Mechanism::XOauth2]
         } else {
-            vec![Mechanism::OAuthBearer]
+            vec![Mechanism::OAuthBearer, Mechanism::XOauth2]
         };
 
         trc::event!(

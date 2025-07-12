@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,7 +7,7 @@
 use std::{net::IpAddr, sync::Arc};
 
 use directory::{
-    core::secret::verify_secret_hash, Directory, Permission, Permissions, Principal, QueryBy,
+    Directory, Permission, Permissions, Principal, QueryBy, core::secret::verify_secret_hash,
 };
 use jmap_proto::types::collection::Collection;
 use mail_send::Credentials;
@@ -17,10 +17,11 @@ use utils::{
     map::{bitmap::Bitmap, vec_map::VecMap},
 };
 
-use crate::{listener::limiter::ConcurrencyLimiter, Server};
+use crate::{Server, listener::limiter::ConcurrencyLimiter};
 
 pub mod access_token;
 pub mod oauth;
+pub mod rate_limit;
 pub mod roles;
 pub mod sasl;
 
@@ -31,6 +32,7 @@ pub struct AccessToken {
     pub access_to: VecMap<u32, Bitmap<Collection>>,
     pub name: String,
     pub description: Option<String>,
+    pub locale: Option<String>,
     pub emails: Vec<String>,
     pub quota: u64,
     pub permissions: Permissions,
@@ -251,5 +253,27 @@ impl CredentialsUsername for Credentials<String> {
             }
             Credentials::OAuthBearer { .. } => None,
         }
+    }
+}
+
+pub trait AsTenantId {
+    fn tenant_id(&self) -> Option<u32>;
+}
+
+impl AsTenantId for Option<u32> {
+    fn tenant_id(&self) -> Option<u32> {
+        *self
+    }
+}
+
+impl AsTenantId for AccessToken {
+    fn tenant_id(&self) -> Option<u32> {
+        self.tenant.map(|t| t.id)
+    }
+}
+
+impl AsTenantId for ResourceToken {
+    fn tenant_id(&self) -> Option<u32> {
+        self.tenant.map(|t| t.id)
     }
 }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -258,8 +258,7 @@ impl Subscriber {
 
     #[cfg(all(unix, not(target_os = "linux")))]
     fn send_large_payload(&self, _payload: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
+        Err(std::io::Error::other(
             "Large payloads not supported on non-Linux OS",
         ))
     }

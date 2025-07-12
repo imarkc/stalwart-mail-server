@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,24 +7,19 @@
 use std::fmt::Debug;
 
 use directory::{
-    backend::{internal::manage::ManageDirectory, RcptType},
-    QueryBy, Type, ROLE_USER,
+    QueryBy, ROLE_USER, Type,
+    backend::{RcptType, internal::manage::ManageDirectory},
 };
 use mail_send::Credentials;
 
 use crate::directory::{
-    map_account_id, map_account_ids, DirectoryTest, IntoTestPrincipal, TestPrincipal,
+    DirectoryTest, IntoTestPrincipal, TestPrincipal, map_account_id, map_account_ids,
 };
 
 #[tokio::test]
 async fn ldap_directory() {
     // Enable logging
-    /*tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::DEBUG)
-            .finish(),
-    )
-    .unwrap();*/
+    crate::enable_logging();
 
     // Obtain directory handle
     let mut config = DirectoryTest::new("sqlite".into()).await;
@@ -33,80 +28,100 @@ async fn ldap_directory() {
     let core = config.server;
 
     // Test authentication
-    assert_eq!(
-        handle
-            .query(
-                QueryBy::Credentials(&Credentials::Plain {
-                    username: "john".to_string(),
-                    secret: "12345".to_string()
-                }),
-                true
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .into_test()
-            .into_sorted(),
-        TestPrincipal {
-            id: base_store.get_principal_id("john").await.unwrap().unwrap(),
-            name: "john".to_string(),
-            description: "John Doe".to_string().into(),
-            secrets: vec!["12345".to_string()],
-            typ: Type::Individual,
-            member_of: map_account_ids(base_store, vec!["sales"])
+    for (auth_type, handle) in [
+        ("Default", handle.clone()),
+        (
+            "Bind template",
+            config
+                .directories
+                .directories
+                .remove("ldap-bind-template")
+                .unwrap(),
+        ),
+        (
+            "Bind lookup",
+            config
+                .directories
+                .directories
+                .remove("ldap-bind-lookup")
+                .unwrap(),
+        ),
+    ] {
+        println!("Testing {auth_type} LDAP authentication...");
+        assert_eq!(
+            handle
+                .query(
+                    QueryBy::Credentials(&Credentials::Plain {
+                        username: "john".into(),
+                        secret: "12345".into()
+                    }),
+                    true
+                )
                 .await
-                .into_iter()
-                .map(|v| v.to_string())
-                .collect(),
-            emails: vec![
-                "john@example.org".to_string(),
-                "john.doe@example.org".to_string()
-            ],
-            roles: vec![ROLE_USER.to_string()],
-            ..Default::default()
-        }
-        .into_sorted()
-    );
-    assert_eq!(
-        handle
-            .query(
-                QueryBy::Credentials(&Credentials::Plain {
-                    username: "bill".to_string(),
-                    secret: "password".to_string()
-                }),
-                true
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .into_test()
-            .into_sorted(),
-        TestPrincipal {
-            id: base_store.get_principal_id("bill").await.unwrap().unwrap(),
-            name: "bill".to_string(),
-            description: "Bill Foobar".to_string().into(),
-            secrets: vec![
-                "$2y$05$bvIG6Nmid91Mu9RcmmWZfO5HJIMCT8riNW0hEp8f6/FuA2/mHZFpe".to_string()
-            ],
-            typ: Type::Individual,
-            quota: 500000,
-            emails: vec!["bill@example.org".to_string(),],
-            roles: vec![ROLE_USER.to_string()],
-            ..Default::default()
-        }
-        .into_sorted()
-    );
-    assert!(handle
-        .query(
-            QueryBy::Credentials(&Credentials::Plain {
-                username: "bill".to_string(),
-                secret: "invalid".to_string()
-            }),
-            true
-        )
-        .await
-        .unwrap()
-        .is_none());
+                .unwrap()
+                .unwrap()
+                .into_test()
+                .into_sorted(),
+            TestPrincipal {
+                id: base_store.get_principal_id("john").await.unwrap().unwrap(),
+                name: "john".into(),
+                description: Some("John Doe".into()),
+                secrets: vec!["12345".into()],
+                typ: Type::Individual,
+                member_of: map_account_ids(base_store, vec!["sales"])
+                    .await
+                    .into_iter()
+                    .map(|v| v.to_string())
+                    .collect(),
+                emails: vec!["john@example.org".into(), "john.doe@example.org".into()],
+                roles: vec![ROLE_USER.to_string()],
+                ..Default::default()
+            }
+            .into_sorted()
+        );
+        assert_eq!(
+            handle
+                .query(
+                    QueryBy::Credentials(&Credentials::Plain {
+                        username: "bill".into(),
+                        secret: "password".into()
+                    }),
+                    true
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .into_test()
+                .into_sorted(),
+            TestPrincipal {
+                id: base_store.get_principal_id("bill").await.unwrap().unwrap(),
+                name: "bill".into(),
+                description: Some("Bill Foobar".into()),
+                secrets: vec![
+                    "$2y$05$bvIG6Nmid91Mu9RcmmWZfO5HJIMCT8riNW0hEp8f6/FuA2/mHZFpe".into()
+                ],
+                typ: Type::Individual,
+                quota: 500000,
+                emails: vec!["bill@example.org".into(),],
+                roles: vec![ROLE_USER.to_string()],
+                ..Default::default()
+            }
+            .into_sorted()
+        );
+        assert!(
+            handle
+                .query(
+                    QueryBy::Credentials(&Credentials::Plain {
+                        username: "bill".into(),
+                        secret: "invalid".into()
+                    }),
+                    true
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     // Get user by name
     assert_eq!(
@@ -119,16 +134,16 @@ async fn ldap_directory() {
             .into_sorted(),
         TestPrincipal {
             id: base_store.get_principal_id("jane").await.unwrap().unwrap(),
-            name: "jane".to_string(),
-            description: "Jane Doe".to_string().into(),
+            name: "jane".into(),
+            description: Some("Jane Doe".into()),
             typ: Type::Individual,
-            secrets: vec!["abcde".to_string()],
+            secrets: vec!["abcde".into()],
             member_of: map_account_ids(base_store, vec!["sales", "support"])
                 .await
                 .into_iter()
                 .map(|v| v.to_string())
                 .collect(),
-            emails: vec!["jane@example.org".to_string(),],
+            emails: vec!["jane@example.org".into(),],
             roles: vec![ROLE_USER.to_string()],
             ..Default::default()
         }
@@ -145,8 +160,8 @@ async fn ldap_directory() {
             .into_test(),
         TestPrincipal {
             id: base_store.get_principal_id("sales").await.unwrap().unwrap(),
-            name: "sales".to_string(),
-            description: "sales".to_string().into(),
+            name: "sales".into(),
+            description: Some("sales".into()),
             typ: Type::Group,
             roles: vec![ROLE_USER.to_string()],
             ..Default::default()
@@ -218,18 +233,15 @@ async fn ldap_directory() {
     // VRFY
     compare_sorted(
         core.vrfy(&handle, "jane", 0).await.unwrap(),
-        vec!["jane@example.org".to_string()],
+        vec!["jane@example.org".into()],
     );
     compare_sorted(
         core.vrfy(&handle, "john", 0).await.unwrap(),
-        vec![
-            "john@example.org".to_string(),
-            "john.doe@example.org".to_string(),
-        ],
+        vec!["john@example.org".into(), "john.doe@example.org".into()],
     );
     compare_sorted(
         core.vrfy(&handle, "jane+alias@example", 0).await.unwrap(),
-        vec!["jane@example.org".to_string()],
+        vec!["jane@example.org".into()],
     );
     compare_sorted(
         core.vrfy(&handle, "info", 0).await.unwrap(),
@@ -245,9 +257,9 @@ async fn ldap_directory() {
     /*compare_sorted(
         core.expn(&handle, "info@example.org", 0).await.unwrap(),
         vec![
-            "bill@example.org".to_string(),
-            "jane@example.org".to_string(),
-            "john@example.org".to_string(),
+            "bill@example.org".into(),
+            "jane@example.org".into(),
+            "john@example.org".into(),
         ],
     );
     compare_sorted(

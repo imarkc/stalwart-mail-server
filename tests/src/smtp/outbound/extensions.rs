@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,9 +11,9 @@ use mail_auth::MX;
 use smtp_proto::{MAIL_REQUIRETLS, MAIL_RET_HDRS, MAIL_SMTPUTF8, RCPT_NOTIFY_NEVER};
 
 use crate::smtp::{
+    DnsCache, TestSMTP,
     inbound::{TestMessage, TestQueueEvent},
     session::{TestSession, VerifyResponse},
-    DnsCache, TestSMTP,
 };
 
 const LOCAL: &str = r#"
@@ -77,7 +77,7 @@ async fn extensions() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -150,9 +150,9 @@ async fn extensions() {
         .try_deliver(core.clone());
     local.queue_receiver.read_event().await.assert_done();
     let message = remote.queue_receiver.expect_message().await;
-    assert_eq!(message.env_id, Some("abc123".to_string()));
-    assert!((message.flags & MAIL_RET_HDRS) != 0);
-    assert!((message.flags & MAIL_REQUIRETLS) != 0);
-    assert!((message.flags & MAIL_SMTPUTF8) != 0);
-    assert!((message.recipients.last().unwrap().flags & RCPT_NOTIFY_NEVER) != 0);
+    assert_eq!(message.message.env_id, Some("abc123".into()));
+    assert!((message.message.flags & MAIL_RET_HDRS) != 0);
+    assert!((message.message.flags & MAIL_REQUIRETLS) != 0);
+    assert!((message.message.flags & MAIL_SMTPUTF8) != 0);
+    assert!((message.message.recipients.last().unwrap().flags & RCPT_NOTIFY_NEVER) != 0);
 }

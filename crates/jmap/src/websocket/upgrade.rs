@@ -1,19 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::sync::Arc;
 
-use common::{auth::AccessToken, Server};
+use common::{Server, auth::AccessToken};
 use hyper::StatusCode;
 use hyper_util::rt::TokioIo;
 use tokio_tungstenite::WebSocketStream;
 use trc::JmapEvent;
 use tungstenite::{handshake::derive_accept_key, protocol::Role};
 
-use crate::api::{http::HttpSessionData, HttpRequest, HttpResponse, HttpResponseBody};
+use http_proto::*;
 use std::future::Future;
 
 use super::stream::WebSocketHandler;
@@ -79,15 +79,17 @@ impl WebSocketUpgrade for Server {
             let session_id = session.session_id;
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    jmap.handle_websocket_stream(
-                        WebSocketStream::from_raw_socket(
-                            TokioIo::new(upgraded),
-                            Role::Server,
-                            None,
-                        )
-                        .await,
-                        access_token,
-                        session,
+                    Box::pin(
+                        jmap.handle_websocket_stream(
+                            WebSocketStream::from_raw_socket(
+                                TokioIo::new(upgraded),
+                                Role::Server,
+                                None,
+                            )
+                            .await,
+                            access_token,
+                            session,
+                        ),
                     )
                     .await;
                 }
@@ -102,12 +104,6 @@ impl WebSocketUpgrade for Server {
             }
         });
 
-        Ok(HttpResponse {
-            status: StatusCode::SWITCHING_PROTOCOLS,
-            content_type: "".into(),
-            content_disposition: "".into(),
-            cache_control: "".into(),
-            body: HttpResponseBody::WebsocketUpgrade(derived_key),
-        })
+        Ok(HttpResponse::new(StatusCode::SWITCHING_PROTOCOLS).with_websocket_upgrade(derived_key))
     }
 }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,14 +7,14 @@
 use std::time::{Duration, Instant};
 
 use common::Core;
-use mail_auth::{common::parse::TxtRecordParser, spf::Spf, SpfResult};
+use mail_auth::{SpfResult, common::parse::TxtRecordParser, spf::Spf};
 
 use smtp::core::Session;
 use utils::config::Config;
 
 use crate::smtp::{
-    session::{TestSession, VerifyResponse},
     DnsCache, TestSMTP,
+    session::{TestSession, VerifyResponse},
 };
 
 const CONFIG: &str = r#"
@@ -57,7 +57,7 @@ async fn ehlo() {
 
     // Reject non-FQDN domains
     let mut session = Session::test(server);
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
     session.stream.tls = false;
     session.eval_session_params().await;
@@ -79,8 +79,8 @@ async fn ehlo() {
     );
 
     // Test SPF strict mode
-    session.data.helo_domain = String::new();
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.helo_domain = "".into();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
     session.stream.tls = true;
     session.eval_session_params().await;

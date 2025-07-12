@@ -1,22 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::format_compact;
 use serde::Serialize;
 use utils::map::vec_map::VecMap;
 
 use crate::{
     error::set::SetError,
-    object::Object,
-    parser::{json::Parser, JsonObjectParser, Token},
-    request::{method::MethodObject, reference::MaybeReference, RequestProperty},
+    parser::{JsonObjectParser, Token, json::Parser},
+    request::{RequestProperty, method::MethodObject, reference::MaybeReference},
     types::{
         blob::BlobId,
         id::Id,
-        state::{State, StateChange},
-        value::{SetValue, Value},
+        state::State,
+        value::{Object, SetValue, Value},
     },
 };
 
@@ -53,9 +53,6 @@ pub struct CopyResponse {
     #[serde(rename = "notCreated")]
     #[serde(skip_serializing_if = "VecMap::is_empty")]
     pub not_created: VecMap<Id, SetError>,
-
-    #[serde(skip)]
-    pub state_change: Option<StateChange>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,7 +95,7 @@ impl JsonObjectParser for CopyRequest<RequestArguments> {
                 _ => {
                     return Err(trc::JmapEvent::UnknownMethod
                         .into_err()
-                        .details(format!("{}/copy", parser.ctx)))
+                        .details(format_compact!("{}/copy", parser.ctx)));
                 }
             },
             account_id: Id::default(),

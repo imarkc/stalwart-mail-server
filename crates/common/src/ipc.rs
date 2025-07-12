@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,13 +11,14 @@ use jmap_proto::types::{state::StateChange, type_state::DataType};
 use mail_auth::{
     dmarc::Dmarc,
     mta_sts::TlsRpt,
-    report::{tlsrpt::FailureDetails, Record},
+    report::{Record, tlsrpt::FailureDetails},
 };
 use store::{BlobStore, InMemoryStore, Store};
 use tokio::sync::mpsc;
 use utils::map::bitmap::Bitmap;
 
 use crate::config::smtp::{
+    queue::QueueName,
     report::AggregateFrequency,
     resolver::{Policy, Tlsa},
 };
@@ -54,6 +55,7 @@ pub enum StateEvent {
     },
     Publish {
         state_change: StateChange,
+        broadcast: bool,
     },
     UpdateSharedAccounts {
         account_id: u32,
@@ -63,6 +65,13 @@ pub enum StateEvent {
         subscriptions: Vec<UpdateSubscription>,
     },
     Stop,
+}
+
+#[derive(Debug)]
+pub enum BroadcastEvent {
+    StateChange(StateChange),
+    ReloadSettings,
+    ReloadBlockedIps,
 }
 
 #[derive(Debug)]
@@ -96,16 +105,18 @@ pub enum QueueEvent {
     Refresh,
     WorkerDone {
         queue_id: u64,
+        queue_name: QueueName,
         status: QueueEventStatus,
     },
     Paused(bool),
+    ReloadSettings,
     Stop,
 }
 
 #[derive(Debug)]
 pub enum QueueEventStatus {
     Completed,
-    Locked { until: u64 },
+    Locked,
     Deferred,
 }
 

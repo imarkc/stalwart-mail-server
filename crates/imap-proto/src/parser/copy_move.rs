@@ -1,14 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{copy_move, ProtocolVersion},
-    receiver::{bad, Request},
-    utf7::utf7_maybe_decode,
     Command,
+    protocol::{ProtocolVersion, copy_move},
+    receiver::{Request, bad},
+    utf7::utf7_maybe_decode,
 };
 
 use super::parse_sequence_set;
@@ -22,16 +24,16 @@ impl Request<Command> {
                 sequence_set: parse_sequence_set(
                     &tokens
                         .next()
-                        .ok_or_else(|| bad(self.tag.to_string(), "Missing sequence set."))?
+                        .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing sequence set."))?
                         .unwrap_bytes(),
                 )
-                .map_err(|v| bad(self.tag.to_string(), v))?,
+                .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                 mailbox_name: utf7_maybe_decode(
                     tokens
                         .next()
-                        .ok_or_else(|| bad(self.tag.to_string(), "Missing mailbox name."))?
+                        .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing mailbox name."))?
                         .unwrap_string()
-                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                     version,
                 ),
                 tag: self.tag,
@@ -45,7 +47,7 @@ impl Request<Command> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        protocol::{copy_move, ProtocolVersion, Sequence},
+        protocol::{ProtocolVersion, Sequence, copy_move},
         receiver::Receiver,
     };
 
@@ -64,8 +66,8 @@ mod tests {
                     start: 2.into(),
                     end: 4.into(),
                 },
-                mailbox_name: "MEETING".to_string(),
-                tag: "A003".to_string(),
+                mailbox_name: "MEETING".into(),
+                tag: "A003".into(),
             }
         );
         assert_eq!(
@@ -79,8 +81,8 @@ mod tests {
                     start: 2.into(),
                     end: 4.into(),
                 },
-                mailbox_name: "You & Me".to_string(),
-                tag: "A003".to_string(),
+                mailbox_name: "You & Me".into(),
+                tag: "A003".into(),
             }
         );
     }

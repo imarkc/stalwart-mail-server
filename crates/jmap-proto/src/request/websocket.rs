@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,9 +8,9 @@ use std::{borrow::Cow, collections::HashMap};
 
 use crate::{
     error::request::{RequestError, RequestErrorType, RequestLimitError},
-    parser::{json::Parser, JsonObjectParser, Token},
+    parser::{JsonObjectParser, Token, json::Parser},
     request::Call,
-    response::{serialize::serialize_hex, Response, ResponseMethod},
+    response::{Response, ResponseMethod, serialize::serialize_hex},
     types::{any_id::AnyId, id::Id, state::State, type_state::DataType},
 };
 use utils::map::vec_map::VecMap;

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,9 +8,9 @@ use std::fmt::{Display, Formatter};
 
 use mail_parser::HeaderName;
 use serde::Serialize;
-use store::write::{DeserializeFrom, SerializeInto};
+use store::write::ValueClass;
 
-use crate::parser::{json::Parser, JsonObjectParser};
+use crate::parser::{JsonObjectParser, json::Parser};
 
 use super::{acl::Acl, id::Id, keyword::Keyword, value::Value};
 
@@ -888,6 +888,127 @@ impl Display for Property {
     }
 }
 
+impl Property {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Property::Acl => "acl",
+            Property::Aliases => "aliases",
+            Property::Attachments => "attachments",
+            Property::Bcc => "bcc",
+            Property::BlobId => "blobId",
+            Property::BodyStructure => "bodyStructure",
+            Property::BodyValues => "bodyValues",
+            Property::Capabilities => "capabilities",
+            Property::Cc => "cc",
+            Property::Charset => "charset",
+            Property::Cid => "cid",
+            Property::DeliveryStatus => "deliveryStatus",
+            Property::Description => "description",
+            Property::DeviceClientId => "deviceClientId",
+            Property::Disposition => "disposition",
+            Property::DsnBlobIds => "dsnBlobIds",
+            Property::Email => "email",
+            Property::EmailId => "emailId",
+            Property::EmailIds => "emailIds",
+            Property::Envelope => "envelope",
+            Property::Expires => "expires",
+            Property::From => "from",
+            Property::FromDate => "fromDate",
+            Property::HasAttachment => "hasAttachment",
+            Property::Header(_) => "header",
+            Property::Headers => "headers",
+            Property::HtmlBody => "htmlBody",
+            Property::HtmlSignature => "htmlSignature",
+            Property::Id => "id",
+            Property::IdentityId => "identityId",
+            Property::InReplyTo => "inReplyTo",
+            Property::IsActive => "isActive",
+            Property::IsEnabled => "isEnabled",
+            Property::IsSubscribed => "isSubscribed",
+            Property::Keys => "keys",
+            Property::Keywords => "keywords",
+            Property::Language => "language",
+            Property::Location => "location",
+            Property::MailboxIds => "mailboxIds",
+            Property::MayDelete => "mayDelete",
+            Property::MdnBlobIds => "mdnBlobIds",
+            Property::Members => "members",
+            Property::MessageId => "messageId",
+            Property::MyRights => "myRights",
+            Property::Name => "name",
+            Property::ParentId => "parentId",
+            Property::PartId => "partId",
+            Property::Picture => "picture",
+            Property::Preview => "preview",
+            Property::Quota => "quota",
+            Property::ReceivedAt => "receivedAt",
+            Property::References => "references",
+            Property::ReplyTo => "replyTo",
+            Property::Role => "role",
+            Property::Secret => "secret",
+            Property::SendAt => "sendAt",
+            Property::Sender => "sender",
+            Property::SentAt => "sentAt",
+            Property::Size => "size",
+            Property::SortOrder => "sortOrder",
+            Property::Subject => "subject",
+            Property::SubParts => "subParts",
+            Property::TextBody => "textBody",
+            Property::TextSignature => "textSignature",
+            Property::ThreadId => "threadId",
+            Property::Timezone => "timezone",
+            Property::To => "to",
+            Property::ToDate => "toDate",
+            Property::TotalEmails => "totalEmails",
+            Property::TotalThreads => "totalThreads",
+            Property::Type => "type",
+            Property::Types => "types",
+            Property::UndoStatus => "undoStatus",
+            Property::UnreadEmails => "unreadEmails",
+            Property::UnreadThreads => "unreadThreads",
+            Property::Url => "url",
+            Property::VerificationCode => "verificationCode",
+            Property::Parameters => "parameters",
+            Property::Addresses => "addresses",
+            Property::P256dh => "p256dh",
+            Property::Auth => "auth",
+            Property::Value => "value",
+            Property::SmtpReply => "smtpReply",
+            Property::Delivered => "delivered",
+            Property::Displayed => "displayed",
+            Property::MailFrom => "mailFrom",
+            Property::RcptTo => "rcptTo",
+            Property::IsEncodingProblem => "isEncodingProblem",
+            Property::IsTruncated => "isTruncated",
+            Property::MayReadItems => "mayReadItems",
+            Property::MayAddItems => "mayAddItems",
+            Property::MayRemoveItems => "mayRemoveItems",
+            Property::MaySetSeen => "maySetSeen",
+            Property::MaySetKeywords => "maySetKeywords",
+            Property::MayCreateChild => "mayCreateChild",
+            Property::MayRename => "mayRename",
+            Property::MaySubmit => "maySubmit",
+            Property::ResourceType => "resourceType",
+            Property::Used => "used",
+            Property::HardLimit => "hardLimit",
+            Property::WarnLimit => "warnLimit",
+            Property::SoftLimit => "softLimit",
+            Property::Scope => "scope",
+            Property::Data(data) => match data {
+                DataProperty::AsText => "data:asText",
+                DataProperty::AsBase64 => "data:asBase64",
+                DataProperty::Default => "data",
+            },
+            Property::Digest(digest) => match digest {
+                DigestProperty::Sha => "digest:sha",
+                DigestProperty::Sha256 => "digest:sha-256",
+                DigestProperty::Sha512 => "digest:sha-512",
+            },
+            Property::_T(s) => s,
+        }
+    }
+}
+
 impl Display for SetProperty {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.property.fmt(f)
@@ -934,11 +1055,7 @@ impl Display for HeaderProperty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "header:{}", self.header)?;
         self.form.fmt(f)?;
-        if self.all {
-            write!(f, ":all")
-        } else {
-            Ok(())
-        }
+        if self.all { write!(f, ":all") } else { Ok(()) }
     }
 }
 
@@ -1094,240 +1211,6 @@ impl Property {
     }
 }
 
-impl SerializeInto for Property {
-    fn serialize_into(&self, buf: &mut Vec<u8>) {
-        buf.push(match self {
-            Property::IsActive => 0,
-            Property::IsEnabled => 1,
-            Property::IsSubscribed => 2,
-            Property::Keys => 3,
-            Property::Keywords => 4,
-            Property::Language => 5,
-            Property::Location => 6,
-            Property::MailboxIds => 7,
-            Property::MayDelete => 8,
-            Property::MdnBlobIds => 9,
-            Property::Members => 10,
-            Property::MessageId => 11,
-            Property::MyRights => 12,
-            Property::Name => 13,
-            Property::ParentId => 14,
-            Property::PartId => 15,
-            Property::Picture => 16,
-            Property::Preview => 17,
-            Property::Quota => 18,
-            Property::ReceivedAt => 19,
-            Property::References => 20,
-            Property::ReplyTo => 21,
-            Property::Role => 22,
-            Property::Secret => 23,
-            Property::SendAt => 24,
-            Property::Sender => 25,
-            Property::SentAt => 26,
-            Property::Size => 27,
-            Property::SortOrder => 28,
-            Property::Subject => 29,
-            Property::SubParts => 30,
-            Property::TextBody => 31,
-            Property::TextSignature => 32,
-            Property::ThreadId => 33,
-            Property::Timezone => 34,
-            Property::To => 35,
-            Property::ToDate => 36,
-            Property::TotalEmails => 37,
-            Property::TotalThreads => 38,
-            Property::Type => 39,
-            Property::Types => 40,
-            Property::UndoStatus => 41,
-            Property::UnreadEmails => 42,
-            Property::UnreadThreads => 43,
-            Property::Url => 44,
-            Property::VerificationCode => 45,
-            Property::Parameters => 46,
-            Property::Addresses => 47,
-            Property::P256dh => 48,
-            Property::Auth => 49,
-            Property::Value => 50,
-            Property::SmtpReply => 51,
-            Property::Delivered => 52,
-            Property::Displayed => 53,
-            Property::MailFrom => 54,
-            Property::RcptTo => 55,
-            Property::IsEncodingProblem => 56,
-            Property::IsTruncated => 57,
-            Property::MayReadItems => 58,
-            Property::MayAddItems => 59,
-            Property::MayRemoveItems => 60,
-            Property::MaySetSeen => 61,
-            Property::MaySetKeywords => 62,
-            Property::MayCreateChild => 63,
-            Property::MayRename => 64,
-            Property::MaySubmit => 65,
-            Property::Acl => 66,
-            Property::Aliases => 67,
-            Property::Attachments => 68,
-            Property::Bcc => 69,
-            Property::BlobId => 70,
-            Property::BodyStructure => 71,
-            Property::BodyValues => 72,
-            Property::Capabilities => 73,
-            Property::Cc => 74,
-            Property::Charset => 75,
-            Property::Cid => 76,
-            Property::DeliveryStatus => 77,
-            Property::Description => 78,
-            Property::DeviceClientId => 79,
-            Property::Disposition => 80,
-            Property::DsnBlobIds => 81,
-            Property::Email => 82,
-            Property::EmailId => 83,
-            Property::EmailIds => 84,
-            Property::Envelope => 85,
-            Property::Expires => 86,
-            Property::From => 87,
-            Property::FromDate => 88,
-            Property::HasAttachment => 89,
-            Property::Header(_) => 90,
-            Property::Headers => 91,
-            Property::HtmlBody => 92,
-            Property::HtmlSignature => 93,
-            Property::Id => 94,
-            Property::IdentityId => 95,
-            Property::InReplyTo => 96,
-            Property::_T(value) => {
-                buf.push(97);
-                value.serialize_into(buf);
-                return;
-            }
-            Property::ResourceType => 98,
-            Property::Used => 99,
-            Property::HardLimit => 100,
-            Property::WarnLimit => 101,
-            Property::SoftLimit => 102,
-            Property::Scope => 103,
-            Property::Digest(_) | Property::Data(_) => {
-                unreachable!("Property::Digest and Property::Data are not serializable")
-            }
-        });
-    }
-}
-
-impl DeserializeFrom for Property {
-    fn deserialize_from(bytes: &mut std::slice::Iter<'_, u8>) -> Option<Self> {
-        match *bytes.next()? {
-            0 => Some(Property::IsActive),
-            1 => Some(Property::IsEnabled),
-            2 => Some(Property::IsSubscribed),
-            3 => Some(Property::Keys),
-            4 => Some(Property::Keywords),
-            5 => Some(Property::Language),
-            6 => Some(Property::Location),
-            7 => Some(Property::MailboxIds),
-            8 => Some(Property::MayDelete),
-            9 => Some(Property::MdnBlobIds),
-            10 => Some(Property::Members),
-            11 => Some(Property::MessageId),
-            12 => Some(Property::MyRights),
-            13 => Some(Property::Name),
-            14 => Some(Property::ParentId),
-            15 => Some(Property::PartId),
-            16 => Some(Property::Picture),
-            17 => Some(Property::Preview),
-            18 => Some(Property::Quota),
-            19 => Some(Property::ReceivedAt),
-            20 => Some(Property::References),
-            21 => Some(Property::ReplyTo),
-            22 => Some(Property::Role),
-            23 => Some(Property::Secret),
-            24 => Some(Property::SendAt),
-            25 => Some(Property::Sender),
-            26 => Some(Property::SentAt),
-            27 => Some(Property::Size),
-            28 => Some(Property::SortOrder),
-            29 => Some(Property::Subject),
-            30 => Some(Property::SubParts),
-            31 => Some(Property::TextBody),
-            32 => Some(Property::TextSignature),
-            33 => Some(Property::ThreadId),
-            34 => Some(Property::Timezone),
-            35 => Some(Property::To),
-            36 => Some(Property::ToDate),
-            37 => Some(Property::TotalEmails),
-            38 => Some(Property::TotalThreads),
-            39 => Some(Property::Type),
-            40 => Some(Property::Types),
-            41 => Some(Property::UndoStatus),
-            42 => Some(Property::UnreadEmails),
-            43 => Some(Property::UnreadThreads),
-            44 => Some(Property::Url),
-            45 => Some(Property::VerificationCode),
-            46 => Some(Property::Parameters),
-            47 => Some(Property::Addresses),
-            48 => Some(Property::P256dh),
-            49 => Some(Property::Auth),
-            50 => Some(Property::Value),
-            51 => Some(Property::SmtpReply),
-            52 => Some(Property::Delivered),
-            53 => Some(Property::Displayed),
-            54 => Some(Property::MailFrom),
-            55 => Some(Property::RcptTo),
-            56 => Some(Property::IsEncodingProblem),
-            57 => Some(Property::IsTruncated),
-            58 => Some(Property::MayReadItems),
-            59 => Some(Property::MayAddItems),
-            60 => Some(Property::MayRemoveItems),
-            61 => Some(Property::MaySetSeen),
-            62 => Some(Property::MaySetKeywords),
-            63 => Some(Property::MayCreateChild),
-            64 => Some(Property::MayRename),
-            65 => Some(Property::MaySubmit),
-            66 => Some(Property::Acl),
-            67 => Some(Property::Aliases),
-            68 => Some(Property::Attachments),
-            69 => Some(Property::Bcc),
-            70 => Some(Property::BlobId),
-            71 => Some(Property::BodyStructure),
-            72 => Some(Property::BodyValues),
-            73 => Some(Property::Capabilities),
-            74 => Some(Property::Cc),
-            75 => Some(Property::Charset),
-            76 => Some(Property::Cid),
-            77 => Some(Property::DeliveryStatus),
-            78 => Some(Property::Description),
-            79 => Some(Property::DeviceClientId),
-            80 => Some(Property::Disposition),
-            81 => Some(Property::DsnBlobIds),
-            82 => Some(Property::Email),
-            83 => Some(Property::EmailId),
-            84 => Some(Property::EmailIds),
-            85 => Some(Property::Envelope),
-            86 => Some(Property::Expires),
-            87 => Some(Property::From),
-            88 => Some(Property::FromDate),
-            89 => Some(Property::HasAttachment),
-            90 => Some(Property::Header(HeaderProperty {
-                form: HeaderForm::Raw,
-                header: String::new(),
-                all: false,
-            })), // Never serialized
-            91 => Some(Property::Headers),
-            92 => Some(Property::HtmlBody),
-            93 => Some(Property::HtmlSignature),
-            94 => Some(Property::Id),
-            95 => Some(Property::IdentityId),
-            96 => Some(Property::InReplyTo),
-            97 => String::deserialize_from(bytes).map(Property::_T),
-            98 => Some(Property::ResourceType),
-            99 => Some(Property::Used),
-            100 => Some(Property::HardLimit),
-            101 => Some(Property::WarnLimit),
-            102 => Some(Property::SoftLimit),
-            103 => Some(Property::Scope),
-            _ => None,
-        }
-    }
-}
-
 impl Serialize for Property {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1340,5 +1223,11 @@ impl Serialize for Property {
 impl AsRef<Property> for Property {
     fn as_ref(&self) -> &Property {
         self
+    }
+}
+
+impl From<Property> for ValueClass {
+    fn from(value: Property) -> Self {
+        ValueClass::Property(value.into())
     }
 }

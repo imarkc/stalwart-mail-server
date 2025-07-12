@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,23 +7,12 @@
 pub mod lookup;
 pub mod manage;
 
-use std::{fmt::Display, slice::Iter};
-
+use crate::Type;
 use ahash::AHashMap;
-use jmap_proto::types::collection::Collection;
-use manage::DynamicPrincipalInfo;
-use store::{
-    Deserialize, IterateParams, SUBSPACE_DIRECTORY, Serialize, Store, U32_LEN, ValueKey,
-    write::{
-        AnyClass, BatchBuilder, DirectoryClass, MaybeDynamicId, ValueClass, key::KeySerializer,
-    },
-};
-use trc::AddContext;
-use utils::codec::leb128::{Leb128Iterator, Leb128Reader};
 
-use crate::{Principal, ROLE_ADMIN, ROLE_USER, Type};
-
-const INT_MARKER: u8 = 1 << 7;
+use std::fmt::Display;
+use store::{Deserialize, SerializeInfallible, U32_LEN, write::key::KeySerializer};
+use utils::codec::leb128::Leb128Iterator;
 
 pub struct PrincipalInfo {
     pub id: u32,
@@ -31,77 +20,10 @@ pub struct PrincipalInfo {
     pub tenant: Option<u32>,
 }
 
-impl Serialize for Principal {
-    fn serialize(self) -> Vec<u8> {
-        (&self).serialize()
-    }
-}
-
-impl Serialize for &Principal {
-    fn serialize(self) -> Vec<u8> {
-        let mut serializer = KeySerializer::new(
-            U32_LEN
-                + 2
-                + self
-                    .fields
-                    .values()
-                    .map(|v| v.serialized_size() + 1)
-                    .sum::<usize>(),
-        )
-        .write(2u8)
-        .write(self.typ as u8)
-        .write_leb128(self.fields.len());
-
-        for (k, v) in &self.fields {
-            let id = k.id();
-
-            match v {
-                PrincipalValue::String(v) => {
-                    serializer = serializer
-                        .write(id)
-                        .write_leb128(1usize)
-                        .write_leb128(v.len())
-                        .write(v.as_bytes());
-                }
-                PrincipalValue::StringList(l) => {
-                    serializer = serializer.write(id).write_leb128(l.len());
-                    for v in l {
-                        serializer = serializer.write_leb128(v.len()).write(v.as_bytes());
-                    }
-                }
-                PrincipalValue::Integer(v) => {
-                    serializer = serializer
-                        .write(id | INT_MARKER)
-                        .write_leb128(1usize)
-                        .write_leb128(*v);
-                }
-                PrincipalValue::IntegerList(l) => {
-                    serializer = serializer.write(id | INT_MARKER).write_leb128(l.len());
-                    for v in l {
-                        serializer = serializer.write_leb128(*v);
-                    }
-                }
-            }
-        }
-
-        serializer.finalize()
-    }
-}
-
-impl Deserialize for Principal {
-    fn deserialize(bytes: &[u8]) -> trc::Result<Self> {
-        deserialize(bytes).ok_or_else(|| {
-            trc::StoreEvent::DataCorruption
-                .caused_by(trc::location!())
-                .ctx(trc::Key::Value, bytes)
-        })
-    }
-}
-
 #[cfg(feature = "enterprise")]
 impl PrincipalInfo {
     // SPDX-SnippetBegin
-    // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+    // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
     // SPDX-License-Identifier: LicenseRef-SEL
 
     pub fn has_tenant_access(&self, tenant_id: Option<u32>) -> bool {
@@ -121,8 +43,8 @@ impl PrincipalInfo {
     }
 }
 
-impl Serialize for PrincipalInfo {
-    fn serialize(self) -> Vec<u8> {
+impl SerializeInfallible for PrincipalInfo {
+    fn serialize(&self) -> Vec<u8> {
         if let Some(tenant) = self.tenant {
             KeySerializer::new((U32_LEN * 2) + 1)
                 .write_leb128(self.id)
@@ -167,231 +89,6 @@ impl PrincipalInfo {
     }
 }
 
-fn deserialize(bytes: &[u8]) -> Option<Principal> {
-    let mut bytes = bytes.iter();
-
-    match *bytes.next()? {
-        1 => {
-            // Version 1 (legacy)
-            let id = bytes.next_leb128()?;
-            let type_id = *bytes.next()?;
-
-            let mut principal = Principal {
-                id,
-                typ: Type::from_u8(type_id),
-                ..Default::default()
-            };
-
-            principal.set(PrincipalField::Quota, bytes.next_leb128::<u64>()?);
-            principal.set(PrincipalField::Name, deserialize_string(&mut bytes)?);
-            if let Some(description) = deserialize_string(&mut bytes).filter(|s| !s.is_empty()) {
-                principal.set(PrincipalField::Description, description);
-            }
-            for key in [PrincipalField::Secrets, PrincipalField::Emails] {
-                for _ in 0..bytes.next_leb128::<usize>()? {
-                    principal.append_str(key, deserialize_string(&mut bytes)?);
-                }
-            }
-
-            principal
-                .with_field(
-                    PrincipalField::Roles,
-                    if type_id != 4 { ROLE_USER } else { ROLE_ADMIN },
-                )
-                .into()
-        }
-        2 => {
-            // Version 2
-            let typ = Type::from_u8(*bytes.next()?);
-            let num_fields = bytes.next_leb128::<usize>()?;
-
-            let mut principal = Principal {
-                id: u32::MAX,
-                typ,
-                fields: AHashMap::with_capacity(num_fields),
-            };
-
-            for _ in 0..num_fields {
-                let id = *bytes.next()?;
-                let num_values = bytes.next_leb128::<usize>()?;
-
-                if (id & INT_MARKER) == 0 {
-                    let field = PrincipalField::from_id(id)?;
-                    if num_values == 1 {
-                        principal.set(field, deserialize_string(&mut bytes)?);
-                    } else {
-                        let mut values = Vec::with_capacity(num_values);
-                        for _ in 0..num_values {
-                            values.push(deserialize_string(&mut bytes)?);
-                        }
-                        principal.set(field, values);
-                    }
-                } else {
-                    let field = PrincipalField::from_id(id & !INT_MARKER)?;
-                    if num_values == 1 {
-                        principal.set(field, bytes.next_leb128::<u64>()?);
-                    } else {
-                        let mut values = Vec::with_capacity(num_values);
-                        for _ in 0..num_values {
-                            values.push(bytes.next_leb128::<u64>()?);
-                        }
-                        principal.set(field, values);
-                    }
-                }
-            }
-
-            principal.into()
-        }
-        _ => None,
-    }
-}
-
-pub trait MigrateDirectory: Sync + Send {
-    fn migrate_directory(&self) -> impl std::future::Future<Output = trc::Result<()>> + Send;
-}
-
-impl MigrateDirectory for Store {
-    async fn migrate_directory(&self) -> trc::Result<()> {
-        let mut principals = Vec::new();
-        let mut domains = Vec::new();
-
-        self.iterate(
-            IterateParams::new(
-                ValueKey {
-                    account_id: 0,
-                    collection: 0,
-                    document_id: 0,
-                    class: ValueClass::Directory(DirectoryClass::Principal(0)),
-                },
-                ValueKey {
-                    account_id: u32::MAX,
-                    collection: u8::MAX,
-                    document_id: u32::MAX,
-                    class: ValueClass::Any(AnyClass {
-                        subspace: SUBSPACE_DIRECTORY,
-                        key: vec![4u8],
-                    }),
-                },
-            ),
-            |key, value| {
-                match (key.first(), value.first()) {
-                    (Some(2), Some(1)) => {
-                        principals.push((
-                            key.get(1..)
-                                .and_then(|b| b.read_leb128::<u32>().map(|(v, _)| v))
-                                .ok_or_else(|| {
-                                    trc::StoreEvent::DataCorruption
-                                        .caused_by(trc::location!())
-                                        .ctx(trc::Key::Value, key)
-                                })?,
-                            Principal::deserialize(value)?,
-                        ));
-                    }
-                    (Some(3), _) => {
-                        let domain = std::str::from_utf8(&key[1..]).unwrap_or_default();
-                        if !domain.is_empty() {
-                            domains.push(domain.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-
-                Ok(true)
-            },
-        )
-        .await
-        .caused_by(trc::location!())?;
-
-        let total_principal_count = principals.len();
-        for (account_id, mut principal) in principals {
-            let role = principal.take_int(PrincipalField::Roles).unwrap() as u32;
-
-            let mut batch = BatchBuilder::new();
-            batch
-                .with_account_id(u32::MAX)
-                .with_collection(Collection::Principal)
-                .set(
-                    ValueClass::Directory(DirectoryClass::Principal(MaybeDynamicId::Static(
-                        account_id,
-                    ))),
-                    (&principal).serialize(),
-                );
-
-            if principal.typ() == Type::Individual {
-                batch
-                    .set(
-                        ValueClass::Directory(DirectoryClass::MemberOf {
-                            principal_id: MaybeDynamicId::Static(account_id),
-                            member_of: MaybeDynamicId::Static(role),
-                        }),
-                        vec![Type::Role as u8],
-                    )
-                    .set(
-                        ValueClass::Directory(DirectoryClass::Members {
-                            principal_id: MaybeDynamicId::Static(role),
-                            has_member: MaybeDynamicId::Static(account_id),
-                        }),
-                        vec![],
-                    );
-            }
-
-            self.write(batch.build())
-                .await
-                .caused_by(trc::location!())?;
-        }
-
-        let total_domain_count = domains.len();
-        for domain in domains {
-            let mut batch = BatchBuilder::new();
-
-            batch
-                .with_account_id(u32::MAX)
-                .with_collection(Collection::Principal)
-                .create_document()
-                .assert_value(
-                    ValueClass::Directory(DirectoryClass::NameToId(
-                        domain.to_string().into_bytes(),
-                    )),
-                    (),
-                )
-                .set(
-                    ValueClass::Directory(DirectoryClass::Principal(MaybeDynamicId::Dynamic(0))),
-                    Principal::new(0, Type::Domain)
-                        .with_field(PrincipalField::Name, domain.to_string())
-                        .with_field(PrincipalField::Description, domain.to_string())
-                        .serialize(),
-                )
-                .set(
-                    ValueClass::Directory(DirectoryClass::NameToId(domain.as_bytes().to_vec())),
-                    DynamicPrincipalInfo::new(Type::Domain, None),
-                )
-                .clear(ValueClass::Any(AnyClass {
-                    subspace: SUBSPACE_DIRECTORY,
-                    key: [3u8].iter().chain(domain.as_bytes()).copied().collect(),
-                }));
-
-            if let Err(err) = self.write(batch.build()).await {
-                trc::error!(
-                    err.caused_by(trc::location!())
-                        .details("Failed to migrate domain, probably a principal already exists")
-                        .ctx(trc::Key::Domain, domain)
-                );
-            }
-        }
-
-        if total_domain_count > 0 || total_principal_count > 0 {
-            trc::event!(
-                Server(trc::ServerEvent::Startup),
-                Details = format!(
-                    "Migrated {total_principal_count} principals and {total_domain_count} domains",
-                )
-            );
-        }
-
-        Ok(())
-    }
-}
-
 #[derive(
     Debug, Clone, Copy, PartialEq, Hash, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -414,6 +111,14 @@ pub enum PrincipalField {
     Picture,
     Urls,
     ExternalMembers,
+    Locale,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PrincipalSet {
+    pub id: u32,
+    pub typ: Type,
+    pub fields: AHashMap<PrincipalField, PrincipalValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -494,6 +199,7 @@ impl PrincipalField {
             PrincipalField::Picture => 14,
             PrincipalField::Urls => 15,
             PrincipalField::ExternalMembers => 16,
+            PrincipalField::Locale => 17,
         }
     }
 
@@ -516,6 +222,7 @@ impl PrincipalField {
             14 => Some(PrincipalField::Picture),
             15 => Some(PrincipalField::Urls),
             16 => Some(PrincipalField::ExternalMembers),
+            17 => Some(PrincipalField::Locale),
             _ => None,
         }
     }
@@ -539,6 +246,7 @@ impl PrincipalField {
             PrincipalField::Picture => "picture",
             PrincipalField::Urls => "urls",
             PrincipalField::ExternalMembers => "externalMembers",
+            PrincipalField::Locale => "locale",
         }
     }
 
@@ -561,18 +269,10 @@ impl PrincipalField {
             "picture" => Some(PrincipalField::Picture),
             "urls" => Some(PrincipalField::Urls),
             "externalMembers" => Some(PrincipalField::ExternalMembers),
+            "locale" => Some(PrincipalField::Locale),
             _ => None,
         }
     }
-}
-
-fn deserialize_string(bytes: &mut Iter<'_, u8>) -> Option<String> {
-    let len = bytes.next_leb128()?;
-    let mut string = Vec::with_capacity(len);
-    for _ in 0..len {
-        string.push(*bytes.next()?);
-    }
-    String::from_utf8(string).ok()
 }
 
 pub trait SpecialSecrets {

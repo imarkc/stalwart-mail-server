@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,7 +7,7 @@
 use serde_json::value::RawValue;
 use std::fmt::Write;
 
-use crate::parser::{json::Parser, JsonObjectParser, Token};
+use crate::parser::{JsonObjectParser, Token, json::Parser};
 
 #[derive(Debug, serde::Serialize)]
 pub struct Echo {

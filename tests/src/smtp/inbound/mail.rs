@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use common::Core;
-use mail_auth::{common::parse::TxtRecordParser, spf::Spf, IprevResult, SpfResult};
+use mail_auth::{IprevResult, SpfResult, common::parse::TxtRecordParser, spf::Spf};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MAIL_REQUIRETLS};
 
 use smtp::core::Session;
@@ -15,8 +15,8 @@ use store::Stores;
 use utils::config::Config;
 
 use crate::smtp::{
-    session::{TestSession, VerifyResponse},
     DnsCache, TempDir, TestSMTP,
+    session::{TestSession, VerifyResponse},
 };
 
 const CONFIG: &str = r#"
@@ -106,7 +106,7 @@ async fn mail() {
 
     // Be rude and do not say EHLO
     let mut session = Session::test(server.clone());
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
     session.eval_session_params().await;
     session
@@ -185,7 +185,7 @@ async fn mail() {
     session.response().assert_code("552 5.3.4");
 
     // Test strict IPREV
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
     session.data.iprev = None;
     session.eval_session_params().await;

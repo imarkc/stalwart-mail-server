@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,18 +11,18 @@ use std::{
 };
 
 use common::{
+    Core, Data, Inner, Server,
     config::{
         server::{Listeners, ServerProtocol},
         smtp::resolver::Tlsa,
         spamfilter::IpResolver,
     },
     ipc::{QueueEvent, ReportingEvent},
-    manager::boot::{build_ipc, IpcReceivers},
-    Core, Data, Inner, Server,
+    manager::boot::{IpcReceivers, build_ipc},
 };
 
-use jmap::api::JmapSessionManager;
-use mail_auth::{common::resolver::IntoFqdn, Txt, MX};
+use http::HttpSessionManager;
+use mail_auth::{MX, Txt, common::resolver::IntoFqdn};
 use session::{DummyIo, TestSession};
 use smtp::core::{Session, SmtpSessionManager};
 use store::{BlobStore, Store, Stores};
@@ -146,8 +146,8 @@ lookup = "{STORE}"
 type = "rocksdb"
 path = "{TMP}/queue.db"
 
-[store."foundationdb"]
-type = "foundationdb"
+#[store."foundationdb"]
+#type = "foundationdb"
 
 [store."postgresql"]
 type = "postgresql"
@@ -173,7 +173,7 @@ impl TestSMTP {
     }
 
     pub fn inner_with_rxs(&self) -> (Arc<Inner>, IpcReceivers) {
-        let (ipc, ipc_rxs) = build_ipc(&mut Config::default());
+        let (ipc, ipc_rxs) = build_ipc(false);
 
         (
             Inner {
@@ -191,7 +191,7 @@ impl TestSMTP {
         let store = core.storage.data.clone();
         let blob_store = core.storage.blob.clone();
         let shared_core = core.into_shared();
-        let (ipc, mut ipc_rxs) = build_ipc(&mut Config::default());
+        let (ipc, mut ipc_rxs) = build_ipc(false);
 
         TestSMTP {
             queue_receiver: QueueReceiver {
@@ -236,6 +236,7 @@ impl TestSMTP {
         let stores = Stores::parse_all(&mut config, false).await;
         let core = Core::parse(&mut config, stores, Default::default()).await;
         let data = Data::parse(&mut config);
+        core.storage.data.destroy().await;
 
         Self::from_core_and_tempdir(core, data, Some(temp_dir))
     }
@@ -265,7 +266,7 @@ impl TestSMTP {
                         shutdown_rx,
                     ),
                     ServerProtocol::Http => server.spawn(
-                        JmapSessionManager::new(self.server.inner.clone()),
+                        HttpSessionManager::new(self.server.inner.clone()),
                         self.server.inner.clone(),
                         acceptor,
                         shutdown_rx,

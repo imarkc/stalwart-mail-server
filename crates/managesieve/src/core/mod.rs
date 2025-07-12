@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,10 +10,12 @@ pub mod session;
 use std::{borrow::Cow, net::IpAddr, sync::Arc};
 
 use common::{
-    auth::AccessToken,
-    listener::{limiter::InFlight, ServerInstance},
     Inner, Server,
+    auth::AccessToken,
+    listener::{ServerInstance, limiter::InFlight},
 };
+
+use compact_str::CompactString;
 use imap_proto::receiver::{CommandParser, Receiver};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -301,12 +303,12 @@ impl SerializeResponse for trc::Error {
 
 impl From<ResponseCode> for trc::Value {
     fn from(value: ResponseCode) -> Self {
-        trc::Value::Static(value.as_str())
+        trc::Value::String(CompactString::const_new(value.as_str()))
     }
 }
 
 impl From<ResponseType> for trc::Value {
     fn from(value: ResponseType) -> Self {
-        trc::Value::Static(value.as_str())
+        trc::Value::String(CompactString::const_new(value.as_str()))
     }
 }

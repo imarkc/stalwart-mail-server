@@ -4,7 +4,7 @@
 // Allow what is needed
 !crates
 !tests
-!resources/docker/entrypoint.sh
+!resources
 
 !Cargo.lock
 !Cargo.toml

@@ -1,8 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
+
+use compact_str::{CompactString, ToCompactString, format_compact};
 
 use crate::{
     Command,
@@ -27,7 +29,7 @@ impl Request<Command> {
                     .next()
                     .unwrap()
                     .unwrap_string()
-                    .map_err(|v| bad(self.tag.clone(), v))?,
+                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                 version,
             );
 
@@ -46,7 +48,10 @@ impl Request<Command> {
                                     .next()
                                     .is_none_or(|token| !token.is_parenthesis_open())
                                 {
-                                    return Err(bad(self.tag, "Expected '(' after 'QRESYNC'."));
+                                    return Err(bad(
+                                        CompactString::from_string_buffer(self.tag),
+                                        "Expected '(' after 'QRESYNC'.",
+                                    ));
                                 }
 
                                 let uid_validity = parse_number::<u32>(
@@ -54,32 +59,32 @@ impl Request<Command> {
                                         .next()
                                         .ok_or_else(|| {
                                             bad(
-                                                self.tag.to_string(),
+                                                self.tag.to_compact_string(),
                                                 "Missing uidvalidity parameter for QRESYNC.",
                                             )
                                         })?
                                         .unwrap_bytes(),
                                 )
-                                .map_err(|v| bad(self.tag.to_string(), v))?;
+                                .map_err(|v| bad(self.tag.to_compact_string(), v))?;
                                 let modseq = parse_number::<u64>(
                                     &tokens
                                         .next()
                                         .ok_or_else(|| {
                                             bad(
-                                                self.tag.to_string(),
+                                                self.tag.to_compact_string(),
                                                 "Missing modseq parameter for QRESYNC.",
                                             )
                                         })?
                                         .unwrap_bytes(),
                                 )
-                                .map_err(|v| bad(self.tag.to_string(), v))?;
+                                .map_err(|v| bad(self.tag.to_compact_string(), v))?;
 
                                 let mut known_uids = None;
                                 let mut seq_match = None;
                                 let has_seq_match = match tokens.peek() {
                                     Some(Token::Argument(value)) => {
                                         known_uids = parse_sequence_set(value)
-                                            .map_err(|v| bad(self.tag.to_string(), v))?
+                                            .map_err(|v| bad(self.tag.to_compact_string(), v))?
                                             .into();
                                         tokens.next();
                                         if matches!(tokens.peek(), Some(Token::ParenthesisOpen)) {
@@ -103,31 +108,34 @@ impl Request<Command> {
                                                 .next()
                                                 .ok_or_else(|| {
                                                     bad(
-                                            self.tag.to_string(),
+                                            self.tag.to_compact_string(),
                                             "Missing known-sequence-set parameter for QRESYNC.",
                                         )
                                                 })?
                                                 .unwrap_bytes(),
                                         )
-                                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                                         parse_sequence_set(
                                             &tokens
                                                 .next()
                                                 .ok_or_else(|| {
                                                     bad(
-                                                self.tag.to_string(),
+                                                self.tag.to_compact_string(),
                                                 "Missing known-uid-set parameter for QRESYNC.",
                                             )
                                                 })?
                                                 .unwrap_bytes(),
                                         )
-                                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                                     ));
                                     if tokens
                                         .next()
                                         .is_none_or(|token| !token.is_parenthesis_close())
                                     {
-                                        return Err(bad(self.tag, "Missing ')' for 'QRESYNC'."));
+                                        return Err(bad(
+                                            CompactString::from_string_buffer(self.tag),
+                                            "Missing ')' for 'QRESYNC'.",
+                                        ));
                                     }
                                 }
 
@@ -135,7 +143,10 @@ impl Request<Command> {
                                     .next()
                                     .is_none_or(|token| !token.is_parenthesis_close())
                                 {
-                                    return Err(bad(self.tag, "Missing ')' for 'QRESYNC'."));
+                                    return Err(bad(
+                                        CompactString::from_string_buffer(self.tag),
+                                        "Missing ')' for 'QRESYNC'.",
+                                    ));
                                 }
 
                                 qresync = QResync {
@@ -151,15 +162,18 @@ impl Request<Command> {
                             }
                             _ => {
                                 return Err(bad(
-                                    self.tag,
-                                    format!("Unexpected value '{}'.", token),
+                                    CompactString::from_string_buffer(self.tag),
+                                    format_compact!("Unexpected value '{}'.", token),
                                 ));
                             }
                         }
                     }
                 }
                 Some(token) => {
-                    return Err(bad(self.tag, format!("Unexpected value '{}'.", token)));
+                    return Err(bad(
+                        CompactString::from_string_buffer(self.tag),
+                        format_compact!("Unexpected value '{}'.", token),
+                    ));
                 }
                 None => (),
             }
@@ -194,8 +208,8 @@ mod tests {
             (
                 "A142 SELECT INBOX\r\n",
                 select::Arguments {
-                    mailbox_name: "INBOX".to_string(),
-                    tag: "A142".to_string(),
+                    mailbox_name: "INBOX".into(),
+                    tag: "A142".into(),
                     condstore: false,
                     qresync: None,
                 },
@@ -203,8 +217,8 @@ mod tests {
             (
                 "A142 SELECT \"my funky mailbox\"\r\n",
                 select::Arguments {
-                    mailbox_name: "my funky mailbox".to_string(),
-                    tag: "A142".to_string(),
+                    mailbox_name: "my funky mailbox".into(),
+                    tag: "A142".into(),
                     condstore: false,
                     qresync: None,
                 },
@@ -212,8 +226,8 @@ mod tests {
             (
                 "A142 SELECT INBOX (CONDSTORE)\r\n",
                 select::Arguments {
-                    mailbox_name: "INBOX".to_string(),
-                    tag: "A142".to_string(),
+                    mailbox_name: "INBOX".into(),
+                    tag: "A142".into(),
                     condstore: true,
                     qresync: None,
                 },
@@ -221,8 +235,8 @@ mod tests {
             (
                 "A142 SELECT INBOX (QRESYNC (3857529045 20010715194032001 1:198))\r\n",
                 select::Arguments {
-                    mailbox_name: "INBOX".to_string(),
-                    tag: "A142".to_string(),
+                    mailbox_name: "INBOX".into(),
+                    tag: "A142".into(),
                     condstore: false,
                     qresync: QResync {
                         uid_validity: 3857529045,
@@ -242,8 +256,8 @@ mod tests {
                     "41:211,214:541) CONDSTORE)\r\n"
                 ),
                 select::Arguments {
-                    mailbox_name: "INBOX".to_string(),
-                    tag: "A03".to_string(),
+                    mailbox_name: "INBOX".into(),
+                    tag: "A03".into(),
                     condstore: true,
                     qresync: QResync {
                         uid_validity: 67890007,
@@ -273,8 +287,8 @@ mod tests {
                     "29994,29997)))\r\n"
                 ),
                 select::Arguments {
-                    mailbox_name: "INBOX".to_string(),
-                    tag: "B04".to_string(),
+                    mailbox_name: "INBOX".into(),
+                    tag: "B04".into(),
                     condstore: false,
                     qresync: QResync {
                         uid_validity: 67890007,
@@ -320,8 +334,8 @@ mod tests {
             (
                 "A12 SELECT \"INBOX\" (QRESYNC (1693237464 16582))\r\n",
                 select::Arguments {
-                    mailbox_name: "INBOX".to_string(),
-                    tag: "A12".to_string(),
+                    mailbox_name: "INBOX".into(),
+                    tag: "A12".into(),
                     condstore: false,
                     qresync: QResync {
                         uid_validity: 1693237464,

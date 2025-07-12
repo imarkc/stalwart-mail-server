@@ -1,17 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{
-        acl::{self, ModRights, ModRightsOp, Rights},
-        ProtocolVersion,
-    },
-    receiver::{bad, Request},
-    utf7::utf7_maybe_decode,
     Command,
+    protocol::{
+        ProtocolVersion,
+        acl::{self, ModRights, ModRightsOp, Rights},
+    },
+    receiver::{Request, bad},
+    utf7::utf7_maybe_decode,
 };
 
 use super::PushUnique;
@@ -43,17 +45,17 @@ impl Request<Command> {
         let mailbox_name = utf7_maybe_decode(
             tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_string(), "Missing mailbox name."))?
+                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing mailbox name."))?
                 .unwrap_string()
-                .map_err(|v| bad(self.tag.to_string(), v))?,
+                .map_err(|v| bad(self.tag.to_compact_string(), v))?,
             version,
         );
         let identifier = if has_identifier {
             tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_string(), "Missing identifier."))?
+                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing identifier."))?
                 .unwrap_string()
-                .map_err(|v| bad(self.tag.to_string(), v))?
+                .map_err(|v| bad(self.tag.to_compact_string(), v))?
                 .into()
         } else {
             None
@@ -62,10 +64,10 @@ impl Request<Command> {
             ModRights::parse(
                 &tokens
                     .next()
-                    .ok_or_else(|| bad(self.tag.to_string(), "Missing rights."))?
+                    .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing rights."))?
                     .unwrap_bytes(),
             )
-            .map_err(|v| bad(self.tag.to_string(), v))?
+            .map_err(|v| bad(self.tag.to_compact_string(), v))?
             .into()
         } else {
             None
@@ -129,8 +131,8 @@ mod tests {
 
     use crate::{
         protocol::{
-            acl::{self, ModRights, ModRightsOp, Rights},
             ProtocolVersion,
+            acl::{self, ModRights, ModRightsOp, Rights},
         },
         receiver::Receiver,
     };
@@ -143,9 +145,9 @@ mod tests {
             (
                 "A003 Setacl INBOX/Drafts Byron lrswikda\r\n",
                 acl::Arguments {
-                    tag: "A003".to_string(),
-                    mailbox_name: "INBOX/Drafts".to_string(),
-                    identifier: "Byron".to_string().into(),
+                    tag: "A003".into(),
+                    mailbox_name: "INBOX/Drafts".into(),
+                    identifier: Some("Byron".into()),
                     mod_rights: ModRights {
                         op: ModRightsOp::Replace,
                         rights: vec![
@@ -165,9 +167,9 @@ mod tests {
             (
                 "A002 SETACL INBOX/Drafts Chris +cda\r\n",
                 acl::Arguments {
-                    tag: "A002".to_string(),
-                    mailbox_name: "INBOX/Drafts".to_string(),
-                    identifier: "Chris".to_string().into(),
+                    tag: "A002".into(),
+                    mailbox_name: "INBOX/Drafts".into(),
+                    identifier: Some("Chris".into()),
                     mod_rights: ModRights {
                         op: ModRightsOp::Add,
                         rights: vec![
@@ -182,9 +184,9 @@ mod tests {
             (
                 "A036 SETACL INBOX/Drafts John -lrswicda\r\n",
                 acl::Arguments {
-                    tag: "A036".to_string(),
-                    mailbox_name: "INBOX/Drafts".to_string(),
-                    identifier: "John".to_string().into(),
+                    tag: "A036".into(),
+                    mailbox_name: "INBOX/Drafts".into(),
+                    identifier: Some("John".into()),
                     mod_rights: ModRights {
                         op: ModRightsOp::Remove,
                         rights: vec![
@@ -204,8 +206,8 @@ mod tests {
             (
                 "A001 GETACL INBOX/Drafts\r\n",
                 acl::Arguments {
-                    tag: "A001".to_string(),
-                    mailbox_name: "INBOX/Drafts".to_string(),
+                    tag: "A001".into(),
+                    mailbox_name: "INBOX/Drafts".into(),
                     identifier: None,
                     mod_rights: None,
                 },

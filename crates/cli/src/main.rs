@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -15,11 +15,12 @@ use clap::Parser;
 use console::style;
 use jmap_client::client::Credentials;
 use modules::{
+    UnwrapResult,
     cli::{Cli, Client, Commands},
-    is_localhost, UnwrapResult,
+    host, is_localhost,
 };
-use reqwest::{header::AUTHORIZATION, Method, StatusCode};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use reqwest::{Method, StatusCode, header::AUTHORIZATION};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::modules::OAuthResponse;
 
@@ -190,6 +191,7 @@ impl Client {
         jmap_client::client::Client::new()
             .credentials(self.credentials)
             .accept_invalid_certs(is_localhost(&self.url))
+            .follow_redirects([host(&self.url).expect("Invalid host").to_owned()])
             .timeout(Duration::from_secs(self.timeout.unwrap_or(60)))
             .connect(&self.url)
             .await
@@ -255,7 +257,9 @@ impl Client {
                 return None;
             }
             StatusCode::UNAUTHORIZED => {
-                eprintln!("Authentication failed. Make sure the credentials are correct and that the account has administrator rights.");
+                eprintln!(
+                    "Authentication failed. Make sure the credentials are correct and that the account has administrator rights."
+                );
                 std::process::exit(1);
             }
             _ => {

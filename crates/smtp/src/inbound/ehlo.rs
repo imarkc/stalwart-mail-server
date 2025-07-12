@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,9 +11,10 @@ use common::{
     config::smtp::session::{Mechanism, Stage},
     listener::SessionStream,
 };
+
 use mail_auth::{
-    spf::verify::{HasValidLabels, SpfParameters},
     SpfResult,
+    spf::verify::{HasValidLabels, SpfParameters},
 };
 use smtp_proto::*;
 use trc::SmtpEvent;

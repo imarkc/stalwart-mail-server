@@ -1,18 +1,27 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::format_compact;
+
 use crate::{
-    object::{blob, email, Object},
-    parser::{json::Parser, JsonObjectParser, Token},
+    object::{blob, email},
+    parser::{JsonObjectParser, Token, json::Parser},
     request::{
+        RequestProperty, RequestPropertyParser,
         method::MethodObject,
         reference::{MaybeReference, ResultReference},
-        RequestProperty, RequestPropertyParser,
     },
-    types::{any_id::AnyId, blob::BlobId, id::Id, property::Property, state::State, value::Value},
+    types::{
+        any_id::AnyId,
+        blob::BlobId,
+        id::Id,
+        property::Property,
+        state::State,
+        value::{Object, Value},
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -74,7 +83,7 @@ impl JsonObjectParser for GetRequest<RequestArguments> {
                 _ => {
                     return Err(trc::JmapEvent::UnknownMethod
                         .into_err()
-                        .details(format!("{}/get", parser.ctx)))
+                        .details(format_compact!("{}/get", parser.ctx)));
                 }
             },
             account_id: Id::default(),

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,21 +11,26 @@ use mail_auth::MX;
 use store::write::now;
 
 use crate::smtp::{
+    DnsCache, TestSMTP,
     inbound::TestMessage,
     session::{TestSession, VerifyResponse},
-    DnsCache, TestSMTP,
 };
 
 const LOCAL: &str = r#"
 [session.rcpt]
 relay = true
 
-[queue.outbound]
-hostname = "'badtls.foobar.org'"
+[queue.connection.default]
+ehlo-hostname = "badtls.foobar.org"
 
-[queue.outbound.tls]
-starttls = [ { if = "retry_num > 0 && last_error == 'tls'", then = "disable"},
-             { else = "optional" }]
+[queue.strategy]
+tls = [ { if = "retry_num > 0 && last_error == 'tls'", then = "'no-tls'"},
+        { else = "'default'" }]
+
+[queue.tls.no-tls]
+starttls = false
+allow-invalid-certs = true
+
 "#;
 
 const REMOTE: &str = r#"
@@ -70,7 +75,7 @@ async fn starttls_optional() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -82,13 +87,11 @@ async fn starttls_optional() {
         .await
         .try_deliver(core.clone());
     let mut retry = local.queue_receiver.expect_message().await;
-    let prev_due = retry.domains[0].retry.due;
+    let prev_due = retry.message.recipients[0].retry.due;
     let next_due = now();
     let queue_id = retry.queue_id;
-    retry.domains[0].retry.due = next_due;
-    retry
-        .save_changes(&core, prev_due.into(), next_due.into())
-        .await;
+    retry.message.recipients[0].retry.due = next_due;
+    retry.save_changes(&core, prev_due.into()).await;
     local
         .queue_receiver
         .delivery_attempt(queue_id)

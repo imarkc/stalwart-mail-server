@@ -1,11 +1,11 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{
-    collections::{btree_map::Entry, BTreeMap},
+    collections::{BTreeMap, btree_map::Entry},
     iter::Peekable,
     str::Chars,
 };
@@ -15,7 +15,7 @@ use std::fmt::Write;
 
 const MAX_NEST_LEVEL: usize = 10;
 
-// Simple TOML parser for Stalwart Mail Server configuration files.
+// Simple TOML parser for Stalwart Server configuration files.
 impl Config {
     pub fn new(toml: impl AsRef<str>) -> Result<Self> {
         let mut config = Config::default();
@@ -299,9 +299,9 @@ impl<'x, 'y> TomlParser<'x, 'y> {
                                 '}' => break,
                                 ch => {
                                     return Err(format!(
-                                    "Unexpected character {:?} found in inline table for property {:?} at line {}.",
-                                    ch, key, self.line
-                                ));
+                                        "Unexpected character {:?} found in inline table for property {:?} at line {}.",
+                                        ch, key, self.line
+                                    ));
                                 }
                             }
                         }
@@ -397,7 +397,7 @@ impl<'x, 'y> TomlParser<'x, 'y> {
                         "Expected {:?} but found {:?} in value at line {}.",
                         stop_chars, ch, self.line
                     ))
-                }
+                };
             }
         }
 
@@ -582,13 +582,10 @@ mod tests {
         );
 
         assert_eq!(
-            config.sub_keys("sets.strings", "").collect::<Vec<_>>(),
+            config.sub_keys("sets.strings", ""),
             vec!["green", "red", "yellow"]
         );
 
-        assert_eq!(
-            config.sub_keys("sets", ".red").collect::<Vec<_>>(),
-            vec!["string", "strings"]
-        );
+        assert_eq!(config.sub_keys("sets", ".red"), vec!["string", "strings"]);
     }
 }

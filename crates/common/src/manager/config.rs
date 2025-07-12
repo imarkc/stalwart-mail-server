@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -36,13 +36,13 @@ pub struct Patterns {
     patterns: Vec<Pattern>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum Pattern {
     Include(MatchType),
     Exclude(MatchType),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchType {
     Equal(String),
     StartsWith(String),
@@ -133,7 +133,7 @@ impl ConfigManager {
         Ok(grouped)
     }
 
-    async fn db_list(
+    pub async fn db_list(
         &self,
         prefix: &str,
         strip_prefix: bool,
@@ -194,7 +194,7 @@ impl ConfigManager {
         }
 
         if !batch.is_empty() {
-            self.cfg_store.write(batch.build()).await?;
+            self.cfg_store.write(batch.build_all()).await?;
         }
 
         if !local_batch.is_empty() {
@@ -236,7 +236,7 @@ impl ConfigManager {
         } else {
             let mut batch = BatchBuilder::new();
             batch.clear(ValueClass::Config(key.to_string().into_bytes()));
-            self.cfg_store.write(batch.build()).await.map(|_| ())
+            self.cfg_store.write(batch.build_all()).await.map(|_| ())
         }
     }
 
@@ -530,7 +530,6 @@ impl Patterns {
                 Pattern::Include(MatchType::StartsWith(
                     "authentication.fallback-admin.".to_string(),
                 )),
-                Pattern::Exclude(MatchType::Equal("cluster.key".to_string())),
                 Pattern::Include(MatchType::StartsWith("cluster.".to_string())),
                 Pattern::Include(MatchType::Equal("storage.data".to_string())),
                 Pattern::Include(MatchType::Equal("storage.blob".to_string())),
@@ -539,6 +538,12 @@ impl Patterns {
                 Pattern::Include(MatchType::Equal("storage.directory".to_string())),
                 Pattern::Include(MatchType::Equal("enterprise.license-key".to_string())),
             ];
+        } else if !cfg_local_patterns.contains(&Pattern::Include(MatchType::StartsWith(
+            "config.local-keys.".to_string(),
+        ))) {
+            cfg_local_patterns.push(Pattern::Include(MatchType::StartsWith(
+                "config.local-keys.".to_string(),
+            )));
         }
 
         Patterns {

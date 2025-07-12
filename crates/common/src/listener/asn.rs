@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{
     net::IpAddr,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{Arc, atomic::AtomicU64},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use mail_auth::common::resolver::ToReverseName;
 use store::write::now;
 use tokio::sync::Semaphore;
 
-use crate::{config::network::AsnGeoLookupConfig, manager::fetch_resource, Server};
+use crate::{Server, config::network::AsnGeoLookupConfig, manager::fetch_resource};
 
 pub struct AsnGeoLookupData {
     pub lock: Semaphore,

@@ -1,10 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{fmt::Display, iter::Peekable, slice::Iter};
+
+use compact_str::format_compact;
 
 use crate::request::method::MethodObject;
 
@@ -43,18 +45,18 @@ impl<'x> Parser<'x> {
     pub fn error(&self, message: &str) -> trc::Error {
         trc::JmapEvent::NotJson
             .into_err()
-            .details(format!("{message} at position {}.", self.pos))
+            .details(format_compact!("{message} at position {}.", self.pos))
     }
 
     pub fn error_unterminated(&self) -> trc::Error {
-        trc::JmapEvent::NotJson.into_err().details(format!(
+        trc::JmapEvent::NotJson.into_err().details(format_compact!(
             "Unterminated string at position {pos}.",
             pos = self.pos
         ))
     }
 
     pub fn error_utf8(&self) -> trc::Error {
-        trc::JmapEvent::NotJson.into_err().details(format!(
+        trc::JmapEvent::NotJson.into_err().details(format_compact!(
             "Invalid UTF-8 sequence at position {pos}.",
             pos = self.pos
         ))
@@ -62,11 +64,13 @@ impl<'x> Parser<'x> {
 
     pub fn error_value(&mut self) -> trc::Error {
         if self.is_eof || self.skip_string() {
-            trc::JmapEvent::InvalidArguments.into_err().details(format!(
-                "Invalid value {:?} at position {}.",
-                String::from_utf8_lossy(self.bytes[self.pos_marker..self.pos - 1].as_ref()),
-                self.pos
-            ))
+            trc::JmapEvent::InvalidArguments
+                .into_err()
+                .details(format_compact!(
+                    "Invalid value {:?} at position {}.",
+                    String::from_utf8_lossy(self.bytes[self.pos_marker..self.pos - 1].as_ref()),
+                    self.pos
+                ))
         } else {
             self.error_unterminated()
         }
@@ -281,7 +285,7 @@ impl<'x> Parser<'x> {
                 Token::Comma => (),
                 Token::DictEnd => return Ok(None),
                 token => {
-                    return Err(self.error(&format!("Expected object property, found {}", token)))
+                    return Err(self.error(&format!("Expected object property, found {}", token)));
                 }
             }
         }

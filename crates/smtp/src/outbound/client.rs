@@ -1,35 +1,32 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
-
-use mail_send::{smtp::AssertReply, Credentials};
+use super::session::SessionParams;
+use crate::queue::{Error, ErrorDetails, HostResponse, MessageWrapper, Status};
+use mail_send::{Credentials, smtp::AssertReply};
 use rustls::ClientConnection;
 use rustls_pki_types::ServerName;
 use smtp_proto::{
+    AUTH_CRAM_MD5, AUTH_DIGEST_MD5, AUTH_LOGIN, AUTH_OAUTHBEARER, AUTH_PLAIN, AUTH_XOAUTH2,
+    EXT_START_TLS, EhloResponse, Response,
     response::{
         generate::BitToString,
-        parser::{ResponseReceiver, MAX_RESPONSE_LENGTH},
+        parser::{MAX_RESPONSE_LENGTH, ResponseReceiver},
     },
-    EhloResponse, Response, AUTH_CRAM_MD5, AUTH_DIGEST_MD5, AUTH_LOGIN, AUTH_OAUTHBEARER,
-    AUTH_PLAIN, AUTH_XOAUTH2, EXT_START_TLS,
+};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpSocket, TcpStream},
 };
-use tokio_rustls::{client::TlsStream, TlsConnector};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 use trc::DeliveryEvent;
-
-use crate::queue::{Error, Message, Status};
-
-use super::session::SessionParams;
 
 pub struct SmtpClient<T: AsyncRead + AsyncWrite> {
     pub stream: T,
@@ -128,7 +125,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SmtpClient<T> {
         Err(mail_send::Error::UnexpectedReply(reply))
     }
 
-    pub async fn read_greeting(&mut self, hostname: &str) -> Result<(), Status<(), Error>> {
+    pub async fn read_greeting(
+        &mut self,
+        hostname: &str,
+    ) -> Result<(), Status<HostResponse<String>, ErrorDetails>> {
         tokio::time::timeout(self.timeout, self.read())
             .await
             .map_err(|_| Status::timeout(hostname, "reading greeting"))?
@@ -140,7 +140,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SmtpClient<T> {
         &mut self,
         hostname: &str,
         bdat_cmd: &Option<String>,
-    ) -> Result<Response<String>, Status<(), Error>> {
+    ) -> Result<Response<String>, Status<HostResponse<String>, ErrorDetails>> {
         tokio::time::timeout(self.timeout, self.read())
             .await
             .map_err(|_| Status::timeout(hostname, "reading SMTP DATA response"))?
@@ -153,7 +153,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SmtpClient<T> {
         &mut self,
         hostname: &str,
         num_responses: usize,
-    ) -> Result<Vec<Response<String>>, Status<(), Error>> {
+    ) -> Result<Vec<Response<String>>, Status<HostResponse<String>, ErrorDetails>> {
         tokio::time::timeout(self.timeout, async { self.read_many(num_responses).await })
             .await
             .map_err(|_| Status::timeout(hostname, "reading LMTP DATA responses"))?
@@ -172,67 +172,76 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SmtpClient<T> {
 
     pub async fn send_message(
         &mut self,
-        message: &Message,
+        message: &MessageWrapper,
         bdat_cmd: &Option<String>,
         params: &SessionParams<'_>,
-    ) -> Result<(), Status<(), Error>> {
+    ) -> Result<(), Status<HostResponse<String>, ErrorDetails>> {
         match params
             .server
             .blob_store()
-            .get_blob(message.blob_hash.as_slice(), 0..usize::MAX)
+            .get_blob(message.message.blob_hash.as_slice(), 0..usize::MAX)
             .await
         {
-            Ok(Some(raw_message)) => tokio::time::timeout(params.timeout_data, async {
-                if let Some(bdat_cmd) = bdat_cmd {
-                    trc::event!(
-                        Delivery(DeliveryEvent::RawOutput),
-                        SpanId = self.session_id,
-                        Contents = bdat_cmd.clone(),
-                        Size = bdat_cmd.len()
-                    );
+            Ok(Some(raw_message)) => {
+                tokio::time::timeout(params.conn_strategy.timeout_data, async {
+                    if let Some(bdat_cmd) = bdat_cmd {
+                        trc::event!(
+                            Delivery(DeliveryEvent::RawOutput),
+                            SpanId = self.session_id,
+                            Contents = bdat_cmd.clone(),
+                            Size = bdat_cmd.len()
+                        );
 
-                    self.write_chunks(&[bdat_cmd.as_bytes(), &raw_message])
-                        .await
-                } else {
-                    trc::event!(
-                        Delivery(DeliveryEvent::RawOutput),
-                        SpanId = self.session_id,
-                        Contents = "DATA\r\n",
-                        Size = 6
-                    );
+                        self.write_chunks(&[bdat_cmd.as_bytes(), &raw_message])
+                            .await
+                    } else {
+                        trc::event!(
+                            Delivery(DeliveryEvent::RawOutput),
+                            SpanId = self.session_id,
+                            Contents = "DATA\r\n",
+                            Size = 6
+                        );
 
-                    self.write_chunks(&[b"DATA\r\n"]).await?;
-                    self.read().await?.assert_code(354)?;
-                    self.write_message(&raw_message)
-                        .await
-                        .map_err(mail_send::Error::from)
-                }
-            })
-            .await
-            .map_err(|_| Status::timeout(params.hostname, "sending message"))?
-            .map_err(|err| {
-                Status::from_smtp_error(params.hostname, bdat_cmd.as_deref().unwrap_or("DATA"), err)
-            }),
+                        self.write_chunks(&[b"DATA\r\n"]).await?;
+                        self.read().await?.assert_code(354)?;
+                        self.write_message(&raw_message)
+                            .await
+                            .map_err(mail_send::Error::from)
+                    }
+                })
+                .await
+                .map_err(|_| Status::timeout(params.hostname, "sending message"))?
+                .map_err(|err| {
+                    Status::from_smtp_error(
+                        params.hostname,
+                        bdat_cmd.as_deref().unwrap_or("DATA"),
+                        err,
+                    )
+                })
+            }
             Ok(None) => {
                 trc::event!(
                     Queue(trc::QueueEvent::BlobNotFound),
                     SpanId = message.span_id,
-                    BlobId = message.blob_hash.to_hex(),
+                    BlobId = message.message.blob_hash.to_hex(),
                     CausedBy = trc::location!()
                 );
-                Err(Status::TemporaryFailure(Error::Io(
-                    "Queue system error.".to_string(),
-                )))
+                Err(Status::TemporaryFailure(ErrorDetails {
+                    entity: "localhost".to_string(),
+                    details: Error::Io("Queue system error.".into()),
+                }))
             }
             Err(err) => {
-                trc::error!(err
-                    .span_id(message.span_id)
-                    .details("Failed to fetch blobId")
-                    .caused_by(trc::location!()));
+                trc::error!(
+                    err.span_id(message.span_id)
+                        .details("Failed to fetch blobId")
+                        .caused_by(trc::location!())
+                );
 
-                Err(Status::TemporaryFailure(Error::Io(
-                    "Queue system error.".to_string(),
-                )))
+                Err(Status::TemporaryFailure(ErrorDetails {
+                    entity: "localhost".to_string(),
+                    details: Error::Io("Queue system error.".into()),
+                }))
             }
         }
     }
@@ -240,7 +249,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SmtpClient<T> {
     pub async fn say_helo(
         &mut self,
         params: &SessionParams<'_>,
-    ) -> Result<EhloResponse<String>, Status<(), Error>> {
+    ) -> Result<EhloResponse<String>, Status<HostResponse<String>, ErrorDetails>> {
         let cmd = if params.is_smtp {
             format!("EHLO {}\r\n", params.local_hostname)
         } else {
@@ -254,7 +263,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SmtpClient<T> {
             Size = cmd.len()
         );
 
-        tokio::time::timeout(params.timeout_ehlo, async {
+        tokio::time::timeout(params.conn_strategy.timeout_ehlo, async {
             self.stream.write_all(cmd.as_bytes()).await?;
             self.stream.flush().await?;
             self.read_ehlo().await
@@ -603,6 +612,7 @@ impl SmtpClient<TlsStream<TcpStream>> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum StartTlsResult {
     Success {
         smtp_client: SmtpClient<TlsStream<TcpStream>>,
@@ -644,28 +654,35 @@ pub(crate) fn from_mail_send_error(error: &mail_send::Error) -> trc::Error {
     }
 }
 
-pub(crate) fn from_error_status(status: &Status<(), Error>) -> trc::Error {
-    let event = trc::EventType::Smtp(trc::SmtpEvent::Error).into_err();
-    let err = match status {
-        Status::TemporaryFailure(err) | Status::PermanentFailure(err) => err,
-        Status::Scheduled | Status::Completed(_) => return event, // This should not happen
-    };
+pub(crate) fn from_error_status(err: &Status<HostResponse<String>, ErrorDetails>) -> trc::Error {
+    match err {
+        Status::Scheduled | Status::Completed(_) => {
+            trc::EventType::Smtp(trc::SmtpEvent::Error).into_err()
+        }
+        Status::TemporaryFailure(err) | Status::PermanentFailure(err) => {
+            from_error_details(&err.details)
+        }
+    }
+}
 
+pub(crate) fn from_error_details(err: &Error) -> trc::Error {
+    let event = trc::EventType::Smtp(trc::SmtpEvent::Error).into_err();
     match err {
         Error::DnsError(err) => event.details("DNS Error").reason(err),
         Error::UnexpectedResponse(reply) => event
             .details("Unexpected SMTP Response")
             .ctx(trc::Key::Code, reply.response.code)
+            .ctx(trc::Key::Details, reply.command.clone())
             .ctx(trc::Key::Reason, reply.response.message.clone()),
         Error::ConnectionError(err) => event
             .details("Connection Error")
-            .ctx(trc::Key::Reason, err.details.clone()),
+            .ctx(trc::Key::Reason, err.clone()),
         Error::TlsError(err) => event
             .details("TLS Error")
-            .ctx(trc::Key::Reason, err.details.clone()),
+            .ctx(trc::Key::Reason, err.clone()),
         Error::DaneError(err) => event
             .details("DANE Error")
-            .ctx(trc::Key::Reason, err.details.clone()),
+            .ctx(trc::Key::Reason, err.clone()),
         Error::MtaStsError(err) => event.details("MTA-STS Error").reason(err),
         Error::RateLimited => event.details("Rate Limited"),
         Error::ConcurrencyLimited => event.details("Concurrency Limited"),

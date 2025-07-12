@@ -1,10 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::collections::HashMap;
+
+use compact_str::ToCompactString;
 
 use crate::{
     method::{
@@ -21,15 +23,15 @@ use crate::{
         upload::BlobUploadRequest,
         validate::ValidateSieveScriptRequest,
     },
-    parser::{json::Parser, Ignore, JsonObjectParser, Token},
+    parser::{Ignore, JsonObjectParser, Token, json::Parser},
     types::any_id::AnyId,
 };
 
 use super::{
+    Call, Request, RequestMethod,
     capability::Capability,
     echo::Echo,
     method::{MethodFunction, MethodName, MethodObject},
-    Call, Request, RequestMethod,
 };
 
 impl Request {
@@ -177,7 +179,7 @@ impl Request {
                             }
                             _ => Err(trc::JmapEvent::UnknownMethod
                                 .into_err()
-                                .details(method_name.to_string())),
+                                .details(method_name.to_compact_string())),
                         };
 
                         let method = match method {

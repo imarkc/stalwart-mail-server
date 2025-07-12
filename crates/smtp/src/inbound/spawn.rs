@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,6 +11,7 @@ use common::{
     core::BuildServer,
     listener::{self, SessionManager, SessionStream},
 };
+
 use tokio_rustls::server::TlsStream;
 use trc::{SecurityEvent, SmtpEvent};
 
@@ -33,7 +34,7 @@ impl SessionManager for SmtpSessionManager {
                 server.lookup_asn_country(session.remote_ip).await,
                 session.session_id,
             ),
-            hostname: String::new(),
+            hostname: "".into(),
             server,
             instance: session.instance,
             state: State::default(),
@@ -125,7 +126,7 @@ impl<T: SessionStream> Session<T> {
                 Smtp(SmtpEvent::MissingLocalHostname),
                 SpanId = self.data.session_id,
             );
-            self.hostname = "localhost".to_string();
+            self.hostname = "localhost".into();
         }
 
         // Obtain greeting

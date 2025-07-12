@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::{Duration, Instant};
 
-use common::{config::smtp::report::AggregateFrequency, Core};
+use common::{Core, config::smtp::report::AggregateFrequency};
 
 use mail_auth::{
     common::{parse::TxtRecordParser, verify::DomainKey},
@@ -19,9 +19,9 @@ use store::Stores;
 use utils::config::Config;
 
 use crate::smtp::{
-    inbound::{sign::SIGNATURES, TestMessage, TestReportingEvent},
-    session::{TestSession, VerifyResponse},
     DnsCache, TempDir, TestSMTP,
+    inbound::{TestMessage, TestReportingEvent, sign::SIGNATURES},
+    session::{TestSession, VerifyResponse},
 };
 use smtp::core::Session;
 
@@ -166,7 +166,7 @@ async fn dmarc() {
     let mut rr = test.report_receiver;
     let mut qr = test.queue_receiver;
     let mut session = Session::test(test.server.clone());
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
     session.eval_session_params().await;
     session.ehlo("mx.example.com").await;
@@ -175,7 +175,7 @@ async fn dmarc() {
     // Expect SPF auth failure report
     let message = qr.expect_message().await;
     assert_eq!(
-        message.recipients.last().unwrap().address,
+        message.message.recipients.last().unwrap().address,
         "spf-failures@example.com"
     );
     message
@@ -191,7 +191,7 @@ async fn dmarc() {
     qr.assert_no_events();
 
     // Invalid DKIM signatures should be rejected
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.data.remote_ip = session.data.remote_ip_str.parse().unwrap();
     session.eval_session_params().await;
     session
@@ -206,7 +206,7 @@ async fn dmarc() {
     // Expect DKIM auth failure report
     let message = qr.expect_message().await;
     assert_eq!(
-        message.recipients.last().unwrap().address,
+        message.message.recipients.last().unwrap().address,
         "dkim-failures@example.com"
     );
     message
@@ -257,7 +257,7 @@ async fn dmarc() {
     // Expect DMARC auth failure report
     let message = qr.expect_message().await;
     assert_eq!(
-        message.recipients.last().unwrap().address,
+        message.message.recipients.last().unwrap().address,
         "dmarc-failures@example.com"
     );
     message

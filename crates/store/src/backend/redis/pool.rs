@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,7 +10,7 @@ use redis::{
     cluster_async::ClusterConnection,
 };
 
-use super::{into_error, RedisClusterConnectionManager, RedisConnectionManager};
+use super::{RedisClusterConnectionManager, RedisConnectionManager, into_error};
 
 impl managed::Manager for RedisConnectionManager {
     type Type = MultiplexedConnection;

@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{quoted_string, ImapResponse};
+use super::{ImapResponse, quoted_string};
 
 pub struct Response {
     pub shared_prefix: Option<String>,

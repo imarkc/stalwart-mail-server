@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -34,9 +34,13 @@ pub async fn test(mut imap: &mut ImapConnection, mut imap_check: &mut ImapConnec
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
     imap.send("CREATE \"Fruit/Apple/Green\"").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.send("CREATE \"L&APg-bende opgaver\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
 
     // Select folder from another connection
     other_conn.send("SELECT \"Tofu\"").await;
+    other_conn.assert_read(Type::Tagged, ResponseType::Ok).await;
+    other_conn.send("SELECT \"L&APg-bende opgaver\"").await;
     other_conn.assert_read(Type::Tagged, ResponseType::Ok).await;
 
     // Make sure folders are visible
@@ -52,10 +56,13 @@ pub async fn test(mut imap: &mut ImapConnection, mut imap_check: &mut ImapConnec
                     ("Fruit/Apple", [""]),
                     ("Fruit/Apple/Green", [""]),
                     ("Tofu", [""]),
+                    ("L&APg-bende opgaver", [""]),
                 ],
                 true,
             );
     }
+    imap.send("DELETE \"L&APg-bende opgaver\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
 
     // Special use folders that already exist should not be allowed
     imap.send("CREATE \"Second trash\" (USE (\\Trash))").await;
@@ -63,6 +70,16 @@ pub async fn test(mut imap: &mut ImapConnection, mut imap_check: &mut ImapConnec
 
     // Enable IMAP4rev2
     imap.send("ENABLE IMAP4rev2").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+
+    // Create and delete using IMAP4rev2
+    imap.send("CREATE \"L&APg-bende opgaver\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.send("SELECT \"L&APg-bende opgaver\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.send("UNSELECT \"L&APg-bende opgaver\"").await;
+    imap.assert_read(Type::Tagged, ResponseType::Ok).await;
+    imap.send("DELETE \"L&APg-bende opgaver\"").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
 
     // Create missing parent folders
@@ -109,7 +126,7 @@ pub async fn test(mut imap: &mut ImapConnection, mut imap_check: &mut ImapConnec
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
     imap.send("RENAME \"Tofu\" \"INBOX\"").await;
     imap.assert_read(Type::Tagged, ResponseType::No).await;
-    imap.send("RENAME \"Tofu\" \"INBOX/Tofu\"").await;
+    imap.send("RENAME \"Tofu\" \"Inbox/Tofu\"").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
     imap.send("RENAME \"Deleted Items\" \"Recycle Bin\"").await;
     imap.assert_read(Type::Tagged, ResponseType::Ok).await;
@@ -367,7 +384,7 @@ fn mailbox_matches_pattern() {
         ),
         ("foobar*test", vec!["foobar/test", "foobar/test/test"]),
     ] {
-        let patterns = vec![pattern.to_string()];
+        let patterns = vec![pattern.into()];
         let mut matched_mailboxes = Vec::new();
         for mailbox in mailboxes {
             if matches_pattern(&patterns, mailbox) {

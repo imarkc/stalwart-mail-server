@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -323,7 +323,7 @@ impl Mechanism {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{request::Error, Command, Mechanism};
+    use crate::protocol::{Command, Mechanism, request::Error};
 
     use super::Parser;
 

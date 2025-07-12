@@ -1,19 +1,24 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::Server;
-use directory::{backend::internal::PrincipalField, QueryBy};
+use common::{Server, storage::index::ObjectIndexBuilder};
+use directory::QueryBy;
+use email::identity::{ArchivedEmailAddress, Identity};
 use jmap_proto::{
     method::get::{GetRequest, GetResponse, RequestArguments},
-    object::Object,
-    types::{collection::Collection, property::Property, value::Value},
+    types::{
+        collection::{Collection, SyncCollection},
+        property::Property,
+        value::{Object, Value},
+    },
 };
 use store::{
+    rkyv::{option::ArchivedOption, vec::ArchivedVec},
     roaring::RoaringBitmap,
-    write::{BatchBuilder, F_VALUE},
+    write::BatchBuilder,
 };
 use trc::AddContext;
 use utils::sanitize_email;
@@ -64,7 +69,7 @@ impl IdentityGet for Server {
         let mut response = GetResponse {
             account_id: request.account_id.into(),
             state: self
-                .get_state(account_id, Collection::Identity)
+                .get_state(account_id, SyncCollection::Identity)
                 .await?
                 .into(),
             list: Vec::with_capacity(ids.len()),
@@ -78,13 +83,8 @@ impl IdentityGet for Server {
                 response.not_found.push(id.into());
                 continue;
             }
-            let mut identity = if let Some(identity) = self
-                .get_property::<Object<Value>>(
-                    account_id,
-                    Collection::Identity,
-                    document_id,
-                    Property::Value,
-                )
+            let _identity = if let Some(identity) = self
+                .get_archive(account_id, Collection::Identity, document_id)
                 .await?
             {
                 identity
@@ -92,6 +92,9 @@ impl IdentityGet for Server {
                 response.not_found.push(id.into());
                 continue;
             };
+            let identity = _identity
+                .unarchive::<Identity>()
+                .caused_by(trc::location!())?;
             let mut result = Object::with_capacity(properties.len());
             for property in &properties {
                 match property {
@@ -101,17 +104,26 @@ impl IdentityGet for Server {
                     Property::MayDelete => {
                         result.append(Property::MayDelete, Value::Bool(true));
                     }
-                    Property::TextSignature | Property::HtmlSignature => {
-                        result.append(
-                            property.clone(),
-                            identity
-                                .properties
-                                .remove(property)
-                                .unwrap_or(Value::Text(String::new())),
-                        );
+                    Property::Name => {
+                        result.append(Property::Name, identity.name.to_string());
+                    }
+                    Property::Email => {
+                        result.append(Property::Email, identity.email.to_string());
+                    }
+                    Property::TextSignature => {
+                        result.append(Property::TextSignature, identity.text_signature.to_string());
+                    }
+                    Property::HtmlSignature => {
+                        result.append(Property::HtmlSignature, identity.html_signature.to_string());
+                    }
+                    Property::Bcc => {
+                        result.append(Property::Bcc, email_to_value(&identity.bcc));
+                    }
+                    Property::ReplyTo => {
+                        result.append(Property::ReplyTo, email_to_value(&identity.reply_to));
                     }
                     property => {
-                        result.append(property.clone(), identity.remove(property));
+                        result.append(property.clone(), Value::Null);
                     }
                 }
             }
@@ -131,15 +143,19 @@ impl IdentityGet for Server {
         }
 
         // Obtain principal
-        let principal = self
+        let principal = if let Some(principal) = self
             .core
             .storage
             .directory
             .query(QueryBy::Id(account_id), false)
             .await
             .caused_by(trc::location!())?
-            .unwrap_or_default();
-        let num_emails = principal.field_len(PrincipalField::Emails);
+        {
+            principal
+        } else {
+            return Ok(identity_ids);
+        };
+        let num_emails = principal.emails.len();
         if num_emails == 0 {
             return Ok(identity_ids);
         }
@@ -150,41 +166,55 @@ impl IdentityGet for Server {
             .with_collection(Collection::Identity);
 
         // Create identities
-        let name = principal
-            .description()
-            .unwrap_or(principal.name())
-            .trim()
-            .to_string();
-        let has_many = num_emails > 1;
-        for (idx, email) in principal.iter_str(PrincipalField::Emails).enumerate() {
-            let document_id = idx as u32;
+        let name = principal.description.unwrap_or(principal.name);
+        let mut next_document_id = self
+            .store()
+            .assign_document_ids(account_id, Collection::Identity, num_emails as u64)
+            .await
+            .caused_by(trc::location!())?;
+        for email in &principal.emails {
             let email = sanitize_email(email).unwrap_or_default();
-            if email.is_empty() {
+            if email.is_empty() || email.starts_with('@') {
                 continue;
             }
             let name = if name.is_empty() {
                 email.clone()
-            } else if has_many {
-                format!("{} <{}>", name, email)
             } else {
                 name.clone()
             };
-            batch.create_document_with_id(document_id).value(
-                Property::Value,
-                Object::with_capacity(4)
-                    .with_property(Property::Name, name)
-                    .with_property(Property::Email, email),
-                F_VALUE,
-            );
+            let document_id = next_document_id;
+            next_document_id -= 1;
+            batch
+                .create_document(document_id)
+                .custom(ObjectIndexBuilder::<(), _>::new().with_changes(Identity {
+                    name,
+                    email,
+                    ..Default::default()
+                }))
+                .caused_by(trc::location!())?;
             identity_ids.insert(document_id);
         }
-        self.core
-            .storage
-            .data
-            .write(batch.build())
-            .await
-            .caused_by(trc::location!())?;
+        self.commit_batch(batch).await.caused_by(trc::location!())?;
 
         Ok(identity_ids)
+    }
+}
+
+fn email_to_value(email: &ArchivedOption<ArchivedVec<ArchivedEmailAddress>>) -> Value {
+    if let ArchivedOption::Some(email) = email {
+        Value::List(
+            email
+                .iter()
+                .map(|email| {
+                    Value::Object(
+                        Object::with_capacity(2)
+                            .with_property(Property::Name, &email.name)
+                            .with_property(Property::Email, &email.email),
+                    )
+                })
+                .collect(),
+        )
+    } else {
+        Value::Null
     }
 }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -14,7 +14,7 @@ use futures::stream::StreamExt;
 use std::sync::Arc;
 use utils::{
     codec::base32_custom::Base32Writer,
-    config::{utils::AsKey, Config},
+    config::{Config, utils::AsKey},
 };
 
 pub struct AzureStore {
@@ -193,7 +193,7 @@ impl AzureStore {
     fn build_key(&self, key: &[u8]) -> String {
         if let Some(prefix) = &self.prefix {
             let mut writer =
-                Base32Writer::with_raw_capacity(prefix.len() + ((key.len() + 3) / 4 * 5));
+                Base32Writer::with_raw_capacity(prefix.len() + (key.len().div_ceil(4) * 5));
             writer.push_string(prefix);
             writer.write_all(key).unwrap();
             writer.finalize()

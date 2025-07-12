@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{capability::QuotaResourceName, quoted_string, ImapResponse};
+use super::{ImapResponse, capability::QuotaResourceName, quoted_string};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {
@@ -79,7 +79,7 @@ impl ImapResponse for Response {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{capability::QuotaResourceName, ImapResponse};
+    use crate::protocol::{ImapResponse, capability::QuotaResourceName};
 
     use super::{QuotaItem, QuotaResource};
 
@@ -88,7 +88,7 @@ mod tests {
         for (response, expected) in [
             (
                 super::Response {
-                    quota_root_items: vec!["INBOX".to_string(), "#test".to_string()],
+                    quota_root_items: vec!["INBOX".into(), "#test".into()],
                     quota_items: vec![],
                 },
                 "* QUOTAROOT \"INBOX\" \"#test\"\r\n",
@@ -97,7 +97,7 @@ mod tests {
                 super::Response {
                     quota_root_items: vec![],
                     quota_items: vec![QuotaItem {
-                        name: "INBOX".to_string(),
+                        name: "INBOX".into(),
                         resources: vec![QuotaResource {
                             resource: QuotaResourceName::Storage,
                             total: 1073741824,
@@ -109,9 +109,9 @@ mod tests {
             ),
             (
                 super::Response {
-                    quota_root_items: vec!["my mailbox".to_string(), "".to_string()],
+                    quota_root_items: vec!["my mailbox".into(), "".into()],
                     quota_items: vec![QuotaItem {
-                        name: "INBOX".to_string(),
+                        name: "INBOX".into(),
                         resources: vec![
                             QuotaResource {
                                 resource: QuotaResourceName::Storage,

@@ -1,25 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use email::{
+    cache::{MessageCacheFetch, email::MessageCacheAccess},
+    mailbox::{INBOX_ID, JUNK_ID},
+};
+use jmap_proto::types::{collection::Collection, id::Id};
 use std::time::Duration;
 
-use email::mailbox::{INBOX_ID, JUNK_ID};
-use jmap_proto::types::{collection::Collection, id::Id, property::Property};
-
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf},
-    net::TcpStream,
-};
-
+use super::JMAPTest;
 use crate::{
     directory::internal::TestInternalDirectory,
     jmap::{assert_is_empty, mailbox::destroy_all_mailboxes},
 };
-
-use super::JMAPTest;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf},
+    net::TcpStream,
+};
 
 pub async fn test(params: &mut JMAPTest) {
     println!("Running message delivery tests...");
@@ -98,6 +98,8 @@ pub async fn test(params: &mut JMAPTest) {
     let john_id = Id::from_bytes(account_id_1.as_bytes())
         .unwrap()
         .document_id();
+    let john_cache = server.get_cached_messages(john_id).await.unwrap();
+
     assert_eq!(
         server
             .get_document_ids(john_id, Collection::Email)
@@ -107,23 +109,8 @@ pub async fn test(params: &mut JMAPTest) {
             .len(),
         1
     );
-    assert_eq!(
-        server
-            .get_tag(john_id, Collection::Email, Property::MailboxIds, INBOX_ID)
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        server
-            .get_tag(john_id, Collection::Email, Property::MailboxIds, JUNK_ID)
-            .await
-            .unwrap()
-            .map_or(0, |bm| bm.len()),
-        0
-    );
+    assert_eq!(john_cache.in_mailbox(INBOX_ID).count(), 1);
+    assert_eq!(john_cache.in_mailbox(JUNK_ID).count(), 0);
 
     // Delivering to individuals' aliases
     lmtp.ingest(
@@ -141,6 +128,7 @@ pub async fn test(params: &mut JMAPTest) {
         ),
     )
     .await;
+    let john_cache = server.get_cached_messages(john_id).await.unwrap();
 
     assert_eq!(
         server
@@ -151,24 +139,8 @@ pub async fn test(params: &mut JMAPTest) {
             .len(),
         2
     );
-    assert_eq!(
-        server
-            .get_tag(john_id, Collection::Email, Property::MailboxIds, INBOX_ID)
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        server
-            .get_tag(john_id, Collection::Email, Property::MailboxIds, JUNK_ID)
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(john_cache.in_mailbox(INBOX_ID).count(), 1);
+    assert_eq!(john_cache.in_mailbox(JUNK_ID).count(), 1);
 
     // EXPN and VRFY
     lmtp.expn("members@example.com", 2)

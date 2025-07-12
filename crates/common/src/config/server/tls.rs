@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -13,18 +13,18 @@ use std::{
 
 use ahash::{AHashMap, AHashSet};
 use base64::{
-    engine::general_purpose::{self, STANDARD},
     Engine,
+    engine::general_purpose::{self, STANDARD},
 };
-use dns_update::{providers::rfc2136::DnsAddress, DnsUpdater, TsigAlgorithm};
+use dns_update::{DnsUpdater, TsigAlgorithm, providers::rfc2136::DnsAddress};
 use rcgen::generate_simple_self_signed;
 use rustls::{
+    SupportedProtocolVersion,
     crypto::ring::sign::any_supported_type,
     sign::CertifiedKey,
     version::{TLS12, TLS13},
-    SupportedProtocolVersion,
 };
-use rustls_pemfile::{certs, read_one, Item};
+use rustls_pemfile::{Item, certs, read_one};
 use rustls_pki_types::PrivateKeyDer;
 use utils::config::Config;
 use x509_parser::{
@@ -35,7 +35,7 @@ use x509_parser::{
 
 use crate::listener::{
     acme::{
-        directory::LETS_ENCRYPT_PRODUCTION_DIRECTORY, AcmeProvider, ChallengeSettings, EabSettings,
+        AcmeProvider, ChallengeSettings, EabSettings, directory::LETS_ENCRYPT_PRODUCTION_DIRECTORY,
     },
     tls::AcmeProviders,
 };
@@ -48,11 +48,7 @@ impl AcmeProviders {
         let mut providers = AHashMap::new();
 
         // Parse ACME providers
-        'outer: for acme_id in config
-            .sub_keys("acme", ".directory")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        'outer: for acme_id in config.sub_keys("acme", ".directory") {
             let acme_id = acme_id.as_str();
             let directory = config
                 .value(("acme", acme_id, "directory"))
@@ -63,11 +59,7 @@ impl AcmeProviders {
                 .values(("acme", acme_id, "contact"))
                 .filter_map(|(_, v)| {
                     let v = v.trim().to_string();
-                    if !v.is_empty() {
-                        Some(v)
-                    } else {
-                        None
-                    }
+                    if !v.is_empty() { Some(v) } else { None }
                 })
                 .collect::<Vec<_>>();
             let renew_before: Duration = config
@@ -273,11 +265,7 @@ pub(crate) fn parse_certificates(
     subject_names: &mut AHashSet<String>,
 ) {
     // Parse certificates
-    for cert_id in config
-        .sub_keys("certificate", ".cert")
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-    {
+    for cert_id in config.sub_keys("certificate", ".cert") {
         let cert_id = cert_id.as_str();
         let key_cert = ("certificate", cert_id, "cert");
         let key_pk = ("certificate", cert_id, "private-key");

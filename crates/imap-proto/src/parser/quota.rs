@@ -1,14 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{quota, ProtocolVersion},
-    receiver::{bad, Request},
-    utf7::utf7_maybe_decode,
     Command,
+    protocol::{ProtocolVersion, quota},
+    receiver::{Request, bad},
+    utf7::utf7_maybe_decode,
 };
 
 impl Request<Command> {
@@ -21,7 +23,7 @@ impl Request<Command> {
                         .next()
                         .unwrap()
                         .unwrap_string()
-                        .map_err(|v| bad(self.tag.clone(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                     version,
                 ),
                 tag: self.tag,
@@ -40,7 +42,7 @@ impl Request<Command> {
                     .next()
                     .unwrap()
                     .unwrap_string()
-                    .map_err(|v| bad(self.tag.clone(), v))?,
+                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                 tag: self.tag,
             }),
             0 => Err(self.into_error("Missing quota root.")),
@@ -52,7 +54,7 @@ impl Request<Command> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        protocol::{quota, ProtocolVersion},
+        protocol::{ProtocolVersion, quota},
         receiver::Receiver,
     };
 
@@ -63,8 +65,8 @@ mod tests {
         let (command, arguments) = (
             "A142 GETQUOTAROOT INBOX\r\n",
             quota::Arguments {
-                name: "INBOX".to_string(),
-                tag: "A142".to_string(),
+                name: "INBOX".into(),
+                tag: "A142".into(),
             },
         );
         assert_eq!(
@@ -79,8 +81,8 @@ mod tests {
         let (command, arguments) = (
             "A142 GETQUOTA \"my funky mailbox\"\r\n",
             quota::Arguments {
-                name: "my funky mailbox".to_string(),
-                tag: "A142".to_string(),
+                name: "my funky mailbox".into(),
+                tag: "A142".into(),
             },
         );
         assert_eq!(

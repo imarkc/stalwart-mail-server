@@ -1,17 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use jmap_proto::{
-    parser::{json::Parser, JsonObjectParser},
-    types::{collection::Collection, id::Id, state::State},
+    parser::{JsonObjectParser, json::Parser},
+    types::{
+        collection::{Collection, SyncCollection},
+        id::Id,
+        state::State,
+    },
 };
-use store::{
-    ahash::AHashSet,
-    write::{log::ChangeLogBuilder, BatchBuilder},
-};
+use store::{ahash::AHashSet, write::BatchBuilder};
 
 use crate::jmap::assert_is_empty;
 
@@ -24,7 +25,7 @@ pub async fn test(params: &mut JMAPTest) {
     params.client.set_default_account_id(Id::new(1));
     let mut states = vec![State::Initial];
 
-    for (change_id, (changes, expected_changelog)) in [
+    for (changes, expected_changelog) in [
         (
             vec![
                 LogAction::Insert(0),
@@ -135,18 +136,36 @@ pub async fn test(params: &mut JMAPTest) {
         ),
     ]
     .into_iter()
-    .enumerate()
     {
-        let mut changelog = ChangeLogBuilder::with_change_id(change_id as u64);
+        let mut batch = BatchBuilder::new();
+        batch.with_account_id(1).with_collection(Collection::Email);
 
         for change in changes {
             match change {
-                LogAction::Insert(id) => changelog.log_insert(Collection::Email, id),
-                LogAction::Update(id) => changelog.log_update(Collection::Email, id),
-                LogAction::Delete(id) => changelog.log_delete(Collection::Email, id),
-                LogAction::UpdateChild(id) => changelog.log_child_update(Collection::Email, id),
+                LogAction::Insert(id) => {
+                    batch
+                        .update_document(id as u32)
+                        .log_item_insert(SyncCollection::Email, None);
+                }
+                LogAction::Update(id) => {
+                    batch
+                        .update_document(id as u32)
+                        .log_item_update(SyncCollection::Email, None);
+                }
+                LogAction::Delete(id) => {
+                    batch
+                        .update_document(id as u32)
+                        .log_item_delete(SyncCollection::Email, None);
+                }
+                LogAction::UpdateChild(id) => {
+                    batch.log_container_property_change(SyncCollection::Email, id as u32);
+                }
                 LogAction::Move(old_id, new_id) => {
-                    changelog.log_move(Collection::Email, old_id, new_id)
+                    batch
+                        .update_document(old_id as u32)
+                        .log_item_delete(SyncCollection::Email, None)
+                        .update_document(new_id as u32)
+                        .log_item_insert(SyncCollection::Email, None);
                 }
             }
         }
@@ -155,13 +174,7 @@ pub async fn test(params: &mut JMAPTest) {
             .core
             .storage
             .data
-            .write(
-                BatchBuilder::new()
-                    .with_account_id(1)
-                    .with_collection(Collection::Email)
-                    .custom(changelog)
-                    .build_batch(),
-            )
+            .write(batch.build_all())
             .await
             .unwrap();
 
@@ -294,7 +307,7 @@ pub async fn test(params: &mut JMAPTest) {
 
     let changes = params
         .client
-        .email_changes(State::Initial.to_string(), 0.into())
+        .email_changes(State::Initial.to_string(), None)
         .await
         .unwrap();
     let mut created = changes

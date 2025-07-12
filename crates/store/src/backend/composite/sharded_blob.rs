@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: LicenseRef-SEL
  *
@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use utils::config::{utils::AsKey, Config};
+use utils::config::{Config, utils::AsKey};
 
 use crate::{BlobBackend, Store, Stores};
 

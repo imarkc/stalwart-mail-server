@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,19 +7,21 @@
 use std::sync::Arc;
 
 use ahash::AHashMap;
-use common::{config::server::Listeners, listener::SessionData, Caches, Core, Data, Inner};
-use hyper::{body, server::conn::http1, service::service_fn, Method, Uri};
+use common::{Caches, Core, Data, Inner, config::server::Listeners, listener::SessionData};
+use http_proto::{HttpResponse, request::fetch_body};
+use hyper::{Method, Uri, body, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
-use jmap::api::{http::fetch_body, HttpResponse};
 use tokio::sync::watch;
 use utils::config::Config;
 
-use crate::{add_test_certs, AssertConfig};
+use crate::{AssertConfig, add_test_certs};
 
 const MOCK_HTTP_SERVER: &str = r#"
 [server]
 hostname = "'oidc.example.org'"
-http.url = "'https://127.0.0.1:9090'"
+
+[http]
+url = "'https://127.0.0.1:9090'"
 
 [server.listener.jmap]
 bind = ['127.0.0.1:9090']

@@ -1,28 +1,26 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use ahash::AHashSet;
-use common::Server;
-use directory::{backend::internal::manage::ManageDirectory, QueryBy};
-use email::mailbox::{INBOX_ID, JUNK_ID, TRASH_ID};
-use imap_proto::ResponseType;
-use jmap::email::delete::EmailDeletion;
-use jmap_proto::types::{collection::Collection, id::Id, property::Property};
-use store::{
-    write::{key::DeserializeBigEndian, TagValue},
-    IterateParams, LogKey, U32_LEN, U64_LEN,
-};
-
+use super::JMAPTest;
 use crate::{
     directory::internal::TestInternalDirectory,
     imap::{AssertResult, ImapConnection, Type},
     jmap::assert_is_empty,
 };
-
-use super::JMAPTest;
+use ahash::AHashSet;
+use common::Server;
+use directory::{QueryBy, backend::internal::manage::ManageDirectory};
+use email::{
+    cache::{MessageCacheFetch, email::MessageCacheAccess},
+    mailbox::{INBOX_ID, JUNK_ID, TRASH_ID},
+    message::delete::EmailDeletion,
+};
+use imap_proto::ResponseType;
+use jmap_proto::types::{collection::Collection, id::Id};
+use store::{IterateParams, LogKey, U32_LEN, U64_LEN, write::key::DeserializeBigEndian};
 
 pub async fn test(params: &mut JMAPTest) {
     println!("Running purge tests...");
@@ -89,7 +87,9 @@ pub async fn test(params: &mut JMAPTest) {
         }
 
         if pass == 1 {
-            changes = get_changes(&server).await;
+            let (changes_, is_truncated) = get_changes(&server).await;
+            assert!(!is_truncated);
+            changes = changes_;
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         } else {
             break;
@@ -118,6 +118,7 @@ pub async fn test(params: &mut JMAPTest) {
 
     // Purge junk/trash messages and old changes
     server.purge_account(account_id).await;
+    let cache = server.get_cached_messages(account_id).await.unwrap();
 
     // Only 4 messages should remain
     assert_eq!(
@@ -129,48 +130,9 @@ pub async fn test(params: &mut JMAPTest) {
             .len(),
         4
     );
-    assert_eq!(
-        server
-            .get_tag(
-                account_id,
-                Collection::Email,
-                Property::MailboxIds,
-                TagValue::Id(INBOX_ID)
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        server
-            .get_tag(
-                account_id,
-                Collection::Email,
-                Property::MailboxIds,
-                TagValue::Id(TRASH_ID)
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        server
-            .get_tag(
-                account_id,
-                Collection::Email,
-                Property::MailboxIds,
-                TagValue::Id(JUNK_ID)
-            )
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(cache.in_mailbox(INBOX_ID).count(), 2);
+    assert_eq!(cache.in_mailbox(TRASH_ID).count(), 1);
+    assert_eq!(cache.in_mailbox(JUNK_ID).count(), 1);
 
     // Check IMAP status
     imap.send("LIST \"\" \"*\" RETURN (STATUS (MESSAGES))")
@@ -182,14 +144,16 @@ pub async fn test(params: &mut JMAPTest) {
         .assert_contains("\"Junk Mail\" (MESSAGES 1)");
 
     // Compare changes
-    let new_changes = get_changes(&server).await;
+    let (new_changes, is_truncated) = get_changes(&server).await;
     assert!(!changes.is_empty());
     assert!(!new_changes.is_empty());
-    for change in changes {
+    assert!(is_truncated);
+    for change in &changes {
         assert!(
-            !new_changes.contains(&change),
-            "Change {:?} was not purged",
-            change
+            !new_changes.contains(change),
+            "Change {change:?} was not purged, expected {} changes, got {}",
+            changes.len(),
+            new_changes.len()
         );
     }
 
@@ -204,8 +168,9 @@ pub async fn test(params: &mut JMAPTest) {
     assert_is_empty(server).await;
 }
 
-async fn get_changes(server: &Server) -> AHashSet<(u64, u8)> {
+async fn get_changes(server: &Server) -> (AHashSet<(u64, u8)>, bool) {
     let mut changes = AHashSet::new();
+    let mut is_truncated = false;
     server
         .core
         .storage
@@ -223,17 +188,20 @@ async fn get_changes(server: &Server) -> AHashSet<(u64, u8)> {
                     change_id: u64::MAX,
                 },
             )
-            .ascending()
-            .no_values(),
-            |key, _| {
-                changes.insert((
-                    key.deserialize_be_u64(key.len() - U64_LEN).unwrap(),
-                    key[U32_LEN],
-                ));
+            .ascending(),
+            |key, value| {
+                if !value.is_empty() {
+                    changes.insert((
+                        key.deserialize_be_u64(key.len() - U64_LEN).unwrap(),
+                        key[U32_LEN],
+                    ));
+                } else {
+                    is_truncated = true;
+                }
                 Ok(true)
             },
         )
         .await
         .unwrap();
-    changes
+    (changes, is_truncated)
 }

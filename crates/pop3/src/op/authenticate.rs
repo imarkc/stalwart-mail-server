@@ -1,23 +1,23 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::{
     auth::{
-        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
         AuthRequest,
+        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
     },
-    listener::{limiter::LimiterResult, SessionStream},
+    listener::{SessionStream, limiter::LimiterResult},
 };
 use directory::Permission;
 use mail_parser::decoders::base64::base64_decode;
 use mail_send::Credentials;
 
 use crate::{
-    protocol::{request, Command, Mechanism},
     Session, State,
+    protocol::{Command, Mechanism, request},
 };
 
 impl<T: SessionStream> Session<T> {
@@ -27,7 +27,7 @@ impl<T: SessionStream> Session<T> {
         mut params: Vec<String>,
     ) -> trc::Result<()> {
         match mechanism {
-            Mechanism::Plain | Mechanism::OAuthBearer => {
+            Mechanism::Plain | Mechanism::OAuthBearer | Mechanism::XOauth2 => {
                 if !params.is_empty() {
                     let credentials = base64_decode(params.pop().unwrap().as_bytes())
                         .and_then(|challenge| {

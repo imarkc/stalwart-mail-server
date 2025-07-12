@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,18 +10,17 @@ use store::xxhash_rust;
 use trc::AddContext;
 
 use crate::{
+    IntoError, Principal, PrincipalData, QueryBy, ROLE_ADMIN, ROLE_USER, Type,
     backend::{
+        RcptType,
         internal::{
             lookup::DirectoryStore,
             manage::{self, ManageDirectory, UpdatePrincipal},
-            PrincipalField,
         },
-        RcptType,
     },
-    IntoError, Principal, QueryBy, Type, ROLE_ADMIN, ROLE_USER,
 };
 
-use super::{LdapDirectory, LdapMappings};
+use super::{AuthBind, LdapDirectory, LdapMappings};
 
 impl LdapDirectory {
     pub async fn query(
@@ -30,18 +29,18 @@ impl LdapDirectory {
         return_member_of: bool,
     ) -> trc::Result<Option<Principal>> {
         let mut conn = self.pool.get().await.map_err(|err| err.into_error())?;
-
-        let (mut external_principal, stored_principal) = match by {
+        let (mut external_principal, member_of, stored_principal) = match by {
             QueryBy::Name(username) => {
-                if let Some(principal) = self
-                    .find_principal(&mut conn, &self.mappings.filter_name.build(username))
-                    .await?
-                {
-                    (
-                        principal.with_field(PrincipalField::Name, username.to_string()),
-                        None,
-                    )
+                let filter = self.mappings.filter_name.build(username);
+                if let Some(mut result) = self.find_principal(&mut conn, &filter).await? {
+                    result.principal.name = username.into();
+                    (result.principal, result.member_of, None)
                 } else {
+                    trc::event!(
+                        Store(trc::StoreEvent::LdapWarning),
+                        Reason = "Name filter yielded no results",
+                        Details = filter
+                    );
                     return Ok(None);
                 }
             }
@@ -51,14 +50,14 @@ impl LdapDirectory {
                     .query(QueryBy::Id(uid), return_member_of)
                     .await?
                 {
-                    if let Some(principal) = self
+                    if let Some(result) = self
                         .find_principal(
                             &mut conn,
                             &self.mappings.filter_name.build(stored_principal_.name()),
                         )
                         .await?
                     {
-                        (principal, Some(stored_principal_))
+                        (result.principal, result.member_of, Some(stored_principal_))
                     } else {
                         return Ok(None);
                     }
@@ -73,114 +72,181 @@ impl LdapDirectory {
                     Credentials::XOauth2 { username, secret } => (username, secret),
                 };
 
-                if let Some(auth_bind) = &self.auth_bind {
-                    let (auth_bind_conn, mut ldap) = LdapConnAsync::with_settings(
-                        self.pool.manager().settings.clone(),
-                        &self.pool.manager().address,
-                    )
-                    .await
-                    .map_err(|err| err.into_error().caused_by(trc::location!()))?;
-
-                    ldap3::drive!(auth_bind_conn);
-
-                    let dn = auth_bind.filter.build(username);
-
-                    trc::event!(Store(trc::StoreEvent::LdapBind), Details = dn.clone());
-
-                    if ldap
-                        .simple_bind(&dn, secret)
+                match &self.auth_bind {
+                    AuthBind::Template {
+                        template,
+                        can_search,
+                    } => {
+                        let (auth_bind_conn, mut ldap) = LdapConnAsync::with_settings(
+                            self.pool.manager().settings.clone(),
+                            &self.pool.manager().address,
+                        )
                         .await
-                        .map_err(|err| err.into_error().caused_by(trc::location!()))?
-                        .success()
-                        .is_err()
-                    {
-                        return Ok(None);
-                    }
+                        .map_err(|err| err.into_error().caused_by(trc::location!()))?;
 
-                    let filter = &self.mappings.filter_name.build(username);
-                    let principal = if auth_bind.search {
-                        self.find_principal(&mut ldap, filter).await
-                    } else {
-                        self.find_principal(&mut conn, filter).await
-                    };
-                    match principal {
-                        Ok(Some(principal)) => (
-                            principal.with_field(PrincipalField::Name, username.to_string()),
-                            None,
-                        ),
-                        Err(err)
-                            if err.matches(trc::EventType::Store(trc::StoreEvent::LdapError))
-                                && err
-                                    .value(trc::Key::Code)
-                                    .and_then(|v| v.to_uint())
-                                    .is_some_and(|rc| [49, 50].contains(&rc)) =>
+                        ldap3::drive!(auth_bind_conn);
+
+                        let dn = template.build(username);
+
+                        if ldap
+                            .simple_bind(&dn, secret)
+                            .await
+                            .map_err(|err| err.into_error().caused_by(trc::location!()))?
+                            .success()
+                            .is_err()
                         {
+                            trc::event!(
+                                Store(trc::StoreEvent::LdapWarning),
+                                Reason = "Secret rejected during auth bind using template",
+                                Details = dn
+                            );
                             return Ok(None);
                         }
-                        Ok(None) => return Ok(None),
-                        Err(err) => return Err(err),
+
+                        let filter = self.mappings.filter_name.build(username);
+                        let result = if *can_search {
+                            self.find_principal(&mut ldap, &filter).await
+                        } else {
+                            self.find_principal(&mut conn, &filter).await
+                        };
+
+                        match result {
+                            Ok(Some(mut result)) => {
+                                result.principal.name = username.into();
+                                (result.principal, result.member_of, None)
+                            }
+                            Err(err)
+                                if err
+                                    .matches(trc::EventType::Store(trc::StoreEvent::LdapError))
+                                    && err
+                                        .value(trc::Key::Code)
+                                        .and_then(|v| v.to_uint())
+                                        .is_some_and(|rc| [49, 50].contains(&rc)) =>
+                            {
+                                trc::event!(
+                                    Store(trc::StoreEvent::LdapWarning),
+                                    Reason = "Error codes 49 or 50 returned by LDAP server",
+                                    Details = vec![dn, filter]
+                                );
+                                return Ok(None);
+                            }
+                            Ok(None) => {
+                                trc::event!(
+                                    Store(trc::StoreEvent::LdapWarning),
+                                    Reason = "Auth bind successful but filter yielded no results",
+                                    Details = vec![dn, filter]
+                                );
+
+                                return Ok(None);
+                            }
+                            Err(err) => return Err(err),
+                        }
                     }
-                } else if let Some(principal) = self
-                    .find_principal(&mut conn, &self.mappings.filter_name.build(username))
-                    .await?
-                {
-                    if principal.verify_secret(secret).await? {
-                        (
-                            principal.with_field(PrincipalField::Name, username.to_string()),
-                            None,
-                        )
-                    } else {
-                        return Ok(None);
+                    AuthBind::Lookup => {
+                        let filter = self.mappings.filter_name.build(username);
+                        if let Some(mut result) = self.find_principal(&mut conn, &filter).await? {
+                            // Perform bind auth using the found dn
+                            let (auth_bind_conn, mut ldap) = LdapConnAsync::with_settings(
+                                self.pool.manager().settings.clone(),
+                                &self.pool.manager().address,
+                            )
+                            .await
+                            .map_err(|err| err.into_error().caused_by(trc::location!()))?;
+
+                            ldap3::drive!(auth_bind_conn);
+
+                            if ldap
+                                .simple_bind(&result.dn, secret)
+                                .await
+                                .map_err(|err| err.into_error().caused_by(trc::location!()))?
+                                .success()
+                                .is_ok()
+                            {
+                                result.principal.name = username.into();
+                                (result.principal, result.member_of, None)
+                            } else {
+                                trc::event!(
+                                    Store(trc::StoreEvent::LdapWarning),
+                                    Reason = "Secret rejected during auth bind using lookup filter",
+                                    Details = vec![result.dn, filter]
+                                );
+                                return Ok(None);
+                            }
+                        } else {
+                            trc::event!(
+                                Store(trc::StoreEvent::LdapWarning),
+                                Reason = "Auth bind lookup filter yielded no results",
+                                Details = filter
+                            );
+                            return Ok(None);
+                        }
                     }
-                } else {
-                    return Ok(None);
+                    AuthBind::None => {
+                        let filter = self.mappings.filter_name.build(username);
+                        if let Some(mut result) = self.find_principal(&mut conn, &filter).await? {
+                            if result.principal.verify_secret(secret).await? {
+                                result.principal.name = username.into();
+                                (result.principal, result.member_of, None)
+                            } else {
+                                trc::event!(
+                                    Store(trc::StoreEvent::LdapWarning),
+                                    Reason = "Password verification failed",
+                                    Details = vec![result.dn, filter]
+                                );
+                                return Ok(None);
+                            }
+                        } else {
+                            trc::event!(
+                                Store(trc::StoreEvent::LdapWarning),
+                                Reason = "Authentication filter yielded no results",
+                                Details = filter
+                            );
+                            return Ok(None);
+                        }
+                    }
                 }
             }
         };
 
         // Query groups
-        match external_principal.take_str_array(PrincipalField::MemberOf) {
-            Some(names) if return_member_of => {
-                let mut member_of = Vec::with_capacity(names.len());
-                for mut name in names {
-                    if name.contains('=') {
-                        let (rs, _res) = conn
-                            .search(
-                                &name,
-                                Scope::Base,
-                                "objectClass=*",
-                                &self.mappings.attr_name,
-                            )
-                            .await
-                            .map_err(|err| err.into_error().caused_by(trc::location!()))?
-                            .success()
-                            .map_err(|err| err.into_error().caused_by(trc::location!()))?;
-                        for entry in rs {
-                            'outer: for (attr, value) in SearchEntry::construct(entry).attrs {
-                                if self.mappings.attr_name.contains(&attr) {
-                                    if let Some(group) = value.into_iter().next() {
-                                        if !group.is_empty() {
-                                            name = group;
-                                            break 'outer;
-                                        }
+        if !member_of.is_empty() && return_member_of {
+            let mut data = Vec::with_capacity(member_of.len());
+            for mut name in member_of {
+                if name.contains('=') {
+                    let (rs, _res) = conn
+                        .search(
+                            &name,
+                            Scope::Base,
+                            "objectClass=*",
+                            &self.mappings.attr_name,
+                        )
+                        .await
+                        .map_err(|err| err.into_error().caused_by(trc::location!()))?
+                        .success()
+                        .map_err(|err| err.into_error().caused_by(trc::location!()))?;
+                    for entry in rs {
+                        'outer: for (attr, value) in SearchEntry::construct(entry).attrs {
+                            if self.mappings.attr_name.contains(&attr) {
+                                if let Some(group) = value.into_iter().next() {
+                                    if !group.is_empty() {
+                                        name = group;
+                                        break 'outer;
                                     }
                                 }
                             }
                         }
                     }
-
-                    member_of.push(
-                        self.data_store
-                            .get_or_create_principal_id(&name, Type::Group)
-                            .await
-                            .caused_by(trc::location!())?,
-                    );
                 }
 
-                // Map ids
-                external_principal.set(PrincipalField::MemberOf, member_of);
+                data.push(
+                    self.data_store
+                        .get_or_create_principal_id(&name, Type::Group)
+                        .await
+                        .caused_by(trc::location!())?,
+                );
             }
-            _ => (),
+
+            external_principal.data.push(PrincipalData::MemberOf(data));
         }
 
         // Obtain account ID if not available
@@ -324,7 +390,7 @@ impl LdapDirectory {
         &self,
         conn: &mut Ldap,
         filter: &str,
-    ) -> trc::Result<Option<Principal>> {
+    ) -> trc::Result<Option<LdapResult>> {
         conn.search(
             &self.mappings.base_dn,
             Scope::Subtree,
@@ -350,61 +416,60 @@ impl LdapDirectory {
     }
 }
 
+struct LdapResult {
+    dn: String,
+    principal: Principal,
+    member_of: Vec<String>,
+}
+
 impl LdapMappings {
-    fn entry_to_principal(&self, entry: SearchEntry) -> Principal {
-        let mut principal = Principal::default();
+    fn entry_to_principal(&self, entry: SearchEntry) -> LdapResult {
+        let mut principal = Principal::new(0, Type::Individual);
         let mut role = ROLE_USER;
+        let mut member_of = vec![];
 
         for (attr, value) in entry.attrs {
             if self.attr_name.contains(&attr) {
                 if !self.attr_email_address.contains(&attr) {
-                    principal.set(
-                        PrincipalField::Name,
-                        value.into_iter().next().unwrap_or_default(),
-                    );
+                    principal.name = value.into_iter().next().unwrap_or_default();
                 } else {
                     for (idx, item) in value.into_iter().enumerate() {
-                        principal.prepend_str(PrincipalField::Emails, item.to_lowercase());
+                        principal.emails.insert(0, item.to_lowercase());
                         if idx == 0 {
-                            principal.set(PrincipalField::Name, item);
+                            principal.name = item;
                         }
                     }
                 }
             } else if self.attr_secret.contains(&attr) {
                 for item in value {
-                    principal.append_str(PrincipalField::Secrets, item);
+                    principal.secrets.push(item);
                 }
             } else if self.attr_secret_changed.contains(&attr) {
                 // Create a disabled AppPassword, used to indicate that the password has been changed
                 // but cannot be used for authentication.
                 for item in value {
-                    principal.append_str(
-                        PrincipalField::Secrets,
-                        format!("$app${}$", xxhash_rust::xxh3::xxh3_64(item.as_bytes())),
-                    );
+                    principal.secrets.push(format!(
+                        "$app${}$",
+                        xxhash_rust::xxh3::xxh3_64(item.as_bytes())
+                    ));
                 }
             } else if self.attr_email_address.contains(&attr) {
                 for item in value {
-                    principal.prepend_str(PrincipalField::Emails, item.to_lowercase());
+                    principal.emails.insert(0, item.to_lowercase());
                 }
             } else if self.attr_email_alias.contains(&attr) {
                 for item in value {
-                    principal.append_str(PrincipalField::Emails, item.to_lowercase());
+                    principal.emails.push(item.to_lowercase());
                 }
             } else if let Some(idx) = self.attr_description.iter().position(|a| a == &attr) {
-                if !principal.has_field(PrincipalField::Description) || idx == 0 {
-                    principal.set(
-                        PrincipalField::Description,
-                        value.into_iter().next().unwrap_or_default(),
-                    );
+                if principal.description.is_none() || idx == 0 {
+                    principal.description = value.into_iter().next();
                 }
             } else if self.attr_groups.contains(&attr) {
-                for item in value {
-                    principal.append_str(PrincipalField::MemberOf, item);
-                }
+                member_of.extend(value);
             } else if self.attr_quota.contains(&attr) {
                 if let Ok(quota) = value.into_iter().next().unwrap_or_default().parse::<u64>() {
-                    principal.set(PrincipalField::Quota, quota);
+                    principal.quota = quota.into();
                 }
             } else if self.attr_type.contains(&attr) {
                 for value in value {
@@ -426,15 +491,22 @@ impl LdapMappings {
             }
         }
 
-        principal.with_field(PrincipalField::Roles, role)
+        principal.data.push(PrincipalData::Roles(vec![role]));
+
+        LdapResult {
+            dn: entry.dn,
+            principal,
+            member_of,
+        }
     }
 }
 
 fn result_to_trace(rs: &ResultEntry) -> trc::Value {
-    SearchEntry::construct(rs.clone())
-        .attrs
+    let se = SearchEntry::construct(rs.clone());
+    se.attrs
         .into_iter()
         .map(|(k, v)| trc::Value::Array(vec![trc::Value::from(k), trc::Value::from(v.join(", "))]))
+        .chain([trc::Value::from(se.dn)])
         .collect::<Vec<_>>()
         .into()
 }

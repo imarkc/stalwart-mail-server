@@ -1,11 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{borrow::Cow, net::IpAddr, sync::Arc, time::Instant};
 
+use compact_str::ToCompactString;
 use rustls::ServerConfig;
 use std::fmt::Debug;
 use tokio::{
@@ -17,9 +18,9 @@ use trc::{Event, EventType, Key};
 use utils::{config::ipmask::IpAddrMask, snowflake::SnowflakeIdGenerator};
 
 use crate::{
+    Server,
     config::server::ServerProtocol,
     expr::{functions::ResolveVariable, *},
-    Server,
 };
 
 use self::limiter::{ConcurrencyLimiter, InFlight};
@@ -113,8 +114,7 @@ pub trait SessionManager: Sync + Send + 'static + Clone {
                     TcpAcceptorResult::Tls(accept) => match accept.await {
                         Ok(stream) => {
                             // Generate sessionId
-                            session.session_id =
-                                session.instance.span_id_gen.generate().unwrap_or_default();
+                            session.session_id = session.instance.span_id_gen.generate();
                             session_id = session.session_id;
 
                             // Send span
@@ -159,8 +159,7 @@ pub trait SessionManager: Sync + Send + 'static + Clone {
                     },
                     TcpAcceptorResult::Plain(stream) => {
                         // Generate sessionId
-                        session.session_id =
-                            session.instance.span_id_gen.generate().unwrap_or_default();
+                        session.session_id = session.instance.span_id_gen.generate();
                         session_id = session.session_id;
 
                         // Send span
@@ -183,7 +182,7 @@ pub trait SessionManager: Sync + Send + 'static + Clone {
                 }
             } else {
                 // Generate sessionId
-                session.session_id = session.instance.span_id_gen.generate().unwrap_or_default();
+                session.session_id = session.instance.span_id_gen.generate();
                 session_id = session.session_id;
 
                 // Send span
@@ -225,9 +224,9 @@ pub trait SessionManager: Sync + Send + 'static + Clone {
 impl<T: SessionStream> ResolveVariable for SessionData<T> {
     fn resolve_variable(&self, variable: u32) -> crate::expr::Variable<'_> {
         match variable {
-            V_REMOTE_IP => self.remote_ip.to_string().into(),
+            V_REMOTE_IP => self.remote_ip.to_compact_string().into(),
             V_REMOTE_PORT => self.remote_port.into(),
-            V_LOCAL_IP => self.local_ip.to_string().into(),
+            V_LOCAL_IP => self.local_ip.to_compact_string().into(),
             V_LOCAL_PORT => self.local_port.into(),
             V_LISTENER => self.instance.id.as_str().into(),
             V_PROTOCOL => self.protocol.as_str().into(),

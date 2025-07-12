@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -13,7 +13,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::BufWriter,
 };
-use trc::{ipc::subscriber::SubscriberBuilder, serializers::text::FmtWriter, TelemetryEvent};
+use trc::{TelemetryEvent, ipc::subscriber::SubscriberBuilder, serializers::text::FmtWriter};
 
 pub(crate) fn spawn_log_tracer(builder: SubscriberBuilder, settings: LogTracer) {
     let (_, mut rx) = builder.register();

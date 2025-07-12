@@ -1,10 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::fmt::Display;
+
+use compact_str::{CompactString, format_compact};
 
 use super::{ResponseCode, ResponseType};
 
@@ -43,7 +45,7 @@ pub enum Token {
 impl<T: CommandParser> Default for Request<T> {
     fn default() -> Self {
         Self {
-            tag: String::with_capacity(0),
+            tag: String::new(),
             command: T::default(),
             tokens: Vec::new(),
         }
@@ -112,7 +114,7 @@ impl<T: CommandParser> Receiver<T> {
         if !self.buf.is_empty() {
             self.current_request_size += self.buf.len();
             if self.current_request_size > self.max_request_size {
-                return Err(self.error_reset(format!(
+                return Err(self.error_reset(format_compact!(
                     "Request exceeds maximum limit of {} bytes.",
                     self.max_request_size
                 )));
@@ -128,7 +130,7 @@ impl<T: CommandParser> Receiver<T> {
     fn push_token(&mut self, token: Token) -> Result<(), Error> {
         self.current_request_size += 1;
         if self.current_request_size > self.max_request_size {
-            return Err(self.error_reset(format!(
+            return Err(self.error_reset(format_compact!(
                 "Request exceeds maximum limit of {} bytes.",
                 self.max_request_size
             )));
@@ -160,7 +162,7 @@ impl<T: CommandParser> Receiver<T> {
                     }
                     b'\t' | b'\r' => {}
                     b'\n' => {
-                        return Err(self.error_reset(format!(
+                        return Err(self.error_reset(format_compact!(
                             "Missing command after tag {:?}, found CRLF instead.",
                             std::str::from_utf8(&self.buf).unwrap_or_default()
                         )));
@@ -187,7 +189,7 @@ impl<T: CommandParser> Receiver<T> {
                                     T::parse(&self.buf, is_uid).ok_or_else(|| {
                                         let command =
                                             String::from_utf8_lossy(&self.buf).into_owned();
-                                        self.error_reset(format!(
+                                        self.error_reset(format_compact!(
                                             "Unrecognized command '{}'.",
                                             command
                                         ))
@@ -206,7 +208,7 @@ impl<T: CommandParser> Receiver<T> {
                             }
                         }
                     } else {
-                        return Err(self.error_reset(format!(
+                        return Err(self.error_reset(format_compact!(
                             "Invalid character {:?} in command name.",
                             ch as char
                         )));
@@ -315,7 +317,7 @@ impl<T: CommandParser> Receiver<T> {
                                 })?;
                                 if self.current_request_size + size as usize > self.max_request_size
                                 {
-                                    return Err(self.error_reset(format!(
+                                    return Err(self.error_reset(format_compact!(
                                         "Literal exceeds the maximum request size of {} bytes.",
                                         self.max_request_size
                                     )));
@@ -343,7 +345,7 @@ impl<T: CommandParser> Receiver<T> {
                             }
                         }
                         _ => {
-                            return Err(self.error_reset(format!(
+                            return Err(self.error_reset(format_compact!(
                                 "Invalid character {:?} in literal.",
                                 ch as char
                             )));
@@ -398,7 +400,7 @@ impl Token {
     pub fn unwrap_bytes(self) -> Vec<u8> {
         match self {
             Token::Argument(value) => value,
-            other => other.to_string().into_bytes(),
+            other => other.as_bytes().to_vec(),
         }
     }
 
@@ -447,26 +449,32 @@ impl Token {
 
 impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&String::from_utf8_lossy(self.as_bytes()))
+    }
+}
+
+impl Token {
+    pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Token::Argument(value) => write!(f, "{}", String::from_utf8_lossy(value)),
-            Token::ParenthesisOpen => write!(f, "("),
-            Token::ParenthesisClose => write!(f, ")"),
-            Token::BracketOpen => write!(f, "["),
-            Token::BracketClose => write!(f, "]"),
-            Token::Gt => write!(f, ">"),
-            Token::Lt => write!(f, "<"),
-            Token::Dot => write!(f, "."),
-            Token::Nil => write!(f, ""),
+            Token::Argument(value) => value,
+            Token::ParenthesisOpen => b"(",
+            Token::ParenthesisClose => b")",
+            Token::BracketOpen => b"[",
+            Token::BracketClose => b"]",
+            Token::Gt => b">",
+            Token::Lt => b"<",
+            Token::Dot => b".",
+            Token::Nil => b"",
         }
     }
 }
 
 impl Error {
-    pub fn err(tag: Option<String>, message: impl Into<trc::Value>) -> Self {
+    pub fn err(tag: Option<impl Into<CompactString>>, message: impl Into<trc::Value>) -> Self {
         Error::Error {
             response: trc::ImapEvent::Error
                 .ctx(trc::Key::Details, message)
-                .ctx_opt(trc::Key::Id, tag)
+                .ctx_opt(trc::Key::Id, tag.map(Into::into))
                 .ctx(trc::Key::Type, ResponseType::Bad)
                 .code(ResponseCode::Parse),
         }
@@ -490,13 +498,13 @@ impl<T: CommandParser> Request<T> {
     pub fn into_error(self, message: impl Into<trc::Value>) -> trc::Error {
         trc::ImapEvent::Error
             .ctx(trc::Key::Details, message)
-            .ctx(trc::Key::Id, self.tag)
+            .ctx(trc::Key::Id, CompactString::from_string_buffer(self.tag))
     }
 
     pub fn into_parse_error(self, message: impl Into<trc::Value>) -> trc::Error {
         trc::ImapEvent::Error
             .ctx(trc::Key::Details, message)
-            .ctx(trc::Key::Id, self.tag)
+            .ctx(trc::Key::Id, CompactString::from_string_buffer(self.tag))
             .ctx(trc::Key::Code, ResponseCode::Parse)
             .ctx(trc::Key::Type, ResponseType::Bad)
     }
@@ -553,7 +561,7 @@ mod tests {
             (
                 vec!["abcd CAPABILITY\r\n"],
                 vec![Request {
-                    tag: "abcd".to_string(),
+                    tag: "abcd".into(),
                     command: Command::Capability,
                     tokens: vec![],
                 }],
@@ -561,7 +569,7 @@ mod tests {
             (
                 vec!["A023 LO", "GOUT\r\n"],
                 vec![Request {
-                    tag: "A023".to_string(),
+                    tag: "A023".into(),
                     command: Command::Logout,
                     tokens: vec![],
                 }],
@@ -569,7 +577,7 @@ mod tests {
             (
                 vec!["  A001 AUTHENTICATE GSSAPI  \r\n"],
                 vec![Request {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     command: Command::Authenticate,
                     tokens: vec![Token::Argument(b"GSSAPI".to_vec())],
                 }],
@@ -577,7 +585,7 @@ mod tests {
             (
                 vec!["A03   AUTHENTICATE ", "PLAIN dGVzdAB0ZXN", "0AHRlc3Q=\r\n"],
                 vec![Request {
-                    tag: "A03".to_string(),
+                    tag: "A03".into(),
                     command: Command::Authenticate,
                     tokens: vec![
                         Token::Argument(b"PLAIN".to_vec()),
@@ -588,7 +596,7 @@ mod tests {
             (
                 vec!["A003 CREATE owatagusiam/\r\n"],
                 vec![Request {
-                    tag: "A003".to_string(),
+                    tag: "A003".into(),
                     command: Command::Create,
                     tokens: vec![Token::Argument(b"owatagusiam/".to_vec())],
                 }],
@@ -596,7 +604,7 @@ mod tests {
             (
                 vec!["A682 LIST \"\" *\r\n"],
                 vec![Request {
-                    tag: "A682".to_string(),
+                    tag: "A682".into(),
                     command: Command::List,
                     tokens: vec![Token::Nil, Token::Argument(b"*".to_vec())],
                 }],
@@ -604,7 +612,7 @@ mod tests {
             (
                 vec!["A03 LIST () \"\" \"%\" RETURN (CHILDREN)\r\n"],
                 vec![Request {
-                    tag: "A03".to_string(),
+                    tag: "A03".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::ParenthesisOpen,
@@ -621,7 +629,7 @@ mod tests {
             (
                 vec!["A05 LIST (REMOTE SUBSCRIBED) \"\" \"*\"\r\n"],
                 vec![Request {
-                    tag: "A05".to_string(),
+                    tag: "A05".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::ParenthesisOpen,
@@ -636,7 +644,7 @@ mod tests {
             (
                 vec!["a1 list \"\" (\"foo\")\r\n"],
                 vec![Request {
-                    tag: "a1".to_string(),
+                    tag: "a1".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::Nil,
@@ -649,7 +657,7 @@ mod tests {
             (
                 vec!["a3.1 LIST \"\" (% music/rock)\r\n"],
                 vec![Request {
-                    tag: "a3.1".to_string(),
+                    tag: "a3.1".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::Nil,
@@ -663,7 +671,7 @@ mod tests {
             (
                 vec!["A01 LIST \"\" % RETURN (STATUS (MESSAGES UNSEEN))\r\n"],
                 vec![Request {
-                    tag: "A01".to_string(),
+                    tag: "A01".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::Nil,
@@ -682,7 +690,7 @@ mod tests {
             (
                 vec![" A01 LiSt \"\"  % RETURN ( STATUS ( MESSAGES UNSEEN ) ) \r\n"],
                 vec![Request {
-                    tag: "A01".to_string(),
+                    tag: "A01".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::Nil,
@@ -701,7 +709,7 @@ mod tests {
             (
                 vec!["A02 LIST (SUBSCRIBED RECURSIVEMATCH) \"\" % RETURN (STATUS (MESSAGES))\r\n"],
                 vec![Request {
-                    tag: "A02".to_string(),
+                    tag: "A02".into(),
                     command: Command::List,
                     tokens: vec![
                         Token::ParenthesisOpen,
@@ -723,7 +731,7 @@ mod tests {
             (
                 vec!["A002 CREATE \"INBOX.Sent Mail\"\r\n"],
                 vec![Request {
-                    tag: "A002".to_string(),
+                    tag: "A002".into(),
                     command: Command::Create,
                     tokens: vec![Token::Argument(b"INBOX.Sent Mail".to_vec())],
                 }],
@@ -731,7 +739,7 @@ mod tests {
             (
                 vec!["A002 CREATE \"Maibox \\\"quo\\\\ted\\\" \"\r\n"],
                 vec![Request {
-                    tag: "A002".to_string(),
+                    tag: "A002".into(),
                     command: Command::Create,
                     tokens: vec![Token::Argument(b"Maibox \"quo\\ted\" ".to_vec())],
                 }],
@@ -739,7 +747,7 @@ mod tests {
             (
                 vec!["A004 COPY 2:4 meeting\r\n"],
                 vec![Request {
-                    tag: "A004".to_string(),
+                    tag: "A004".into(),
                     command: Command::Copy(false),
                     tokens: vec![
                         Token::Argument(b"2:4".to_vec()),
@@ -754,7 +762,7 @@ mod tests {
                     "NOT FROM \"Smith\"\r\n",
                 ],
                 vec![Request {
-                    tag: "A282".to_string(),
+                    tag: "A282".into(),
                     command: Command::Search(false),
                     tokens: vec![
                         Token::Argument(b"RETURN".to_vec()),
@@ -774,7 +782,7 @@ mod tests {
             (
                 vec!["F284 UID STORE $ +FLAGS.Silent (\\Deleted)\r\n"],
                 vec![Request {
-                    tag: "F284".to_string(),
+                    tag: "F284".into(),
                     command: Command::Store(true),
                     tokens: vec![
                         Token::Argument(b"$".to_vec()),
@@ -788,7 +796,7 @@ mod tests {
             (
                 vec!["A654 FETCH 2:4 (FLAGS BODY[HEADER.FIELDS (DATE FROM)])\r\n"],
                 vec![Request {
-                    tag: "A654".to_string(),
+                    tag: "A654".into(),
                     command: Command::Fetch(false),
                     tokens: vec![
                         Token::Argument(b"2:4".to_vec()),
@@ -814,7 +822,7 @@ mod tests {
                     "KOI8-R (OR $ 1,3000:3021) TEXT \"hello world\"\r\n",
                 ],
                 vec![Request {
-                    tag: "B283".to_string(),
+                    tag: "B283".into(),
                     command: Command::Search(true),
                     tokens: vec![
                         Token::Argument(b"RETURN".to_vec()),
@@ -839,7 +847,7 @@ mod tests {
                     "TEXT {8+}\r\nмать\r\n",
                 ],
                 vec![Request {
-                    tag: "P283".to_string(),
+                    tag: "P283".into(),
                     command: Command::Search(false),
                     tokens: vec![
                         Token::Argument(b"CHARSET".to_vec()),
@@ -857,7 +865,7 @@ mod tests {
             (
                 vec!["A001 LOGIN {11}\r\n", "FRED FOOBAR {7}\r\n", "fat man\r\n"],
                 vec![Request {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     command: Command::Login,
                     tokens: vec![
                         Token::Argument(b"FRED FOOBAR".to_vec()),
@@ -868,7 +876,7 @@ mod tests {
             (
                 vec!["TAG3 CREATE \"Test-ąęć-Test\"\r\n"],
                 vec![Request {
-                    tag: "TAG3".to_string(),
+                    tag: "TAG3".into(),
                     command: Command::Create,
                     tokens: vec![Token::Argument("Test-ąęć-Test".as_bytes().to_vec())],
                 }],
@@ -876,7 +884,7 @@ mod tests {
             (
                 vec!["abc LOGIN {0}\r\n", "\r\n"],
                 vec![Request {
-                    tag: "abc".to_string(),
+                    tag: "abc".into(),
                     command: Command::Login,
                     tokens: vec![Token::Nil],
                 }],
@@ -884,7 +892,7 @@ mod tests {
             (
                 vec!["abc LOGIN {0+}\r\n\r\n"],
                 vec![Request {
-                    tag: "abc".to_string(),
+                    tag: "abc".into(),
                     command: Command::Login,
                     tokens: vec![Token::Nil],
                 }],
@@ -903,7 +911,7 @@ mod tests {
                     "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n\r\n",
                 ],
                 vec![Request {
-                    tag: "A003".to_string(),
+                    tag: "A003".into(),
                     command: Command::Append,
                     tokens: vec![
                         Token::Argument(b"saved-messages".to_vec()),
@@ -942,7 +950,7 @@ mod tests {
                     "Hello Joe, do you think we can meet at 3:30 tomorrow?\r\n\r\n",
                 ],
                 vec![Request {
-                    tag: "A003".to_string(),
+                    tag: "A003".into(),
                     command: Command::Append,
                     tokens: vec![
                         Token::Argument(b"saved-messages".to_vec()),
@@ -971,17 +979,17 @@ mod tests {
                 vec!["001 NOOP\r\n002 CAPABILITY\r\nabc LOGIN hello world\r\n"],
                 vec![
                     Request {
-                        tag: "001".to_string(),
+                        tag: "001".into(),
                         command: Command::Noop,
                         tokens: vec![],
                     },
                     Request {
-                        tag: "002".to_string(),
+                        tag: "002".into(),
                         command: Command::Capability,
                         tokens: vec![],
                     },
                     Request {
-                        tag: "abc".to_string(),
+                        tag: "abc".into(),
                         command: Command::Login,
                         tokens: vec![
                             Token::Argument(b"hello".to_vec()),

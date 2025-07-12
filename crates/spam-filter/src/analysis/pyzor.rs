@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,7 +8,7 @@ use std::{future::Future, time::Instant};
 
 use common::Server;
 
-use crate::{modules::pyzor::pyzor_check, SpamFilterContext};
+use crate::{SpamFilterContext, modules::pyzor::pyzor_check};
 
 pub trait SpamFilterAnalyzePyzor: Sync + Send {
     fn spam_filter_analyze_pyzor(
@@ -44,9 +44,10 @@ impl SpamFilterAnalyzePyzor for Server {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    trc::error!(err
-                        .span_id(ctx.input.span_id)
-                        .ctx(trc::Key::Elapsed, time.elapsed()));
+                    trc::error!(
+                        err.span_id(ctx.input.span_id)
+                            .ctx(trc::Key::Elapsed, time.elapsed())
+                    );
                 }
             }
         }

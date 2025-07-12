@@ -1,18 +1,18 @@
 [package]
-name = "mail-server"
-description = "Stalwart Mail Server"
-authors = [ "Stalwart Labs Ltd. <hello@stalw.art>"]
-repository = "https://github.com/stalwartlabs/jmap-server"
+name = "stalwart"
+description = "Stalwart Mail and Collaboration Server"
+authors = [ "Stalwart Labs LLC <hello@stalw.art>"]
+repository = "https://github.com/stalwartlabs/stalwart"
 homepage = "https://stalw.art"
-keywords = ["imap", "jmap", "smtp", "email", "mail", "server"]
+keywords = ["imap", "jmap", "smtp", "email", "mail", "webdav", "server"]
 categories = ["email"]
 license = "AGPL-3.0-only OR LicenseRef-SEL"
-version = "0.11.8"
+version = "0.13.0"
 edition = "2024"
 resolver = "2"
 
 [[bin]]
-name = "stalwart-mail"
+name = "stalwart"
 path = "src/main.rs"
 
 [dependencies]
@@ -25,16 +25,22 @@ pop3 = { path = "../pop3" }
 spam-filter = { path = "../spam-filter" }
 managesieve = { path = "../managesieve" }
 common = { path = "../common" }
+email = { path = "../email" }
 directory = { path = "../directory" }
+http = { path = "../http" }
+dav = { path = "../dav" }
+groupware = { path = "../groupware" }
+services = { path = "../services" }
 trc = { path = "../trc" }
 utils = { path = "../utils" }
-tokio = { version = "1.23", features = ["full"] }
+migration = { path = "../migration" }
+tokio = { version = "1.45", features = ["full"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 jemallocator = "0.5.0"
 
 [features]
-#default = ["sqlite", "postgres", "mysql", "rocks", "elastic", "s3", "redis", "azure", "enterprise"]
+#default = ["sqlite", "postgres", "mysql", "rocks", "elastic", "s3", "redis", "azure", "nats", "enterprise"]
 default = ["rocks", "enterprise"]
 sqlite = ["store/sqlite"]
 foundationdb = ["store/foundation", "common/foundation"]
@@ -44,11 +50,19 @@ rocks = ["store/rocks"]
 elastic = ["store/elastic"]
 s3 = ["store/s3"]
 redis = ["store/redis"]
+nats = ["store/nats"]
 azure = ["store/azure"]
+zenoh = ["store/zenoh"]
+kafka = ["store/kafka"]
 enterprise = [ "jmap/enterprise", 
                "smtp/enterprise", 
                "common/enterprise", 
                "store/enterprise", 
                "managesieve/enterprise", 
                "directory/enterprise", 
-               "spam-filter/enterprise" ]
+               "email/enterprise",
+               "spam-filter/enterprise",
+               "http/enterprise",
+               "dav/enterprise",
+               "groupware/enterprise",
+               "services/enterprise" ]

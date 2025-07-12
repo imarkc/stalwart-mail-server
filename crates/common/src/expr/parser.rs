@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{tokenizer::Tokenizer, BinaryOperator, Expression, ExpressionItem, Token};
+use super::{BinaryOperator, Expression, ExpressionItem, Token, tokenizer::Tokenizer};
 
 pub struct ExpressionParser<'x> {
     pub(crate) tokenizer: Tokenizer<'x>,

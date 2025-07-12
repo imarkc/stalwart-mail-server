@@ -1,17 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{borrow::Cow, future::Future, sync::Arc, time::Instant};
 
-use common::{scripts::plugins::PluginContext, Server};
+use common::{Server, config::smtp::queue::QueueExpiry, scripts::plugins::PluginContext};
+
 use mail_auth::common::headers::HeaderWriter;
 use mail_parser::{Encoding, Message, MessagePart, PartType};
 use sieve::{
-    compiler::grammar::actions::action_redirect::{ByMode, ByTime, Notify, NotifyItem, Ret},
     Event, Input, MatchAs, Recipient, Sieve,
+    compiler::grammar::actions::action_redirect::{ByMode, ByTime, Notify, NotifyItem, Ret},
 };
 use smtp_proto::{
     MAIL_BY_TRACE, MAIL_RET_FULL, MAIL_RET_HDRS, RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE,
@@ -21,7 +22,7 @@ use trc::SieveEvent;
 
 use crate::{
     inbound::DkimSign,
-    queue::{quota::HasQueueQuota, spool::SmtpSpool, DomainPart, MessageSource},
+    queue::{DomainPart, MessageSource, quota::HasQueueQuota, spool::SmtpSpool},
 };
 
 use super::{ScriptModification, ScriptParameters, ScriptResult};
@@ -206,7 +207,7 @@ impl RunScript for Server {
                             Notify::Default => (),
                         }
                         if flags > 0 {
-                            for rcpt in &mut message.recipients {
+                            for rcpt in &mut message.message.recipients {
                                 rcpt.flags |= flags;
                             }
                         }
@@ -219,16 +220,16 @@ impl RunScript for Server {
                                 trace,
                             } => {
                                 if trace {
-                                    message.flags |= MAIL_BY_TRACE;
+                                    message.message.flags |= MAIL_BY_TRACE;
                                 }
                                 match mode {
                                     ByMode::Notify => {
-                                        for domain in &mut message.domains {
+                                        for domain in &mut message.message.recipients {
                                             domain.notify.due += rlimit;
                                         }
                                     }
                                     ByMode::Return => {
-                                        for domain in &mut message.domains {
+                                        for domain in &mut message.message.recipients {
                                             domain.notify.due += rlimit;
                                         }
                                     }
@@ -241,17 +242,21 @@ impl RunScript for Server {
                                 trace,
                             } => {
                                 if trace {
-                                    message.flags |= MAIL_BY_TRACE;
+                                    message.message.flags |= MAIL_BY_TRACE;
                                 }
                                 match mode {
                                     ByMode::Notify => {
-                                        for domain in &mut message.domains {
+                                        for domain in &mut message.message.recipients {
                                             domain.notify.due = alimit as u64;
                                         }
                                     }
                                     ByMode::Return => {
-                                        for domain in &mut message.domains {
-                                            domain.expires = alimit as u64;
+                                        let expires =
+                                            (alimit as u64).saturating_sub(message.message.created);
+                                        if expires > 0 {
+                                            for domain in &mut message.message.recipients {
+                                                domain.expires = QueueExpiry::Duration(expires);
+                                            }
                                         }
                                     }
                                     ByMode::Default => (),
@@ -263,10 +268,10 @@ impl RunScript for Server {
                         // Set ret
                         match return_of_content {
                             Ret::Full => {
-                                message.flags |= MAIL_RET_FULL;
+                                message.message.flags |= MAIL_RET_FULL;
                             }
                             Ret::Hdrs => {
-                                message.flags |= MAIL_RET_HDRS;
+                                message.message.flags |= MAIL_RET_HDRS;
                             }
                             Ret::Default => (),
                         }
@@ -289,10 +294,12 @@ impl RunScript for Server {
                                                 signature.write_header(&mut headers);
                                             }
                                             Err(err) => {
-                                                trc::error!(trc::Error::from(err)
-                                                    .span_id(session_id)
-                                                    .caused_by(trc::location!())
-                                                    .details("DKIM sign failed"));
+                                                trc::error!(
+                                                    trc::Error::from(err)
+                                                        .span_id(session_id)
+                                                        .caused_by(trc::location!())
+                                                        .details("DKIM sign failed")
+                                                );
                                             }
                                         }
                                     }
@@ -324,8 +331,9 @@ impl RunScript for Server {
                                     Sieve(SieveEvent::QuotaExceeded),
                                     SpanId = session_id,
                                     Id = script_id.clone(),
-                                    From = message.return_path_lcase,
+                                    From = message.message.return_path_lcase,
                                     To = message
+                                        .message
                                         .recipients
                                         .into_iter()
                                         .map(|r| trc::Value::from(r.address_lcase))

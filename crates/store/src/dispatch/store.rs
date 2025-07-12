@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,13 +9,14 @@ use std::{
     time::Instant,
 };
 
+use compact_str::ToCompactString;
 use roaring::RoaringBitmap;
 use trc::{AddContext, StoreEvent};
 
 use crate::{
     BitmapKey, Deserialize, IterateParams, Key, QueryResult, SUBSPACE_BITMAP_ID,
-    SUBSPACE_BITMAP_TAG, SUBSPACE_BITMAP_TEXT, SUBSPACE_INDEXES, SUBSPACE_LOGS, Store, U32_LEN,
-    Value, ValueKey,
+    SUBSPACE_BITMAP_TAG, SUBSPACE_BITMAP_TEXT, SUBSPACE_COUNTER, SUBSPACE_INDEXES, SUBSPACE_LOGS,
+    Store, U32_LEN, Value, ValueKey,
     write::{
         AnyClass, AnyKey, AssignedIds, Batch, BatchBuilder, BitmapClass, BitmapHash, Operation,
         ReportClass, ValueClass, ValueOp,
@@ -61,7 +62,7 @@ impl Store {
 
     pub async fn get_bitmap(
         &self,
-        key: BitmapKey<BitmapClass<u32>>,
+        key: BitmapKey<BitmapClass>,
     ) -> trc::Result<Option<RoaringBitmap>> {
         match self {
             #[cfg(feature = "sqlite")]
@@ -83,7 +84,7 @@ impl Store {
 
     pub async fn get_bitmaps_intersection(
         &self,
-        keys: Vec<BitmapKey<BitmapClass<u32>>>,
+        keys: Vec<BitmapKey<BitmapClass>>,
     ) -> trc::Result<Option<RoaringBitmap>> {
         let mut result: Option<RoaringBitmap> = None;
         for key in keys {
@@ -136,7 +137,7 @@ impl Store {
 
     pub async fn get_counter(
         &self,
-        key: impl Into<ValueKey<ValueClass<u32>>> + Sync + Send,
+        key: impl Into<ValueKey<ValueClass>> + Sync + Send,
     ) -> trc::Result<i64> {
         match self {
             #[cfg(feature = "sqlite")]
@@ -175,7 +176,7 @@ impl Store {
 
         trc::event!(
             Store(trc::StoreEvent::SqlQuery),
-            Details = query.to_string(),
+            Details = query.to_compact_string(),
             Value = params.as_slice(),
             Result = &result,
         );
@@ -183,98 +184,7 @@ impl Store {
         result.caused_by(trc::location!())
     }
 
-    pub async fn write(&self, batch: impl Into<Batch>) -> trc::Result<AssignedIds> {
-        let batch = batch.into();
-        #[cfg(feature = "test_mode")]
-        if std::env::var("PARANOID_WRITE").is_ok_and(|v| v == "1") {
-            let mut account_id = u32::MAX;
-            let mut collection = u8::MAX;
-            let mut document_id = u32::MAX;
-
-            let mut bitmaps = Vec::new();
-            let mut result = AssignedIds::default();
-
-            for op in &batch.ops {
-                match op {
-                    Operation::AccountId {
-                        account_id: account_id_,
-                    } => {
-                        account_id = *account_id_;
-                    }
-                    Operation::Collection {
-                        collection: collection_,
-                    } => {
-                        collection = *collection_;
-                    }
-                    Operation::DocumentId {
-                        document_id: document_id_,
-                    } => {
-                        document_id = *document_id_;
-                    }
-                    Operation::Bitmap { class, set } => {
-                        if *set && matches!(class, BitmapClass::DocumentIds) {
-                            let id = result.document_ids.len() as u32;
-                            result.document_ids.push(id);
-                        }
-
-                        let key = class.serialize(
-                            account_id,
-                            collection,
-                            document_id,
-                            0,
-                            (&result).into(),
-                        );
-
-                        bitmaps.push((key, class.clone(), document_id, *set));
-                    }
-                    _ => {}
-                }
-            }
-
-            match self {
-                #[cfg(feature = "sqlite")]
-                Self::SQLite(store) => store.write(batch).await,
-                #[cfg(feature = "foundation")]
-                Self::FoundationDb(store) => store.write(batch).await,
-                #[cfg(feature = "postgres")]
-                Self::PostgreSQL(store) => store.write(batch).await,
-                #[cfg(feature = "mysql")]
-                Self::MySQL(store) => store.write(batch).await,
-                #[cfg(feature = "rocks")]
-                Self::RocksDb(store) => store.write(batch).await,
-                #[cfg(all(feature = "enterprise", any(feature = "postgres", feature = "mysql")))]
-                Self::SQLReadReplica(store) => store.write(batch).await,
-                Self::None => Err(trc::StoreEvent::NotConfigured.into()),
-            }
-            .caused_by(trc::location!())?;
-
-            for (key, class, document_id, set) in bitmaps {
-                let mut bitmaps = BITMAPS.lock();
-                let map = bitmaps.entry(key).or_default();
-                if set {
-                    if !map.insert(document_id) {
-                        println!(
-                            concat!(
-                                "WARNING: key {:?} already contains document {} for account ",
-                                "{}, collection {}"
-                            ),
-                            class, document_id, account_id, collection
-                        );
-                    }
-                } else if !map.remove(&document_id) {
-                    println!(
-                        concat!(
-                            "WARNING: key {:?} does not contain document {} for account ",
-                            "{}, collection {}"
-                        ),
-                        class, document_id, account_id, collection
-                    );
-                }
-            }
-
-            return Ok(AssignedIds::default());
-        }
-
+    pub async fn write(&self, batch: Batch<'_>) -> trc::Result<AssignedIds> {
         let start_time = Instant::now();
         let ops = batch.ops.len();
 
@@ -303,11 +213,24 @@ impl Store {
         result
     }
 
-    #[inline]
-    pub async fn write_expect_id(&self, batch: impl Into<Batch>) -> trc::Result<u32> {
-        self.write(batch)
-            .await
-            .and_then(|ids| ids.last_document_id())
+    pub async fn assign_document_ids(
+        &self,
+        account_id: u32,
+        collection: impl Into<u8>,
+        num_ids: u64,
+    ) -> trc::Result<u32> {
+        // Increment UID next
+        let mut batch = BatchBuilder::new();
+        batch
+            .with_account_id(account_id)
+            .with_collection(collection)
+            .add_and_get(ValueClass::DocumentId, num_ids as i64);
+        self.write(batch.build_all()).await.and_then(|v| {
+            v.last_counter_id().map(|id| {
+                debug_assert!(id >= num_ids as i64, "{} < {}", id, num_ids);
+                id as u32
+            })
+        })
     }
 
     pub async fn purge_store(&self) -> trc::Result<()> {
@@ -437,19 +360,19 @@ impl Store {
         let mut batch = BatchBuilder::new();
 
         for key in delete_keys {
-            if batch.ops.len() >= 1000 {
-                self.write(std::mem::take(&mut batch).build())
+            if batch.is_large_batch() {
+                self.write(std::mem::take(&mut batch).build_all())
                     .await
                     .caused_by(trc::location!())?;
             }
-            batch.ops.push(Operation::Value {
+            batch.any_op(Operation::Value {
                 class: ValueClass::Any(AnyClass { subspace, key }),
                 op: ValueOp::Clear,
             });
         }
 
         if !batch.is_empty() {
-            self.write(batch.build())
+            self.write(batch.build_all())
                 .await
                 .caused_by(trc::location!())?;
         }
@@ -457,13 +380,14 @@ impl Store {
         Ok(())
     }
 
-    pub async fn purge_account(&self, account_id: u32) -> trc::Result<()> {
+    pub async fn danger_destroy_account(&self, account_id: u32) -> trc::Result<()> {
         for subspace in [
             SUBSPACE_BITMAP_ID,
             SUBSPACE_BITMAP_TAG,
             SUBSPACE_BITMAP_TEXT,
             SUBSPACE_LOGS,
             SUBSPACE_INDEXES,
+            SUBSPACE_COUNTER,
         ] {
             self.delete_range(
                 AnyKey {
@@ -510,24 +434,6 @@ impl Store {
             .await
             .caused_by(trc::location!())?;
         }
-
-        // Delete property counters (TODO: make this more elegant)
-        self.delete_range(
-            ValueKey {
-                account_id,
-                collection: 1,
-                document_id: 0,
-                class: ValueClass::Property(84),
-            },
-            ValueKey {
-                account_id,
-                collection: 1,
-                document_id: u32::MAX,
-                class: ValueClass::Property(84),
-            },
-        )
-        .await
-        .caused_by(trc::location!())?;
 
         Ok(())
     }
@@ -604,6 +510,7 @@ impl Store {
             SUBSPACE_BLOB_RESERVE,
             SUBSPACE_BLOB_LINK,
             SUBSPACE_LOGS,
+            SUBSPACE_IN_MEMORY_COUNTER,
             SUBSPACE_IN_MEMORY_VALUE,
             SUBSPACE_COUNTER,
             SUBSPACE_PROPERTY,
@@ -680,7 +587,7 @@ impl Store {
                     batch.with_account_id(account_id);
                 }
 
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::Blob(BlobOp::Reserve {
                         hash: BlobHash::try_from_hash_slice(
                             key.get(U32_LEN..U32_LEN + BLOB_HASH_LEN).unwrap(),
@@ -698,7 +605,7 @@ impl Store {
         )
         .await
         .unwrap();
-        self.write(batch.build()).await.unwrap();
+        self.write(batch.build_all()).await.unwrap();
     }
 
     #[cfg(feature = "test_mode")]
@@ -727,38 +634,38 @@ impl Store {
         if !expired_keys.is_empty() {
             let mut batch = BatchBuilder::new();
             for key in expired_keys {
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::InMemory(InMemoryClass::Key(key)),
                     op: ValueOp::Clear,
                 });
-                if batch.ops.len() >= 1000 {
-                    self.write(batch.build()).await.unwrap();
+                if batch.is_large_batch() {
+                    self.write(batch.build_all()).await.unwrap();
                     batch = BatchBuilder::new();
                 }
             }
-            if !batch.ops.is_empty() {
-                self.write(batch.build()).await.unwrap();
+            if !batch.is_empty() {
+                self.write(batch.build_all()).await.unwrap();
             }
         }
 
         if !expired_counters.is_empty() {
             let mut batch = BatchBuilder::new();
             for key in expired_counters {
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::InMemory(InMemoryClass::Counter(key.clone())),
                     op: ValueOp::Clear,
                 });
-                batch.ops.push(Operation::Value {
+                batch.any_op(Operation::Value {
                     class: ValueClass::InMemory(InMemoryClass::Key(key)),
                     op: ValueOp::Clear,
                 });
-                if batch.ops.len() >= 1000 {
-                    self.write(batch.build()).await.unwrap();
+                if batch.is_large_batch() {
+                    self.write(batch.build_all()).await.unwrap();
                     batch = BatchBuilder::new();
                 }
             }
-            if !batch.ops.is_empty() {
-                self.write(batch.build()).await.unwrap();
+            if !batch.is_empty() {
+                self.write(batch.build_all()).await.unwrap();
             }
         }
     }
@@ -873,6 +780,10 @@ impl Store {
                                 value
                             );
                         }
+                        SUBSPACE_COUNTER if key.len() == U32_LEN + 1 || key.len() == U32_LEN => {
+                            // Message ID and change ID counters
+                            return Ok(true);
+                        }
                         SUBSPACE_INDEXES => {
                             println!(
                                 concat!(
@@ -907,7 +818,7 @@ impl Store {
             .unwrap();
         }
 
-        // Delete logs
+        // Delete logs and counters
         self.delete_range(
             AnyKey {
                 subspace: SUBSPACE_LOGS,
@@ -929,14 +840,21 @@ impl Store {
         .await
         .unwrap();
 
+        self.delete_range(
+            AnyKey {
+                subspace: SUBSPACE_COUNTER,
+                key: &[0u8],
+            },
+            AnyKey {
+                subspace: SUBSPACE_COUNTER,
+                key: (u32::MAX / 2).to_be_bytes().as_slice(),
+            },
+        )
+        .await
+        .unwrap();
+
         if failed {
             panic!("Store is not empty.");
         }
-    }
-}
-
-impl From<BatchBuilder> for Batch {
-    fn from(builder: BatchBuilder) -> Self {
-        builder.build()
     }
 }

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::expr::{if_block::IfBlock, tokenizer::TokenMap};
 use ahash::AHashSet;
+
 use utils::config::{Config, Rate};
 
 use super::*;
@@ -95,11 +96,11 @@ impl Default for Network {
             contact_form: None,
             node_id: 1,
             http_response_url: IfBlock::new::<()>(
-                "server.http.url",
+                "http.url",
                 [],
                 "protocol + '://' + config_get('server.hostname') + ':' + local_port",
             ),
-            http_allowed_endpoint: IfBlock::new::<()>("server.http.allowed-endpoint", [], "200"),
+            http_allowed_endpoint: IfBlock::new::<()>("http.allowed-endpoint", [], "200"),
             asn_geo_lookup: AsnGeoLookupConfig::Disabled,
             server_name: Default::default(),
             report_domain: Default::default(),
@@ -141,7 +142,7 @@ impl ContactForm {
             from_email: FieldOrDefault::parse(config, "form.email", "postmaster@localhost"),
             from_subject: FieldOrDefault::parse(config, "form.subject", "Contact form submission"),
             from_name: FieldOrDefault::parse(config, "form.name", "Anonymous"),
-            field_honey_pot: config.value("form.honey-pot.field").map(|v| v.to_string()),
+            field_honey_pot: config.value("form.honey-pot.field").map(|v| v.into()),
             rate: config
                 .property_or_default::<Option<Rate>>("form.rate-limit", "5/1h")
                 .unwrap_or_default(),
@@ -239,11 +240,8 @@ impl Network {
         }
 
         for (value, key) in [
-            (&mut network.http_response_url, "server.http.url"),
-            (
-                &mut network.http_allowed_endpoint,
-                "server.http.allowed-endpoint",
-            ),
+            (&mut network.http_response_url, "http.url"),
+            (&mut network.http_allowed_endpoint, "http.allowed-endpoint"),
         ] {
             if let Some(if_block) = IfBlock::try_parse(config, key, token_map) {
                 *value = if_block;

@@ -1,28 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::config::smtp::queue::RequireOptional;
+use super::client::SmtpClient;
+use crate::outbound::DeliveryResult;
+use crate::outbound::client::{from_error_status, from_mail_send_error};
+use crate::queue::{Error, MessageWrapper, Recipient, Status};
+use crate::queue::{ErrorDetails, HostResponse, UnexpectedResponse};
 use common::Server;
+use common::config::smtp::queue::ConnectionStrategy;
 use mail_send::Credentials;
 use smtp_proto::{
-    EhloResponse, Severity, EXT_CHUNKING, EXT_DSN, EXT_REQUIRE_TLS, EXT_SIZE, EXT_SMTP_UTF8,
-    MAIL_REQUIRETLS, MAIL_RET_FULL, MAIL_RET_HDRS, MAIL_SMTPUTF8, RCPT_NOTIFY_DELAY,
-    RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS,
+    EXT_CHUNKING, EXT_DSN, EXT_REQUIRE_TLS, EXT_SIZE, EXT_SMTP_UTF8, EhloResponse, MAIL_REQUIRETLS,
+    MAIL_RET_FULL, MAIL_RET_HDRS, MAIL_SMTPUTF8, RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE,
+    RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, Severity,
 };
-use std::time::Duration;
 use std::{fmt::Write, time::Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use trc::DeliveryEvent;
-
-use crate::outbound::client::{from_error_status, from_mail_send_error};
-use crate::queue::{ErrorDetails, HostResponse, RCPT_STATUS_CHANGED};
-
-use crate::queue::{Error, Message, Recipient, Status};
-
-use super::{client::SmtpClient, TlsStrategy};
 
 pub struct SessionParams<'x> {
     pub server: &'x Server,
@@ -30,20 +27,18 @@ pub struct SessionParams<'x> {
     pub credentials: Option<&'x Credentials<String>>,
     pub is_smtp: bool,
     pub local_hostname: &'x str,
-    pub timeout_ehlo: Duration,
-    pub timeout_mail: Duration,
-    pub timeout_rcpt: Duration,
-    pub timeout_data: Duration,
+    pub conn_strategy: &'x ConnectionStrategy,
     pub session_id: u64,
 }
 
-impl Message {
-    pub async fn deliver<T: AsyncRead + AsyncWrite + Unpin>(
+impl MessageWrapper {
+    pub(super) async fn deliver<T: AsyncRead + AsyncWrite + Unpin>(
         &self,
         mut smtp_client: SmtpClient<T>,
-        recipients: impl Iterator<Item = &mut Recipient>,
+        rcpt_idxs: Vec<usize>,
+        statuses: &mut Vec<DeliveryResult>,
         params: SessionParams<'_>,
-    ) -> Status<(), Error> {
+    ) {
         // Obtain capabilities
         let time = Instant::now();
         let capabilities = match smtp_client.say_helo(&params).await {
@@ -67,7 +62,8 @@ impl Message {
                     Elapsed = time.elapsed(),
                 );
                 smtp_client.quit().await;
-                return status;
+                statuses.push(DeliveryResult::domain(status, rcpt_idxs));
+                return;
             }
         };
 
@@ -84,7 +80,11 @@ impl Message {
                 );
 
                 smtp_client.quit().await;
-                return Status::from_smtp_error(params.hostname, "AUTH ...", err);
+                statuses.push(DeliveryResult::domain(
+                    Status::from_smtp_error(params.hostname, "AUTH ...", err),
+                    rcpt_idxs,
+                ));
+                return;
             }
 
             trc::event!(
@@ -114,7 +114,7 @@ impl Message {
 
         // MAIL FROM
         let time = Instant::now();
-        smtp_client.timeout = params.timeout_mail;
+        smtp_client.timeout = params.conn_strategy.timeout_mail;
         let cmd = self.build_mail_from(&capabilities);
         match smtp_client.cmd(cmd.as_bytes()).await.and_then(|r| {
             if r.is_positive_completion() {
@@ -128,7 +128,7 @@ impl Message {
                     Delivery(DeliveryEvent::MailFrom),
                     SpanId = params.session_id,
                     Hostname = params.hostname.to_string(),
-                    From = self.return_path.to_string(),
+                    From = self.message.return_path.to_string(),
                     Code = response.code,
                     Details = response.message.to_string(),
                     Elapsed = time.elapsed(),
@@ -144,23 +144,24 @@ impl Message {
                 );
 
                 smtp_client.quit().await;
-                return Status::from_smtp_error(params.hostname, &cmd, err);
+                statuses.push(DeliveryResult::domain(
+                    Status::from_smtp_error(params.hostname, &cmd, err),
+                    rcpt_idxs,
+                ));
+                return;
             }
         }
 
         // RCPT TO
-        let mut total_rcpt = 0;
-        let mut total_completed = 0;
         let mut accepted_rcpts = Vec::new();
-        smtp_client.timeout = params.timeout_rcpt;
-        for rcpt in recipients {
+        smtp_client.timeout = params.conn_strategy.timeout_rcpt;
+        for rcpt_idx in &rcpt_idxs {
             let time = Instant::now();
-            total_rcpt += 1;
+            let rcpt = &self.message.recipients[*rcpt_idx];
             if matches!(
                 &rcpt.status,
                 Status::Completed(_) | Status::PermanentFailure(_)
             ) {
-                total_completed += 1;
                 continue;
             }
 
@@ -180,8 +181,9 @@ impl Message {
 
                         accepted_rcpts.push((
                             rcpt,
+                            rcpt_idx,
                             Status::Completed(HostResponse {
-                                hostname: params.hostname.to_string(),
+                                hostname: params.hostname.into(),
                                 response,
                             }),
                         ));
@@ -197,20 +199,21 @@ impl Message {
                             Elapsed = time.elapsed(),
                         );
 
-                        let response = HostResponse {
-                            hostname: ErrorDetails {
-                                entity: params.hostname.to_string(),
-                                details: cmd.trim().to_string(),
+                        let response = ErrorDetails {
+                            entity: params.hostname.into(),
+                            details: Error::UnexpectedResponse(UnexpectedResponse {
+                                command: cmd.trim().into(),
+                                response,
+                            }),
+                        };
+                        statuses.push(DeliveryResult::account(
+                            if severity == Severity::PermanentNegativeCompletion {
+                                Status::PermanentFailure(response)
+                            } else {
+                                Status::TemporaryFailure(response)
                             },
-                            response,
-                        };
-                        rcpt.flags |= RCPT_STATUS_CHANGED;
-                        rcpt.status = if severity == Severity::PermanentNegativeCompletion {
-                            total_completed += 1;
-                            Status::PermanentFailure(response)
-                        } else {
-                            Status::TemporaryFailure(response)
-                        };
+                            *rcpt_idx,
+                        ));
                     }
                 },
                 Err(err) => {
@@ -225,7 +228,11 @@ impl Message {
 
                     // Something went wrong, abort.
                     smtp_client.quit().await;
-                    return Status::from_smtp_error(params.hostname, "", err);
+                    statuses.push(DeliveryResult::domain(
+                        Status::from_smtp_error(params.hostname, "", err),
+                        rcpt_idxs,
+                    ));
+                    return;
                 }
             }
         }
@@ -235,7 +242,7 @@ impl Message {
             let time = Instant::now();
             let bdat_cmd = capabilities
                 .has_capability(EXT_CHUNKING)
-                .then(|| format!("BDAT {} LAST\r\n", self.size));
+                .then(|| format!("BDAT {} LAST\r\n", self.message.size));
 
             if let Err(status) = smtp_client.send_message(self, &bdat_cmd, &params).await {
                 trc::event!(
@@ -247,7 +254,8 @@ impl Message {
                 );
 
                 smtp_client.quit().await;
-                return status;
+                statuses.push(DeliveryResult::domain(status, rcpt_idxs));
+                return;
             }
 
             if params.is_smtp {
@@ -259,7 +267,7 @@ impl Message {
                     Ok(response) => {
                         // Mark recipients as delivered
                         if response.code() == 250 {
-                            for (rcpt, status) in accepted_rcpts {
+                            for (rcpt, rcpt_idx, status) in accepted_rcpts {
                                 trc::event!(
                                     Delivery(DeliveryEvent::Delivered),
                                     SpanId = params.session_id,
@@ -270,9 +278,7 @@ impl Message {
                                     Elapsed = time.elapsed(),
                                 );
 
-                                rcpt.status = status;
-                                rcpt.flags |= RCPT_STATUS_CHANGED;
-                                total_completed += 1;
+                                statuses.push(DeliveryResult::account(status, *rcpt_idx));
                             }
                         } else {
                             trc::event!(
@@ -285,11 +291,15 @@ impl Message {
                             );
 
                             smtp_client.quit().await;
-                            return Status::from_smtp_error(
-                                params.hostname,
-                                bdat_cmd.as_deref().unwrap_or("DATA"),
-                                mail_send::Error::UnexpectedReply(response),
-                            );
+                            statuses.push(DeliveryResult::domain(
+                                Status::from_smtp_error(
+                                    params.hostname,
+                                    bdat_cmd.as_deref().unwrap_or("DATA"),
+                                    mail_send::Error::UnexpectedReply(response),
+                                ),
+                                rcpt_idxs,
+                            ));
+                            return;
                         }
                     }
                     Err(status) => {
@@ -302,7 +312,8 @@ impl Message {
                         );
 
                         smtp_client.quit().await;
-                        return status;
+                        statuses.push(DeliveryResult::domain(status, rcpt_idxs));
+                        return;
                     }
                 }
             } else {
@@ -312,9 +323,10 @@ impl Message {
                     .await
                 {
                     Ok(responses) => {
-                        for ((rcpt, _), response) in accepted_rcpts.into_iter().zip(responses) {
-                            rcpt.flags |= RCPT_STATUS_CHANGED;
-                            rcpt.status = match response.severity() {
+                        for ((rcpt, rcpt_idx, _), response) in
+                            accepted_rcpts.into_iter().zip(responses)
+                        {
+                            let status = match response.severity() {
                                 Severity::PositiveCompletion => {
                                     trc::event!(
                                         Delivery(DeliveryEvent::Delivered),
@@ -326,7 +338,6 @@ impl Message {
                                         Elapsed = time.elapsed(),
                                     );
 
-                                    total_completed += 1;
                                     Status::Completed(HostResponse {
                                         hostname: params.hostname.to_string(),
                                         response,
@@ -343,24 +354,22 @@ impl Message {
                                         Elapsed = time.elapsed(),
                                     );
 
-                                    let response = HostResponse {
-                                        hostname: ErrorDetails {
-                                            entity: params.hostname.to_string(),
-                                            details: bdat_cmd
-                                                .as_deref()
-                                                .unwrap_or("DATA")
-                                                .to_string(),
-                                        },
-                                        response,
+                                    let response = ErrorDetails {
+                                        entity: params.hostname.into(),
+                                        details: Error::UnexpectedResponse(UnexpectedResponse {
+                                            command: bdat_cmd.as_deref().unwrap_or("DATA").into(),
+                                            response,
+                                        }),
                                     };
                                     if severity == Severity::PermanentNegativeCompletion {
-                                        total_completed += 1;
                                         Status::PermanentFailure(response)
                                     } else {
                                         Status::TemporaryFailure(response)
                                     }
                                 }
                             };
+
+                            statuses.push(DeliveryResult::account(status, *rcpt_idx));
                         }
                     }
                     Err(status) => {
@@ -373,25 +382,21 @@ impl Message {
                         );
 
                         smtp_client.quit().await;
-                        return status;
+                        statuses.push(DeliveryResult::domain(status, rcpt_idxs));
+                        return;
                     }
                 }
             }
         }
 
         smtp_client.quit().await;
-        if total_completed == total_rcpt {
-            Status::Completed(())
-        } else {
-            Status::Scheduled
-        }
     }
 
     fn build_mail_from(&self, capabilities: &EhloResponse<String>) -> String {
-        let mut mail_from = String::with_capacity(self.return_path.len() + 60);
-        let _ = write!(mail_from, "MAIL FROM:<{}>", self.return_path);
+        let mut mail_from = String::with_capacity(self.message.return_path.len() + 60);
+        let _ = write!(mail_from, "MAIL FROM:<{}>", self.message.return_path);
         if capabilities.has_capability(EXT_SIZE) {
-            let _ = write!(mail_from, " SIZE={}", self.size);
+            let _ = write!(mail_from, " SIZE={}", self.message.size);
         }
         if self.has_flag(MAIL_REQUIRETLS) & capabilities.has_capability(EXT_REQUIRE_TLS) {
             mail_from.push_str(" REQUIRETLS");
@@ -405,7 +410,7 @@ impl Message {
             } else if self.has_flag(MAIL_RET_HDRS) {
                 mail_from.push_str(" RET=HDRS");
             }
-            if let Some(env_id) = &self.env_id {
+            if let Some(env_id) = &self.message.env_id {
                 let _ = write!(mail_from, " ENVID={env_id}");
             }
         }
@@ -450,7 +455,7 @@ impl Message {
 
     #[inline(always)]
     pub fn has_flag(&self, flag: u64) -> bool {
-        (self.flags & flag) != 0
+        (self.message.flags & flag) != 0
     }
 }
 
@@ -458,48 +463,5 @@ impl Recipient {
     #[inline(always)]
     pub fn has_flag(&self, flag: u64) -> bool {
         (self.flags & flag) != 0
-    }
-}
-
-impl TlsStrategy {
-    #[inline(always)]
-    pub fn try_dane(&self) -> bool {
-        matches!(
-            self.dane,
-            RequireOptional::Require | RequireOptional::Optional
-        )
-    }
-
-    #[inline(always)]
-    pub fn try_start_tls(&self) -> bool {
-        matches!(
-            self.tls,
-            RequireOptional::Require | RequireOptional::Optional
-        )
-    }
-
-    #[inline(always)]
-    pub fn is_dane_required(&self) -> bool {
-        matches!(self.dane, RequireOptional::Require)
-    }
-
-    #[inline(always)]
-    pub fn try_mta_sts(&self) -> bool {
-        matches!(
-            self.mta_sts,
-            RequireOptional::Require | RequireOptional::Optional
-        )
-    }
-
-    #[inline(always)]
-    pub fn is_mta_sts_required(&self) -> bool {
-        matches!(self.mta_sts, RequireOptional::Require)
-    }
-
-    #[inline(always)]
-    pub fn is_tls_required(&self) -> bool {
-        matches!(self.tls, RequireOptional::Require)
-            || self.is_dane_required()
-            || self.is_mta_sts_required()
     }
 }

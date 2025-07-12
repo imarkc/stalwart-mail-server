@@ -1,18 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::{config::spamfilter::SpamFilterAction, listener::SessionStream};
-use mail_auth::{dmarc::Policy, ArcOutput, DkimOutput, DmarcResult};
+use mail_auth::{ArcOutput, DkimOutput, DmarcResult, dmarc::Policy};
 use mail_parser::Message;
 use spam_filter::{
+    SpamFilterInput,
     analysis::{
         init::SpamFilterInit, score::SpamFilterAnalyzeScore,
         trusted_reply::SpamFilterAnalyzeTrustedReply,
     },
-    SpamFilterInput,
 };
 
 use crate::core::Session;

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,11 +8,11 @@ use roaring::RoaringBitmap;
 use rusqlite::OptionalExtension;
 
 use crate::{
-    write::{key::DeserializeBigEndian, BitmapClass, ValueClass},
-    BitmapKey, Deserialize, IterateParams, Key, ValueKey, U32_LEN,
+    BitmapKey, Deserialize, IterateParams, Key, U32_LEN, ValueKey,
+    write::{BitmapClass, ValueClass, key::DeserializeBigEndian},
 };
 
-use super::{into_error, SqliteStore};
+use super::{SqliteStore, into_error};
 
 impl SqliteStore {
     pub(crate) async fn get_value<U>(&self, key: impl Key) -> trc::Result<Option<U>>
@@ -41,7 +41,7 @@ impl SqliteStore {
 
     pub(crate) async fn get_bitmap(
         &self,
-        mut key: BitmapKey<BitmapClass<u32>>,
+        mut key: BitmapKey<BitmapClass>,
     ) -> trc::Result<Option<RoaringBitmap>> {
         let begin = key.serialize(0);
         key.document_id = u32::MAX;
@@ -147,7 +147,7 @@ impl SqliteStore {
 
     pub(crate) async fn get_counter(
         &self,
-        key: impl Into<ValueKey<ValueClass<u32>>> + Sync + Send,
+        key: impl Into<ValueKey<ValueClass>> + Sync + Send,
     ) -> trc::Result<i64> {
         let key = key.into();
         let table = char::from(key.subspace());

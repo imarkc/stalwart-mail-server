@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -14,8 +14,9 @@ use std::{
 use mail_auth::{
     MessageAuthenticator,
     hickory_resolver::{
-        AsyncResolver, TokioAsyncResolver,
-        config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts},
+        TokioResolver,
+        config::{NameServerConfig, ProtocolConfig, ResolverConfig, ResolverOpts},
+        name_server::TokioConnectionProvider,
         system_conf::read_system_conf,
     },
 };
@@ -34,7 +35,7 @@ pub struct Resolvers {
 
 #[derive(Clone)]
 pub struct DnssecResolver {
-    pub resolver: TokioAsyncResolver,
+    pub resolver: TokioResolver,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +118,7 @@ impl Resolvers {
                 })
                 .unwrap_or_else(|_| (ResolverConfig::cloudflare(), ResolverOpts::default())),
             "custom" => {
-                let mut resolver_config = ResolverConfig::new();
+                let mut resolver_config = ResolverConfig::default();
                 for url in config
                     .values("resolver.custom")
                     .map(|(_, v)| v.to_string())
@@ -129,21 +130,23 @@ impl Resolvers {
                     {
                         (
                             match proto.as_str() {
-                                "udp" => Protocol::Udp,
-                                "tcp" => Protocol::Tcp,
-                                "tls" => Protocol::Tls,
+                                "udp" => ProtocolConfig::Udp,
+                                "tcp" => ProtocolConfig::Tcp,
+                                "tls" => ProtocolConfig::Tls {
+                                    server_name: host.clone().into(),
+                                },
                                 _ => {
                                     config.new_parse_error(
                                         "resolver.custom",
                                         format!("Invalid custom resolver protocol {url:?}"),
                                     );
-                                    Protocol::Udp
+                                    ProtocolConfig::Udp
                                 }
                             },
                             host.to_string(),
                         )
                     } else {
-                        (Protocol::Udp, url)
+                        (ProtocolConfig::Udp, url)
                     };
 
                     let (host, port) = if let Some(host) = host.strip_prefix('[') {
@@ -230,7 +233,12 @@ impl Resolvers {
         Resolvers {
             dns: MessageAuthenticator::new(resolver_config, opts).unwrap(),
             dnssec: DnssecResolver {
-                resolver: AsyncResolver::tokio(config_dnssec, opts_dnssec),
+                resolver: TokioResolver::builder_with_config(
+                    config_dnssec,
+                    TokioConnectionProvider::default(),
+                )
+                .with_options(opts_dnssec)
+                .build(),
             },
         }
     }
@@ -355,7 +363,12 @@ impl Default for Resolvers {
         Self {
             dns: MessageAuthenticator::new(config, opts).expect("Failed to build DNS resolver"),
             dnssec: DnssecResolver {
-                resolver: AsyncResolver::tokio(config_dnssec, opts_dnssec),
+                resolver: TokioResolver::builder_with_config(
+                    config_dnssec,
+                    TokioConnectionProvider::default(),
+                )
+                .with_options(opts_dnssec)
+                .build(),
             },
         }
     }

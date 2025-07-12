@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,13 +7,14 @@
 use std::future::Future;
 
 use common::{
-    config::spamfilter::{IpResolver, Location},
     Server,
+    config::spamfilter::{IpResolver, Location},
 };
+use compact_str::CompactString;
 
 use crate::{
-    modules::expression::{EmailHeader, SpamFilterResolver, StringResolver},
     SpamFilterContext, TextPart,
+    modules::expression::{EmailHeader, SpamFilterResolver, StringResolver},
 };
 
 pub trait SpamFilterAnalyzeRules: Sync + Send {
@@ -29,7 +30,7 @@ impl SpamFilterAnalyzeRules for Server {
             for url in &ctx.output.urls {
                 for rule in &self.core.spam.rules.url {
                     if let Some(tag) = self
-                        .eval_if::<String, _>(
+                        .eval_if::<CompactString, _>(
                             rule,
                             &SpamFilterResolver::new(ctx, &url.element, url.location),
                             ctx.input.span_id,
@@ -48,7 +49,7 @@ impl SpamFilterAnalyzeRules for Server {
 
                 for rule in &self.core.spam.rules.domain {
                     if let Some(tag) = self
-                        .eval_if::<String, _>(
+                        .eval_if::<CompactString, _>(
                             rule,
                             &SpamFilterResolver::new(ctx, &resolver, domain.location),
                             ctx.input.span_id,
@@ -65,7 +66,7 @@ impl SpamFilterAnalyzeRules for Server {
             for email in &ctx.output.emails {
                 for rule in &self.core.spam.rules.email {
                     if let Some(tag) = self
-                        .eval_if::<String, _>(
+                        .eval_if::<CompactString, _>(
                             rule,
                             &SpamFilterResolver::new(ctx, &email.element, email.location),
                             ctx.input.span_id,
@@ -85,7 +86,7 @@ impl SpamFilterAnalyzeRules for Server {
                 for email in rcpt {
                     for rule in &self.core.spam.rules.email {
                         if let Some(tag) = self
-                            .eval_if::<String, _>(
+                            .eval_if::<CompactString, _>(
                                 rule,
                                 &SpamFilterResolver::new(ctx, email, location),
                                 ctx.input.span_id,
@@ -105,7 +106,7 @@ impl SpamFilterAnalyzeRules for Server {
 
                 for rule in &self.core.spam.rules.ip {
                     if let Some(tag) = self
-                        .eval_if::<String, _>(
+                        .eval_if::<CompactString, _>(
                             rule,
                             &SpamFilterResolver::new(ctx, &ip_resolver, ip.location),
                             ctx.input.span_id,
@@ -124,7 +125,7 @@ impl SpamFilterAnalyzeRules for Server {
                     ctx.input
                         .message
                         .raw_message()
-                        .get(header.offset_start..header.offset_end)
+                        .get(header.offset_start as usize..header.offset_end as usize)
                         .unwrap_or_default(),
                 );
                 let header_resolver = EmailHeader {
@@ -134,7 +135,7 @@ impl SpamFilterAnalyzeRules for Server {
 
                 for rule in &self.core.spam.rules.header {
                     if let Some(tag) = self
-                        .eval_if::<String, _>(
+                        .eval_if::<CompactString, _>(
                             rule,
                             &SpamFilterResolver::new(ctx, &header_resolver, Location::BodyText),
                             ctx.input.span_id,
@@ -154,6 +155,7 @@ impl SpamFilterAnalyzeRules for Server {
                     TextPart::Html { text_body, .. } => text_body.as_str(),
                     TextPart::None => continue,
                 };
+                let idx = idx as u32;
                 let location = if ctx.input.message.text_body.contains(&idx) {
                     Location::BodyText
                 } else if ctx.input.message.html_body.contains(&idx) {
@@ -165,7 +167,7 @@ impl SpamFilterAnalyzeRules for Server {
 
                 for rule in &self.core.spam.rules.body {
                     if let Some(tag) = self
-                        .eval_if::<String, _>(
+                        .eval_if::<CompactString, _>(
                             rule,
                             &SpamFilterResolver::new(ctx, &string_resolver, location),
                             ctx.input.span_id,
@@ -182,7 +184,7 @@ impl SpamFilterAnalyzeRules for Server {
             let dummy_resolver = StringResolver("");
             for rule in &self.core.spam.rules.any {
                 if let Some(tag) = self
-                    .eval_if::<String, _>(
+                    .eval_if::<CompactString, _>(
                         rule,
                         &SpamFilterResolver::new(ctx, &dummy_resolver, Location::BodyText),
                         ctx.input.span_id,

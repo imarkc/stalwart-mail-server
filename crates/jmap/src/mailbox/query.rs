@@ -1,24 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use common::{auth::AccessToken, Server};
-use email::mailbox::MailboxFnc;
+use crate::{JmapMethods, changes::state::MessageCacheState};
+use common::{Server, auth::AccessToken, config::jmap::settings::SpecialUse};
+use email::cache::{MessageCacheFetch, mailbox::MailboxCacheAccess};
 use jmap_proto::{
     method::query::{Comparator, Filter, QueryRequest, QueryResponse, SortProperty},
-    object::{mailbox::QueryArguments, Object},
-    types::{acl::Acl, collection::Collection, property::Property, value::Value},
+    object::mailbox::QueryArguments,
+    types::{acl::Acl, collection::Collection},
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
 };
 use store::{
-    ahash::{AHashMap, AHashSet},
-    query::{self, sort::Pagination},
+    query::{self},
     roaring::RoaringBitmap,
 };
-
-use crate::{auth::acl::AclMethods, JmapMethods, UpdateResults};
-use std::future::Future;
 
 pub trait MailboxQuery: Sync + Send {
     fn mailbox_query(
@@ -38,14 +39,22 @@ impl MailboxQuery for Server {
         let sort_as_tree = request.arguments.sort_as_tree.unwrap_or(false);
         let filter_as_tree = request.arguments.filter_as_tree.unwrap_or(false);
         let mut filters = Vec::with_capacity(request.filter.len());
-        let mailbox_ids = self.mailbox_get_or_create(account_id).await?;
+        let mailboxes = self.get_cached_messages(account_id).await?;
 
         for cond in std::mem::take(&mut request.filter) {
             match cond {
-                Filter::ParentId(parent_id) => filters.push(query::Filter::eq(
-                    Property::ParentId,
-                    parent_id.map(|id| id.document_id() + 1).unwrap_or(0),
-                )),
+                Filter::ParentId(parent_id) => {
+                    let parent_id = parent_id.map(|id| id.document_id()).unwrap_or(u32::MAX);
+                    filters.push(query::Filter::is_in_set(
+                        mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .filter(|mailbox| mailbox.parent_id == parent_id)
+                            .map(|m| m.document_id)
+                            .collect::<RoaringBitmap>(),
+                    ));
+                }
                 Filter::Name(name) => {
                     #[cfg(feature = "test_mode")]
                     {
@@ -54,14 +63,39 @@ impl MailboxQuery for Server {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         }
                     }
-                    filters.push(query::Filter::has_text(Property::Name, &name));
+                    let name = name.to_lowercase();
+                    filters.push(query::Filter::is_in_set(
+                        mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .filter(|mailbox| mailbox.name.to_lowercase().contains(&name))
+                            .map(|m| m.document_id)
+                            .collect::<RoaringBitmap>(),
+                    ));
                 }
                 Filter::Role(role) => {
                     if let Some(role) = role {
-                        filters.push(query::Filter::eq(Property::Role, role));
+                        filters.push(query::Filter::is_in_set(
+                            mailboxes
+                                .mailboxes
+                                .items
+                                .iter()
+                                .filter(|mailbox| mailbox.role.as_str().is_some_and(|r| r == role))
+                                .map(|m| m.document_id)
+                                .collect::<RoaringBitmap>(),
+                        ));
                     } else {
                         filters.push(query::Filter::Not);
-                        filters.push(query::Filter::is_in_bitmap(Property::Role, ()));
+                        filters.push(query::Filter::is_in_set(
+                            mailboxes
+                                .mailboxes
+                                .items
+                                .iter()
+                                .filter(|mailbox| matches!(mailbox.role, SpecialUse::None))
+                                .map(|m| m.document_id)
+                                .collect::<RoaringBitmap>(),
+                        ));
                         filters.push(query::Filter::End);
                     }
                 }
@@ -69,7 +103,15 @@ impl MailboxQuery for Server {
                     if !has_role {
                         filters.push(query::Filter::Not);
                     }
-                    filters.push(query::Filter::is_in_bitmap(Property::Role, ()));
+                    filters.push(query::Filter::is_in_set(
+                        mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .filter(|mailbox| !matches!(mailbox.role, SpecialUse::None))
+                            .map(|m| m.document_id)
+                            .collect::<RoaringBitmap>(),
+                    ));
                     if !has_role {
                         filters.push(query::Filter::End);
                     }
@@ -78,9 +120,16 @@ impl MailboxQuery for Server {
                     if !is_subscribed {
                         filters.push(query::Filter::Not);
                     }
-                    filters.push(query::Filter::eq(
-                        Property::IsSubscribed,
-                        access_token.primary_id,
+                    filters.push(query::Filter::is_in_set(
+                        mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .filter(|mailbox| {
+                                mailbox.subscribers.contains(&access_token.primary_id)
+                            })
+                            .map(|m| m.document_id)
+                            .collect::<RoaringBitmap>(),
                     ));
                     if !is_subscribed {
                         filters.push(query::Filter::End);
@@ -93,7 +142,7 @@ impl MailboxQuery for Server {
                 other => {
                     return Err(trc::JmapEvent::UnsupportedFilter
                         .into_err()
-                        .details(other.to_string()))
+                        .details(other.to_string()));
                 }
             }
         }
@@ -102,152 +151,126 @@ impl MailboxQuery for Server {
             .filter(account_id, Collection::Mailbox, filters)
             .await?;
         if access_token.is_shared(account_id) {
-            result_set.apply_mask(
-                self.shared_documents(access_token, account_id, Collection::Mailbox, Acl::Read)
-                    .await?,
-            );
+            result_set.apply_mask(mailboxes.shared_mailboxes(access_token, Acl::Read));
         }
-        let (mut response, mut paginate) = self.build_query_response(&result_set, &request).await?;
+        let (mut response, mut paginate) = self
+            .build_query_response(&result_set, mailboxes.get_state(true), &request)
+            .await?;
 
-        // Build mailbox tree
-        let mut hierarchy = AHashMap::default();
-        let mut tree = AHashMap::default();
-        if (filter_as_tree || sort_as_tree)
-            && (paginate.is_some()
-                || (response.total.is_some_and(|total| total > 0) && filter_as_tree))
-        {
-            for (document_id, value) in self
-                .get_properties::<Object<Value>, _, _>(
-                    account_id,
-                    Collection::Mailbox,
-                    &mailbox_ids,
-                    Property::Value,
-                )
-                .await?
-            {
-                let parent_id = value
-                    .properties
-                    .get(&Property::ParentId)
-                    .and_then(|id| id.as_id().map(|id| id.document_id()))
-                    .unwrap_or(0);
-                hierarchy.insert(document_id + 1, parent_id);
-                tree.entry(parent_id)
-                    .or_insert_with(AHashSet::default)
-                    .insert(document_id + 1);
-            }
+        // Filter as tree
+        if filter_as_tree {
+            let mut filtered_ids = RoaringBitmap::new();
 
-            if filter_as_tree {
-                let mut filtered_ids = RoaringBitmap::new();
-
-                for document_id in &result_set.results {
-                    let mut keep = false;
-                    let mut jmap_id = document_id + 1;
-
-                    for _ in 0..self.core.jmap.mailbox_max_depth {
-                        if let Some(&parent_id) = hierarchy.get(&jmap_id) {
-                            if parent_id == 0 {
-                                keep = true;
-                                break;
-                            } else if !result_set.results.contains(parent_id - 1) {
-                                break;
+            for document_id in &result_set.results {
+                let mut check_id = document_id;
+                for _ in 0..self.core.jmap.mailbox_max_depth {
+                    if let Some(mailbox) = mailboxes.mailbox_by_id(&check_id) {
+                        if let Some(parent_id) = mailbox.parent_id() {
+                            if result_set.results.contains(parent_id) {
+                                check_id = parent_id;
                             } else {
-                                jmap_id = parent_id;
+                                break;
                             }
                         } else {
-                            break;
+                            filtered_ids.insert(document_id);
                         }
                     }
-
-                    if keep {
-                        filtered_ids.push(document_id);
+                }
+            }
+            if filtered_ids.len() != result_set.results.len() {
+                let total = filtered_ids.len() as usize;
+                if response.total.is_some() {
+                    response.total = Some(total);
+                }
+                if let Some(paginate) = &mut paginate {
+                    if paginate.limit > total {
+                        paginate.limit = total;
                     }
                 }
-                if filtered_ids.len() != result_set.results.len() {
-                    let total = filtered_ids.len() as usize;
-                    if response.total.is_some() {
-                        response.total = Some(total);
-                    }
-                    if let Some(paginate) = &mut paginate {
-                        if paginate.limit > total {
-                            paginate.limit = total;
-                        }
-                    }
-                    result_set.results = filtered_ids;
-                }
+                result_set.results = filtered_ids;
             }
         }
 
-        if let Some(mut paginate) = paginate {
-            // Parse sort criteria
+        if let Some(paginate) = paginate {
             let mut comparators = Vec::with_capacity(request.sort.as_ref().map_or(1, |s| s.len()));
+
+            // Sort as tree
+            if sort_as_tree {
+                let sorted_list = mailboxes
+                    .mailboxes
+                    .items
+                    .iter()
+                    .map(|mailbox| (mailbox.path.as_str(), mailbox.document_id))
+                    .collect::<BTreeMap<_, _>>();
+                comparators.push(query::Comparator::sorted_list(
+                    sorted_list.into_values().collect(),
+                    true,
+                ));
+            }
+
+            // Parse sort criteria
             for comparator in request
                 .sort
-                .and_then(|s| if !s.is_empty() { s.into() } else { None })
+                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| vec![Comparator::ascending(SortProperty::ParentId)])
             {
                 comparators.push(match comparator.property {
                     SortProperty::Name => {
-                        query::Comparator::field(Property::Name, comparator.is_ascending)
+                        let sorted_list = mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .map(|mailbox| (mailbox.name.as_str(), mailbox.document_id))
+                            .collect::<BTreeSet<_>>();
+
+                        query::Comparator::sorted_list(
+                            sorted_list.into_iter().map(|v| v.1).collect(),
+                            comparator.is_ascending,
+                        )
                     }
                     SortProperty::SortOrder => {
-                        query::Comparator::field(Property::SortOrder, comparator.is_ascending)
+                        let sorted_list = mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .map(|mailbox| (mailbox.sort_order, mailbox.document_id))
+                            .collect::<BTreeSet<_>>();
+
+                        query::Comparator::sorted_list(
+                            sorted_list.into_iter().map(|v| v.1).collect(),
+                            comparator.is_ascending,
+                        )
                     }
                     SortProperty::ParentId => {
-                        query::Comparator::field(Property::ParentId, comparator.is_ascending)
+                        let sorted_list = mailboxes
+                            .mailboxes
+                            .items
+                            .iter()
+                            .map(|mailbox| {
+                                (
+                                    mailbox.parent_id().map(|id| id + 1).unwrap_or_default(),
+                                    mailbox.document_id,
+                                )
+                            })
+                            .collect::<BTreeSet<_>>();
+
+                        query::Comparator::sorted_list(
+                            sorted_list.into_iter().map(|v| v.1).collect(),
+                            comparator.is_ascending,
+                        )
                     }
 
                     other => {
                         return Err(trc::JmapEvent::UnsupportedSort
                             .into_err()
-                            .details(other.to_string()))
+                            .details(other.to_string()));
                     }
                 });
             }
 
-            // Sort as tree
-            if sort_as_tree {
-                let dummy_paginate = Pagination::new(result_set.results.len() as usize, 0, None, 0);
-                response = self
-                    .sort(result_set, comparators, dummy_paginate, response)
-                    .await?;
-
-                let mut stack = Vec::new();
-                let mut jmap_id = 0;
-
-                'outer: for _ in 0..(response.ids.len() * 10 * self.core.jmap.mailbox_max_depth) {
-                    let (mut children, mut it) = if let Some(children) = tree.remove(&jmap_id) {
-                        (children, response.ids.iter())
-                    } else if let Some(prev) = stack.pop() {
-                        prev
-                    } else {
-                        break;
-                    };
-
-                    while let Some(&id) = it.next() {
-                        let next_id = id.document_id() + 1;
-                        if children.remove(&next_id) {
-                            jmap_id = next_id;
-                            if !paginate.add(0, id.document_id()) {
-                                break 'outer;
-                            } else {
-                                stack.push((children, it));
-                                continue 'outer;
-                            }
-                        }
-                    }
-
-                    if !children.is_empty() {
-                        jmap_id = *children.iter().next().unwrap();
-                        children.remove(&jmap_id);
-                        stack.push((children, it));
-                    }
-                }
-                response.update_results(paginate.build())?;
-            } else {
-                response = self
-                    .sort(result_set, comparators, paginate, response)
-                    .await?;
-            }
+            response = self
+                .sort(result_set, comparators, paginate, response)
+                .await?;
         }
 
         Ok(response)

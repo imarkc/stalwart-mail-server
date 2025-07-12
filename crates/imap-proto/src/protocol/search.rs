@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use store::fts::{FilterItem, FilterType};
 
-use super::{quoted_string, serialize_sequence, Flag, Sequence};
+use super::{Flag, Sequence, quoted_string, serialize_sequence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {

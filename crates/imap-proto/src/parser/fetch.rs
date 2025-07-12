@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,6 +7,8 @@
 use std::borrow::Cow;
 use std::iter::Peekable;
 use std::vec::IntoIter;
+
+use compact_str::{CompactString, ToCompactString, format_compact};
 
 use crate::{
     Command,
@@ -28,10 +30,10 @@ impl Request<Command> {
         let sequence_set = parse_sequence_set(
             &tokens
                 .next()
-                .ok_or_else(|| bad(self.tag.to_string(), "Missing sequence set."))?
+                .ok_or_else(|| bad(self.tag.to_compact_string(), "Missing sequence set."))?
                 .unwrap_bytes(),
         )
-        .map_err(|v| bad(self.tag.to_string(), v))?;
+        .map_err(|v| bad(self.tag.to_compact_string(), v))?;
 
         let mut in_parentheses = false;
 
@@ -88,7 +90,7 @@ impl Request<Command> {
                                     let rfc822 = tokens
                                         .next()
                                         .ok_or_else(|| {
-                                            bad(self.tag.to_string(), "Missing RFC822 parameter.")
+                                            bad(self.tag.to_compact_string(), "Missing RFC822 parameter.")
                                         })?
                                         .unwrap_bytes();
                                     if rfc822.eq_ignore_ascii_case(b"HEADER") {
@@ -99,8 +101,8 @@ impl Request<Command> {
                                         Attribute::Rfc822Text
                                     } else {
                                         return Err(bad(
-                                            self.tag,
-                                            format!(
+                                            CompactString::from_string_buffer(self.tag),
+                                            format_compact!(
                                                 "Invalid RFC822 parameter {:?}.",
                                                 String::from_utf8_lossy(&rfc822)
                                             ),
@@ -124,13 +126,13 @@ impl Request<Command> {
                                         .is_none_or( |token| !token.eq_ignore_ascii_case(b"PEEK"))
                                     {
                                         return Err(bad(
-                                            self.tag.clone(),
+                                            self.tag.to_compact_string(),
                                             "Expected 'PEEK' after '.'.",
                                         ));
                                     }
                                     if tokens.next().is_none_or( |token| !token.is_bracket_open()) {
                                         return Err(bad(
-                                            self.tag.clone(),
+                                            self.tag.to_compact_string(),
                                             "Expected '[' after 'BODY.PEEK'",
                                         ));
                                     }
@@ -160,7 +162,7 @@ impl Request<Command> {
                                                     !token.eq_ignore_ascii_case(b"FIELDS")
                                                 }) {
                                                     return Err(bad(
-                                                        self.tag,
+                                                        CompactString::from_string_buffer(self.tag),
                                                         "Expected 'FIELDS' after 'HEADER.'.",
                                                     ));
                                                 }
@@ -170,7 +172,7 @@ impl Request<Command> {
                                                         !token.eq_ignore_ascii_case(b"NOT")
                                                     }) {
                                                         return Err(bad(
-                                                            self.tag,
+                                                            CompactString::from_string_buffer(self.tag),
                                                             "Expected 'NOT' after 'HEADER.FIELDS.'.",
                                                         ));
                                                     }
@@ -183,7 +185,7 @@ impl Request<Command> {
                                                     .is_none_or( |token| !token.is_parenthesis_open())
                                                 {
                                                     return Err(bad(
-                                                        self.tag,
+                                                        CompactString::from_string_buffer(self.tag),
                                                         "Expected '(' after 'HEADER.FIELDS'.",
                                                     ));
                                                 }
@@ -193,12 +195,12 @@ impl Request<Command> {
                                                         Token::ParenthesisClose => break,
                                                         Token::Argument(value) => {
                                                             fields.push(String::from_utf8(value).map_err(
-                                                            |_| bad(self.tag.clone(), "Invalid UTF-8 in header field name."),
+                                                            |_| bad(self.tag.to_compact_string(),"Invalid UTF-8 in header field name."),
                                                         )?);
                                                         }
                                                         _ => {
                                                             return Err(bad(
-                                                                self.tag,
+                                                                CompactString::from_string_buffer(self.tag),
                                                                 "Expected field name.",
                                                             ))
                                                         }
@@ -218,7 +220,7 @@ impl Request<Command> {
                                         } else {
                                             Section::Part {
                                                 num: parse_number::<u32>(&value)
-                                                    .map_err(|v| bad(self.tag.to_string(), v))?,
+                                                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                                             }
                                         };
                                         sections.push(section);
@@ -226,8 +228,8 @@ impl Request<Command> {
                                     Token::Dot => (),
                                     _ => {
                                         return Err(bad(
-                                            self.tag,
-                                            format!(
+                                            CompactString::from_string_buffer(self.tag),
+                                            format_compact!(
                                                 "Invalid token {:?} found in section-spect.",
                                                 token
                                             ),
@@ -240,7 +242,7 @@ impl Request<Command> {
                                 peek: is_peek,
                                 sections,
                                 partial: parse_partial(&mut tokens)
-                                    .map_err(|v| bad(self.tag.to_string(), v))?,
+                                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                             });
                         },
                         "BINARY" => {
@@ -249,7 +251,7 @@ impl Request<Command> {
                                 let param = tokens
                                     .next()
                                     .ok_or({
-                                        bad(self.tag.clone(), "Missing parameter after 'BINARY.'.")
+                                        bad(self.tag.to_compact_string(),"Missing parameter after 'BINARY.'.")
                                     })?
                                     .unwrap_bytes();
                                 if param.eq_ignore_ascii_case(b"PEEK") {
@@ -258,7 +260,7 @@ impl Request<Command> {
                                     (false, true)
                                 } else {
                                     return Err(bad(
-                                        self.tag,
+                                        CompactString::from_string_buffer(self.tag),
                                         "Expected 'PEEK' or 'SIZE' after 'BINARY.'.",
                                     ));
                                 }
@@ -268,7 +270,7 @@ impl Request<Command> {
 
                             // Parse section-part
                             if tokens.next().is_none_or( |token| !token.is_bracket_open()) {
-                                return Err(bad(self.tag.to_string(), "Expected '[' after 'BINARY'."));
+                                return Err(bad(self.tag.to_compact_string(), "Expected '[' after 'BINARY'."));
                             }
                             let mut sections = Vec::new();
                             while let Some(token) = tokens.next() {
@@ -276,15 +278,15 @@ impl Request<Command> {
                                     Token::Argument(value) => {
                                         sections.push(
                                             parse_number::<u32>(&value)
-                                                .map_err(|v| bad(self.tag.to_string(), v))?,
+                                                .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                                         );
                                     }
                                     Token::Dot => (),
                                     Token::BracketClose => break,
                                     _ => {
                                         return Err(bad(
-                                            self.tag,
-                                            format!(
+                                            CompactString::from_string_buffer(self.tag),
+                                            format_compact!(
                                                 "Expected part section integer, got {:?}.",
                                                 token.to_string()
                                             ),
@@ -297,7 +299,7 @@ impl Request<Command> {
                                     peek: is_peek,
                                     sections,
                                     partial: parse_partial(&mut tokens)
-                                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                                 }
                             } else {
                                 Attribute::BinarySize { sections }
@@ -336,8 +338,8 @@ impl Request<Command> {
                         },
                         _ => {
                             return Err(bad(
-                                self.tag,
-                                format!("Invalid attribute {:?}", String::from_utf8_lossy(&value)),
+                                CompactString::from_string_buffer(self.tag),
+                                format_compact!("Invalid attribute {:?}", String::from_utf8_lossy(&value)),
                             ));
                         }
                     );
@@ -350,20 +352,26 @@ impl Request<Command> {
                     if !in_parentheses {
                         in_parentheses = true;
                     } else {
-                        return Err(bad(self.tag.to_string(), "Unexpected parenthesis open."));
+                        return Err(bad(
+                            self.tag.to_compact_string(),
+                            "Unexpected parenthesis open.",
+                        ));
                     }
                 }
                 Token::ParenthesisClose => {
                     if in_parentheses {
                         break;
                     } else {
-                        return Err(bad(self.tag.to_string(), "Unexpected parenthesis close."));
+                        return Err(bad(
+                            self.tag.to_compact_string(),
+                            "Unexpected parenthesis close.",
+                        ));
                     }
                 }
                 _ => {
                     return Err(bad(
-                        self.tag,
-                        format!("Invalid fetch argument {:?}.", token.to_string()),
+                        CompactString::from_string_buffer(self.tag),
+                        format_compact!("Invalid fetch argument {:?}.", token.to_string()),
                     ));
                 }
             }
@@ -381,11 +389,14 @@ impl Request<Command> {
                             &tokens
                                 .next()
                                 .ok_or_else(|| {
-                                    bad(self.tag.to_string(), "Missing CHANGEDSINCE parameter.")
+                                    bad(
+                                        self.tag.to_compact_string(),
+                                        "Missing CHANGEDSINCE parameter.",
+                                    )
                                 })?
                                 .unwrap_bytes(),
                         )
-                        .map_err(|v| bad(self.tag.to_string(), v))?
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?
                         .into();
                     }
                     Token::Argument(param) if param.eq_ignore_ascii_case(b"VANISHED") => {
@@ -396,8 +407,8 @@ impl Request<Command> {
                     }
                     _ => {
                         return Err(bad(
-                            self.tag.clone(),
-                            format!("Unsupported parameter '{}'.", token),
+                            self.tag.to_compact_string(),
+                            format_compact!("Unsupported parameter '{}'.", token),
                         ));
                     }
                 }
@@ -413,7 +424,10 @@ impl Request<Command> {
                 include_vanished,
             })
         } else {
-            Err(bad(self.tag, "No data items to fetch specified."))
+            Err(bad(
+                CompactString::from_string_buffer(self.tag),
+                "No data items to fetch specified.",
+            ))
         }
     }
 }
@@ -513,7 +527,7 @@ mod tests {
             (
                 "A654 FETCH 2:4 (FLAGS BODY[HEADER.FIELDS (DATE FROM)])\r\n",
                 fetch::Arguments {
-                    tag: "A654".to_string(),
+                    tag: "A654".into(),
                     sequence_set: Sequence::range(2.into(), 4.into()),
                     attributes: vec![
                         Attribute::Flags,
@@ -521,7 +535,7 @@ mod tests {
                             peek: false,
                             sections: vec![Section::HeaderFields {
                                 not: false,
-                                fields: vec!["DATE".to_string(), "FROM".to_string()],
+                                fields: vec!["DATE".into(), "FROM".into()],
                             }],
                             partial: None,
                         },
@@ -533,7 +547,7 @@ mod tests {
             (
                 "A001 FETCH 1 BODY[]\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![Attribute::BodySection {
                         peek: false,
@@ -547,7 +561,7 @@ mod tests {
             (
                 "A001 FETCH 1 (BODY[HEADER])\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![Attribute::BodySection {
                         peek: false,
@@ -561,14 +575,14 @@ mod tests {
             (
                 "A001 FETCH 1 (BODY.PEEK[HEADER.FIELDS (X-MAILER)] PREVIEW(LAZY))\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::BodySection {
                             peek: true,
                             sections: vec![Section::HeaderFields {
                                 not: false,
-                                fields: vec!["X-MAILER".to_string()],
+                                fields: vec!["X-MAILER".into()],
                             }],
                             partial: None,
                         },
@@ -581,17 +595,13 @@ mod tests {
             (
                 "A001 FETCH 1 (BODY[HEADER.FIELDS.NOT (FROM TO SUBJECT)])\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![Attribute::BodySection {
                         peek: false,
                         sections: vec![Section::HeaderFields {
                             not: true,
-                            fields: vec![
-                                "FROM".to_string(),
-                                "TO".to_string(),
-                                "SUBJECT".to_string(),
-                            ],
+                            fields: vec!["FROM".into(), "TO".into(), "SUBJECT".into()],
                         }],
                         partial: None,
                     }],
@@ -602,7 +612,7 @@ mod tests {
             (
                 "A001 FETCH 1 (BODY[MIME] BODY[TEXT] PREVIEW)\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::BodySection {
@@ -624,7 +634,7 @@ mod tests {
             (
                 "A001 FETCH 1 (BODYSTRUCTURE ENVELOPE FLAGS INTERNALDATE UID)\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::BodyStructure,
@@ -640,7 +650,7 @@ mod tests {
             (
                 "A001 FETCH 1 (RFC822 RFC822.HEADER RFC822.SIZE RFC822.TEXT)\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::Rfc822,
@@ -666,7 +676,7 @@ mod tests {
                     ")\r\n"
                 ),
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::BodySection {
@@ -728,7 +738,7 @@ mod tests {
             (
                 "A001 FETCH 1 ALL\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::Flags,
@@ -743,7 +753,7 @@ mod tests {
             (
                 "A001 FETCH 1 FULL\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::Flags,
@@ -759,7 +769,7 @@ mod tests {
             (
                 "A001 FETCH 1 FAST\r\n",
                 fetch::Arguments {
-                    tag: "A001".to_string(),
+                    tag: "A001".into(),
                     sequence_set: Sequence::number(1),
                     attributes: vec![
                         Attribute::Flags,
@@ -773,7 +783,7 @@ mod tests {
             (
                 "s100 UID FETCH 1:* (FLAGS MODSEQ) (CHANGEDSINCE 12345 VANISHED)\r\n",
                 fetch::Arguments {
-                    tag: "s100".to_string(),
+                    tag: "s100".into(),
                     sequence_set: Sequence::range(1.into(), None),
                     attributes: vec![Attribute::Flags, Attribute::ModSeq],
                     changed_since: 12345.into(),
@@ -783,7 +793,7 @@ mod tests {
             (
                 "9 UID FETCH 1:* UID (VANISHED CHANGEDSINCE 1)\r\n",
                 fetch::Arguments {
-                    tag: "9".to_string(),
+                    tag: "9".into(),
                     sequence_set: Sequence::range(1.into(), None),
                     attributes: vec![Attribute::Uid],
                     changed_since: 1.into(),

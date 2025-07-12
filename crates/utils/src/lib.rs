@@ -1,35 +1,61 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{fmt::Display, sync::Arc};
 
+pub mod bimap;
 pub mod cache;
 pub mod codec;
 pub mod config;
 pub mod glob;
+pub mod json;
 pub mod map;
 pub mod snowflake;
+pub mod template;
+pub mod topological;
 pub mod url_params;
 
+use compact_str::ToCompactString;
 use futures::StreamExt;
 use reqwest::Response;
 use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     ClientConfig, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
 };
 use rustls_platform_verifier::BuilderVerifierExt;  
 
+pub use downcast_rs;
+pub use erased_serde;
+
 pub const BLOB_HASH_LEN: usize = 32;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct BlobHash([u8; BLOB_HASH_LEN]);
+#[derive(
+    rkyv::Archive,
+    rkyv::Deserialize,
+    rkyv::Serialize,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[rkyv(derive(Debug))]
+#[repr(transparent)]
+pub struct BlobHash(pub [u8; BLOB_HASH_LEN]);
 
 impl BlobHash {
     pub fn new_max() -> Self {
         BlobHash([u8::MAX; BLOB_HASH_LEN])
+    }
+
+    pub fn generate(value: impl AsRef<[u8]>) -> Self {
+        BlobHash(blake3::hash(value.as_ref()).into())
     }
 
     pub fn try_from_hash_slice(value: &[u8]) -> Result<BlobHash, std::array::TryFromSliceError> {
@@ -49,21 +75,9 @@ impl BlobHash {
     }
 }
 
-impl From<&[u8]> for BlobHash {
-    fn from(value: &[u8]) -> Self {
-        BlobHash(blake3::hash(value).into())
-    }
-}
-
-impl From<Vec<u8>> for BlobHash {
-    fn from(value: Vec<u8>) -> Self {
-        value.as_slice().into()
-    }
-}
-
-impl From<&Vec<u8>> for BlobHash {
-    fn from(value: &Vec<u8>) -> Self {
-        value.as_slice().into()
+impl From<&ArchivedBlobHash> for BlobHash {
+    fn from(value: &ArchivedBlobHash) -> Self {
+        BlobHash(value.0)
     }
 }
 
@@ -127,6 +141,10 @@ impl HttpLimitResponse for Response {
 pub struct Semver(u64);
 
 impl Semver {
+    pub fn current() -> Self {
+        env!("CARGO_PKG_VERSION").try_into().unwrap()
+    }
+
     pub fn new(major: u16, minor: u16, patch: u16) -> Self {
         let mut version: u64 = 0;
         version |= (major as u64) << 32;
@@ -202,7 +220,7 @@ impl<T> UnwrapFailure<T> for Option<T> {
             None => {
                 trc::event!(
                     Server(trc::ServerEvent::StartupError),
-                    Details = message.to_string()
+                    Details = message.to_compact_string()
                 );
                 eprintln!("{message}");
                 std::process::exit(1);
@@ -218,8 +236,8 @@ impl<T, E: std::fmt::Display> UnwrapFailure<T> for Result<T, E> {
             Err(err) => {
                 trc::event!(
                     Server(trc::ServerEvent::StartupError),
-                    Details = message.to_string(),
-                    Reason = err.to_string()
+                    Details = message.to_compact_string(),
+                    Reason = err.to_compact_string()
                 );
 
                 #[cfg(feature = "test_mode")]
@@ -238,7 +256,7 @@ impl<T, E: std::fmt::Display> UnwrapFailure<T> for Result<T, E> {
 pub fn failed(message: &str) -> ! {
     trc::event!(
         Server(trc::ServerEvent::StartupError),
-        Details = message.to_string(),
+        Details = message.to_compact_string(),
     );
     eprintln!("{message}");
     std::process::exit(1);
@@ -247,7 +265,7 @@ pub fn failed(message: &str) -> ! {
 pub async fn wait_for_shutdown() {
     #[cfg(not(target_env = "msvc"))]
     let signal = {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         let mut h_term = signal(SignalKind::terminate()).failed("start signal handler");
         let mut h_int = signal(SignalKind::interrupt()).failed("start signal handler");

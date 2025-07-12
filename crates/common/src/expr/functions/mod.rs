@@ -1,12 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::borrow::Cow;
-
-use super::Variable;
+use super::{StringCow, Variable};
 
 pub mod array;
 pub mod asynch;
@@ -20,7 +18,7 @@ pub trait ResolveVariable: Sync + Send {
 }
 
 impl<'x> Variable<'x> {
-    fn transform(self, f: impl Fn(Cow<'x, str>) -> Variable<'x>) -> Variable<'x> {
+    fn transform(self, f: impl Fn(StringCow<'x>) -> Variable<'x>) -> Variable<'x> {
         match self {
             Variable::String(s) => f(s),
             Variable::Array(list) => Variable::Array(

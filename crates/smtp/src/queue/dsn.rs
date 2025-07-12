@@ -1,51 +1,47 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::spool::SmtpSpool;
+use super::{
+    Error, ErrorDetails, HostResponse, Message, MessageSource, QueueEnvelope, RCPT_DSN_SENT,
+    RCPT_STATUS_CHANGED, Recipient, Status,
+};
+use crate::queue::{MessageWrapper, UnexpectedResponse};
+use crate::reporting::SmtpReporting;
 use common::Server;
-use mail_builder::headers::content_type::ContentType;
-use mail_builder::headers::HeaderType;
-use mail_builder::mime::{make_boundary, BodyPart, MimePart};
 use mail_builder::MessageBuilder;
+use mail_builder::headers::HeaderType;
+use mail_builder::headers::content_type::ContentType;
+use mail_builder::mime::{BodyPart, MimePart, make_boundary};
 use mail_parser::DateTime;
 use smtp_proto::{
-    Response, RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS,
+    RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, Response,
 };
 use std::fmt::Write;
 use std::future::Future;
-use std::time::Duration;
 use store::write::now;
 
-use crate::outbound::client::from_error_status;
-use crate::reporting::SmtpReporting;
-
-use super::spool::SmtpSpool;
-use super::{
-    Domain, Error, ErrorDetails, HostResponse, Message, MessageSource, QueueEnvelope, Recipient,
-    Status, RCPT_DSN_SENT, RCPT_STATUS_CHANGED,
-};
-
 pub trait SendDsn: Sync + Send {
-    fn send_dsn(&self, message: &mut Message) -> impl Future<Output = ()> + Send;
-    fn log_dsn(&self, message: &Message) -> impl Future<Output = ()> + Send;
+    fn send_dsn(&self, message: &mut MessageWrapper) -> impl Future<Output = ()> + Send;
+    fn log_dsn(&self, message: &MessageWrapper) -> impl Future<Output = ()> + Send;
 }
 
 impl SendDsn for Server {
-    async fn send_dsn(&self, message: &mut Message) {
+    async fn send_dsn(&self, message: &mut MessageWrapper) {
         // Send DSN events
         self.log_dsn(message).await;
 
-        if !message.return_path.is_empty() {
+        if !message.message.return_path.is_empty() {
             // Build DSN
             if let Some(dsn) = message.build_dsn(self).await {
                 let mut dsn_message = self.new_message("", "", "", message.span_id);
                 dsn_message
                     .add_recipient_parts(
-                        &message.return_path,
-                        &message.return_path_lcase,
-                        &message.return_path_domain,
+                        message.message.return_path.as_str(),
+                        message.message.return_path_lcase.as_str(),
                         self,
                     )
                     .await;
@@ -72,15 +68,14 @@ impl SendDsn for Server {
         }
     }
 
-    async fn log_dsn(&self, message: &Message) {
+    async fn log_dsn(&self, message: &MessageWrapper) {
         let now = now();
 
-        for rcpt in &message.recipients {
+        for rcpt in &message.message.recipients {
             if rcpt.has_flag(RCPT_DSN_SENT) {
                 continue;
             }
 
-            let domain = &message.domains[rcpt.domain_idx];
             match &rcpt.status {
                 Status::Completed(response) => {
                     trc::event!(
@@ -92,17 +87,18 @@ impl SendDsn for Server {
                         Details = response.response.message.to_string(),
                     );
                 }
-                Status::TemporaryFailure(response) if domain.notify.due <= now => {
+                Status::TemporaryFailure(response) if rcpt.notify.due <= now => {
                     trc::event!(
                         Delivery(trc::DeliveryEvent::DsnTempFail),
                         SpanId = message.span_id,
                         To = rcpt.address_lcase.clone(),
-                        Hostname = response.hostname.entity.clone(),
-                        Code = response.response.code,
-                        Details = response.response.message.to_string(),
-                        NextRetry = trc::Value::Timestamp(domain.retry.due),
-                        Expires = trc::Value::Timestamp(domain.expires),
-                        Total = domain.retry.inner,
+                        Hostname = response.entity.clone(),
+                        Details = response.details.to_string(),
+                        NextRetry = trc::Value::Timestamp(rcpt.retry.due),
+                        Expires = rcpt
+                            .expiration_time(message.message.created)
+                            .map(trc::Value::Timestamp),
+                        Total = rcpt.retry.inner,
                     );
                 }
                 Status::PermanentFailure(response) => {
@@ -110,48 +106,23 @@ impl SendDsn for Server {
                         Delivery(trc::DeliveryEvent::DsnPermFail),
                         SpanId = message.span_id,
                         To = rcpt.address_lcase.clone(),
-                        Hostname = response.hostname.entity.clone(),
-                        Code = response.response.code,
-                        Details = response.response.message.to_string(),
-                        Total = domain.retry.inner,
+                        Hostname = response.entity.clone(),
+                        Details = response.details.to_string(),
+                        Total = rcpt.retry.inner,
                     );
                 }
-                Status::Scheduled => {
-                    // There is no status for this address, use the domain's status.
-                    match &domain.status {
-                        Status::PermanentFailure(_) => {
-                            trc::event!(
-                                Delivery(trc::DeliveryEvent::DsnPermFail),
-                                SpanId = message.span_id,
-                                To = rcpt.address_lcase.clone(),
-                                Details = from_error_status(&domain.status),
-                                Total = domain.retry.inner,
-                            );
-                        }
-                        Status::TemporaryFailure(_) if domain.notify.due <= now => {
-                            trc::event!(
-                                Delivery(trc::DeliveryEvent::DsnTempFail),
-                                SpanId = message.span_id,
-                                To = rcpt.address_lcase.clone(),
-                                Details = from_error_status(&domain.status),
-                                NextRetry = trc::Value::Timestamp(domain.retry.due),
-                                Expires = trc::Value::Timestamp(domain.expires),
-                                Total = domain.retry.inner,
-                            );
-                        }
-                        Status::Scheduled if domain.notify.due <= now => {
-                            trc::event!(
-                                Delivery(trc::DeliveryEvent::DsnTempFail),
-                                SpanId = message.span_id,
-                                To = rcpt.address_lcase.clone(),
-                                Details = "Concurrency limited",
-                                NextRetry = trc::Value::Timestamp(domain.retry.due),
-                                Expires = trc::Value::Timestamp(domain.expires),
-                                Total = domain.retry.inner,
-                            );
-                        }
-                        _ => continue,
-                    }
+                Status::Scheduled if rcpt.notify.due <= now => {
+                    trc::event!(
+                        Delivery(trc::DeliveryEvent::DsnTempFail),
+                        SpanId = message.span_id,
+                        To = rcpt.address_lcase.clone(),
+                        Details = "Concurrency limited",
+                        NextRetry = trc::Value::Timestamp(rcpt.retry.due),
+                        Expires = rcpt
+                            .expiration_time(message.message.created)
+                            .map(trc::Value::Timestamp),
+                        Total = rcpt.retry.inner,
+                    );
                 }
                 _ => continue,
             }
@@ -159,7 +130,7 @@ impl SendDsn for Server {
     }
 }
 
-impl Message {
+impl MessageWrapper {
     pub async fn build_dsn(&mut self, server: &Server) -> Option<Vec<u8>> {
         let config = &server.core.smtp.queue;
         let now = now();
@@ -169,11 +140,10 @@ impl Message {
         let mut txt_failed = String::new();
         let mut dsn = String::new();
 
-        for rcpt in &mut self.recipients {
+        for rcpt in &mut self.message.recipients {
             if rcpt.has_flag(RCPT_DSN_SENT | RCPT_NOTIFY_NEVER) {
                 continue;
             }
-            let domain = &self.domains[rcpt.domain_idx];
             match &rcpt.status {
                 Status::Completed(response) => {
                     rcpt.flags |= RCPT_DSN_SENT | RCPT_STATUS_CHANGED;
@@ -185,11 +155,11 @@ impl Message {
                     response.write_dsn_text(&rcpt.address, &mut txt_success);
                 }
                 Status::TemporaryFailure(response)
-                    if domain.notify.due <= now && rcpt.has_flag(RCPT_NOTIFY_DELAY) =>
+                    if rcpt.notify.due <= now && rcpt.has_flag(RCPT_NOTIFY_DELAY) =>
                 {
                     rcpt.write_dsn(&mut dsn);
                     rcpt.status.write_dsn(&mut dsn);
-                    domain.write_dsn_will_retry_until(&mut dsn);
+                    rcpt.write_dsn_will_retry_until(self.message.created, &mut dsn);
                     response.write_dsn_text(&rcpt.address, &mut txt_delay);
                 }
                 Status::PermanentFailure(response) => {
@@ -201,45 +171,16 @@ impl Message {
                     rcpt.status.write_dsn(&mut dsn);
                     response.write_dsn_text(&rcpt.address, &mut txt_failed);
                 }
-                Status::Scheduled => {
-                    // There is no status for this address, use the domain's status.
-                    match &domain.status {
-                        Status::PermanentFailure(err) => {
-                            rcpt.flags |= RCPT_DSN_SENT | RCPT_STATUS_CHANGED;
-                            if !rcpt.has_flag(RCPT_NOTIFY_FAILURE) {
-                                continue;
-                            }
-                            rcpt.write_dsn(&mut dsn);
-                            domain.status.write_dsn(&mut dsn);
-                            err.write_dsn_text(&rcpt.address, &domain.domain, &mut txt_failed);
-                        }
-                        Status::TemporaryFailure(err)
-                            if domain.notify.due <= now && rcpt.has_flag(RCPT_NOTIFY_DELAY) =>
-                        {
-                            rcpt.write_dsn(&mut dsn);
-                            domain.status.write_dsn(&mut dsn);
-                            domain.write_dsn_will_retry_until(&mut dsn);
-                            err.write_dsn_text(&rcpt.address, &domain.domain, &mut txt_delay);
-                        }
-                        Status::Scheduled
-                            if domain.notify.due <= now && rcpt.has_flag(RCPT_NOTIFY_DELAY) =>
-                        {
-                            // This case should not happen under normal circumstances
-                            rcpt.write_dsn(&mut dsn);
-                            domain.status.write_dsn(&mut dsn);
-                            domain.write_dsn_will_retry_until(&mut dsn);
-                            Error::ConcurrencyLimited.write_dsn_text(
-                                &rcpt.address,
-                                &domain.domain,
-                                &mut txt_delay,
-                            );
-                        }
-                        Status::Completed(_) => {
-                            #[cfg(feature = "test_mode")]
-                            panic!("This should not have happened.");
-                        }
-                        _ => continue,
+                Status::Scheduled if rcpt.notify.due <= now && rcpt.has_flag(RCPT_NOTIFY_DELAY) => {
+                    // This case should not happen under normal circumstances
+                    rcpt.write_dsn(&mut dsn);
+                    rcpt.status.write_dsn(&mut dsn);
+                    rcpt.write_dsn_will_retry_until(self.message.created, &mut dsn);
+                    ErrorDetails {
+                        entity: "localhost".into(),
+                        details: Error::ConcurrencyLimited,
                     }
+                    .write_dsn_text(&rcpt.address, &mut txt_delay);
                 }
                 _ => continue,
             }
@@ -314,58 +255,69 @@ impl Message {
         // Update next delay notification time
         if has_delay {
             let mut changes = Vec::new();
-            for (domain_idx, domain) in self.domains.iter().enumerate() {
+            for (rcpt_idx, rcpt) in self.message.recipients.iter().enumerate() {
                 if matches!(
-                    &domain.status,
+                    &rcpt.status,
                     Status::TemporaryFailure(_) | Status::Scheduled
-                ) && domain.notify.due <= now
+                ) && rcpt.notify.due <= now
                 {
-                    let envelope = QueueEnvelope::new(self, domain_idx);
+                    let envelope = QueueEnvelope::new(&self.message, rcpt);
 
-                    if let Some(next_notify) = server
-                        .eval_if::<Vec<Duration>, _>(&config.notify, &envelope, self.span_id)
+                    let queue_id = server
+                        .eval_if::<String, _>(
+                            &server.core.smtp.queue.queue,
+                            &envelope,
+                            self.span_id,
+                        )
                         .await
-                        .and_then(|notify| {
-                            notify.into_iter().nth((domain.notify.inner + 1) as usize)
-                        })
+                        .unwrap_or_else(|| "default".to_string());
+                    let queue = server.get_queue_or_default(&queue_id, self.span_id);
+
+                    if let Some(next_notify) =
+                        queue.notify.get((rcpt.notify.inner + 1) as usize).copied()
                     {
-                        changes.push((domain_idx, 1, now + next_notify.as_secs()));
+                        changes.push((rcpt_idx, 1, now + next_notify));
                     } else {
-                        changes.push((domain_idx, 0, domain.expires + 10));
+                        changes.push((rcpt_idx, 0, u64::MAX));
                     }
                 }
             }
 
-            for (domain_idx, inner, due) in changes {
-                let domain = &mut self.domains[domain_idx];
-                domain.notify.inner += inner;
-                domain.notify.due = due;
+            for (rcpt_idx, inner, due) in changes {
+                let rcpt = &mut self.message.recipients[rcpt_idx];
+                rcpt.notify.inner += inner;
+                rcpt.notify.due = due;
             }
         }
 
         // Obtain hostname and sender addresses
         let from_name = server
-            .eval_if(&config.dsn.name, self, self.span_id)
+            .eval_if(&config.dsn.name, &self.message, self.span_id)
             .await
             .unwrap_or_else(|| String::from("Mail Delivery Subsystem"));
         let from_addr = server
-            .eval_if(&config.dsn.address, self, self.span_id)
+            .eval_if(&config.dsn.address, &self.message, self.span_id)
             .await
             .unwrap_or_else(|| String::from("MAILER-DAEMON@localhost"));
         let reporting_mta = server
-            .eval_if(&server.core.smtp.report.submitter, self, self.span_id)
+            .eval_if(
+                &server.core.smtp.report.submitter,
+                &self.message,
+                self.span_id,
+            )
             .await
             .unwrap_or_else(|| String::from("localhost"));
 
         // Prepare DSN
         let mut dsn_header = String::with_capacity(dsn.len() + 128);
-        self.write_dsn_headers(&mut dsn_header, &reporting_mta);
+        self.message
+            .write_dsn_headers(&mut dsn_header, &reporting_mta);
         let dsn = dsn_header + dsn.as_str();
 
         // Fetch up to 1024 bytes of message headers
         let headers = match server
             .blob_store()
-            .get_blob(self.blob_hash.as_slice(), 0..1024)
+            .get_blob(self.message.blob_hash.as_slice(), 0..1024)
             .await
         {
             Ok(Some(mut buf)) => {
@@ -397,17 +349,18 @@ impl Message {
                 trc::event!(
                     Queue(trc::QueueEvent::BlobNotFound),
                     SpanId = self.span_id,
-                    BlobId = self.blob_hash.to_hex(),
+                    BlobId = self.message.blob_hash.to_hex(),
                     CausedBy = trc::location!()
                 );
 
                 String::new()
             }
             Err(err) => {
-                trc::error!(err
-                    .span_id(self.span_id)
-                    .details("Failed to fetch blobId")
-                    .caused_by(trc::location!()));
+                trc::error!(
+                    err.span_id(self.span_id)
+                        .details("Failed to fetch blobId")
+                        .caused_by(trc::location!())
+                );
 
                 String::new()
             }
@@ -416,7 +369,10 @@ impl Message {
         // Build message
         MessageBuilder::new()
             .from((from_name.as_str(), from_addr.as_str()))
-            .header("To", HeaderType::Text(self.return_path.as_str().into()))
+            .header(
+                "To",
+                HeaderType::Text(self.message.return_path.as_str().into()),
+            )
             .header("Auto-Submitted", HeaderType::Text("auto-generated".into()))
             .message_id(format!("<{}@{}>", make_boundary("."), reporting_mta))
             .subject(subject)
@@ -441,34 +397,23 @@ impl Message {
 
     fn handle_double_bounce(&mut self) {
         let mut is_double_bounce = Vec::with_capacity(0);
+        let now = now();
 
-        for rcpt in &mut self.recipients {
+        for rcpt in &mut self.message.recipients {
             if !rcpt.has_flag(RCPT_DSN_SENT | RCPT_NOTIFY_NEVER) {
-                match &rcpt.status {
-                    Status::PermanentFailure(err) => {
-                        rcpt.flags |= RCPT_DSN_SENT;
-                        let mut dsn = String::new();
-                        err.write_dsn_text(&rcpt.address, &mut dsn);
-                        is_double_bounce.push(dsn);
-                    }
-                    Status::Scheduled => {
-                        let domain = &self.domains[rcpt.domain_idx];
-                        if let Status::PermanentFailure(err) = &domain.status {
-                            rcpt.flags |= RCPT_DSN_SENT;
-                            let mut dsn = String::new();
-                            err.write_dsn_text(&rcpt.address, &domain.domain, &mut dsn);
-                            is_double_bounce.push(dsn);
-                        }
-                    }
-                    _ => (),
+                if let Status::PermanentFailure(err) = &rcpt.status {
+                    rcpt.flags |= RCPT_DSN_SENT;
+                    let mut dsn = String::new();
+                    err.write_dsn_text(&rcpt.address, &mut dsn);
+                    is_double_bounce.push(dsn);
                 }
             }
-        }
 
-        let now = now();
-        for domain in &mut self.domains {
-            if domain.notify.due <= now {
-                domain.notify.due = domain.expires + 10;
+            if rcpt.notify.due <= now {
+                rcpt.notify.due = rcpt
+                    .expiration_time(self.message.created)
+                    .map(|d| d + 10)
+                    .unwrap_or(u64::MAX);
             }
         }
 
@@ -499,12 +444,12 @@ impl HostResponse<String> {
     }
 }
 
-impl HostResponse<ErrorDetails> {
-    fn write_dsn_text(&self, addr: &str, dsn: &mut String) {
-        let _ = write!(dsn, "<{}> (host '{}' rejected ", addr, self.hostname.entity);
+impl UnexpectedResponse {
+    fn write_dsn_text(&self, host: &str, addr: &str, dsn: &mut String) {
+        let _ = write!(dsn, "<{addr}> (host '{host}' rejected ");
 
-        if !self.hostname.details.is_empty() {
-            let _ = write!(dsn, "command '{}'", self.hostname.details,);
+        if !self.command.is_empty() {
+            let _ = write!(dsn, "command '{}'", self.command);
         } else {
             dsn.push_str("transaction");
         }
@@ -519,40 +464,35 @@ impl HostResponse<ErrorDetails> {
     }
 }
 
-impl Error {
-    fn write_dsn_text(&self, addr: &str, domain: &str, dsn: &mut String) {
-        match self {
+impl ErrorDetails {
+    fn write_dsn_text(&self, addr: &str, dsn: &mut String) {
+        let entity = self.entity.as_str();
+        match &self.details {
             Error::UnexpectedResponse(response) => {
-                response.write_dsn_text(addr, dsn);
+                response.write_dsn_text(entity, addr, dsn);
             }
             Error::DnsError(err) => {
-                let _ = write!(dsn, "<{addr}> (failed to lookup '{domain}': {err})\r\n",);
+                let _ = write!(dsn, "<{addr}> (failed to lookup '{entity}': {err})\r\n",);
             }
             Error::ConnectionError(details) => {
                 let _ = write!(
                     dsn,
-                    "<{}> (connection to '{}' failed: {})\r\n",
-                    addr, details.entity, details.details
+                    "<{addr}> (connection to '{entity}' failed: {details})\r\n",
                 );
             }
             Error::TlsError(details) => {
-                let _ = write!(
-                    dsn,
-                    "<{}> (TLS error from '{}': {})\r\n",
-                    addr, details.entity, details.details
-                );
+                let _ = write!(dsn, "<{addr}> (TLS error from '{entity}': {details})\r\n",);
             }
             Error::DaneError(details) => {
                 let _ = write!(
                     dsn,
-                    "<{}> (DANE failed to authenticate '{}': {})\r\n",
-                    addr, details.entity, details.details
+                    "<{addr}> (DANE failed to authenticate '{entity}': {details})\r\n",
                 );
             }
             Error::MtaStsError(details) => {
                 let _ = write!(
                     dsn,
-                    "<{addr}> (MTA-STS failed to authenticate '{domain}': {details})\r\n",
+                    "<{addr}> (MTA-STS failed to authenticate '{entity}': {details})\r\n",
                 );
             }
             Error::RateLimited => {
@@ -591,15 +531,14 @@ impl Recipient {
         }
         let _ = write!(dsn, "Final-Recipient: rfc822;{}\r\n", self.address);
     }
-}
 
-impl Domain {
-    fn write_dsn_will_retry_until(&self, dsn: &mut String) {
-        let now = now();
-        if self.expires > now {
-            dsn.push_str("Will-Retry-Until: ");
-            dsn.push_str(&DateTime::from_timestamp(self.expires as i64).to_rfc822());
-            dsn.push_str("\r\n");
+    fn write_dsn_will_retry_until(&self, created: u64, dsn: &mut String) {
+        if let Some(expires) = self.expiration_time(created) {
+            if expires > now() {
+                dsn.push_str("Will-Retry-Until: ");
+                dsn.push_str(&DateTime::from_timestamp(expires as i64).to_rfc822());
+                dsn.push_str("\r\n");
+            }
         }
     }
 }
@@ -634,7 +573,7 @@ impl<T, E> Status<T, E> {
     }
 }
 
-impl Status<HostResponse<String>, HostResponse<ErrorDetails>> {
+impl Status<HostResponse<String>, ErrorDetails> {
     fn write_dsn(&self, dsn: &mut String) {
         self.write_dsn_action(dsn);
         self.write_dsn_status(dsn);
@@ -644,90 +583,55 @@ impl Status<HostResponse<String>, HostResponse<ErrorDetails>> {
 
     fn write_dsn_status(&self, dsn: &mut String) {
         dsn.push_str("Status: ");
-        if let Status::Completed(HostResponse { response, .. })
-        | Status::PermanentFailure(HostResponse { response, .. })
-        | Status::TemporaryFailure(HostResponse { response, .. }) = self
-        {
-            response.write_dsn_status(dsn);
-        }
-        dsn.push_str("\r\n");
-    }
-
-    fn write_dsn_remote_mta(&self, dsn: &mut String) {
-        dsn.push_str("Remote-MTA: dns;");
-        if let Status::Completed(HostResponse { hostname, .. })
-        | Status::PermanentFailure(HostResponse {
-            hostname: ErrorDetails {
-                entity: hostname, ..
-            },
-            ..
-        })
-        | Status::TemporaryFailure(HostResponse {
-            hostname: ErrorDetails {
-                entity: hostname, ..
-            },
-            ..
-        }) = self
-        {
-            dsn.push_str(hostname);
-        }
-        dsn.push_str("\r\n");
-    }
-
-    fn write_dsn_diagnostic(&self, dsn: &mut String) {
-        if let Status::PermanentFailure(details) | Status::TemporaryFailure(details) = self {
-            details.response.write_dsn_diagnostic(dsn);
-        }
-    }
-}
-
-impl Status<(), Error> {
-    fn write_dsn(&self, dsn: &mut String) {
-        self.write_dsn_action(dsn);
-        self.write_dsn_status(dsn);
-        self.write_dsn_diagnostic(dsn);
-        self.write_dsn_remote_mta(dsn);
-    }
-
-    fn write_dsn_status(&self, dsn: &mut String) {
-        if let Status::PermanentFailure(err) | Status::TemporaryFailure(err) = self {
-            dsn.push_str("Status: ");
-            if let Error::UnexpectedResponse(response) = err {
+        match self {
+            Status::Completed(response) => {
                 response.response.write_dsn_status(dsn);
-            } else {
-                dsn.push_str(if matches!(self, Status::PermanentFailure(_)) {
-                    "5.0.0"
-                } else {
-                    "4.0.0"
-                });
             }
-            dsn.push_str("\r\n");
+            Status::TemporaryFailure(err) | Status::PermanentFailure(err) => {
+                if let Error::UnexpectedResponse(response) = &err.details {
+                    response.response.write_dsn_status(dsn);
+                } else {
+                    dsn.push_str(if matches!(self, Status::PermanentFailure(_)) {
+                        "5.0.0"
+                    } else {
+                        "4.0.0"
+                    });
+                }
+            }
+            Status::Scheduled => {
+                dsn.push_str("4.0.0");
+            }
         }
+        dsn.push_str("\r\n");
     }
 
     fn write_dsn_remote_mta(&self, dsn: &mut String) {
-        if let Status::PermanentFailure(err) | Status::TemporaryFailure(err) = self {
-            match err {
-                Error::UnexpectedResponse(HostResponse {
-                    hostname: details, ..
-                })
-                | Error::ConnectionError(details)
-                | Error::TlsError(details)
-                | Error::DaneError(details) => {
+        match self {
+            Status::Completed(response) => {
+                dsn.push_str("Remote-MTA: dns;");
+                dsn.push_str(&response.hostname);
+                dsn.push_str("\r\n");
+            }
+            Status::TemporaryFailure(err) | Status::PermanentFailure(err) => match &err.details {
+                Error::UnexpectedResponse(_)
+                | Error::ConnectionError(_)
+                | Error::TlsError(_)
+                | Error::DaneError(_) => {
                     dsn.push_str("Remote-MTA: dns;");
-                    dsn.push_str(&details.entity);
+                    dsn.push_str(&err.entity);
                     dsn.push_str("\r\n");
                 }
                 _ => (),
-            }
+            },
+            Status::Scheduled => (),
         }
     }
 
     fn write_dsn_diagnostic(&self, dsn: &mut String) {
-        if let Status::PermanentFailure(Error::UnexpectedResponse(response))
-        | Status::TemporaryFailure(Error::UnexpectedResponse(response)) = self
-        {
-            response.response.write_dsn_diagnostic(dsn);
+        if let Status::PermanentFailure(err) | Status::TemporaryFailure(err) = self {
+            if let Error::UnexpectedResponse(response) = &err.details {
+                response.response.write_dsn_diagnostic(dsn);
+            }
         }
     }
 }

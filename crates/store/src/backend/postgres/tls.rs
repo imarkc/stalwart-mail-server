@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -21,7 +21,7 @@ use rustls::ClientConfig;
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect};
-use tokio_rustls::{client::TlsStream, TlsConnector};
+use tokio_rustls::{TlsConnector, client::TlsStream};
 
 #[derive(Clone)]
 pub struct MakeRustlsConnect {

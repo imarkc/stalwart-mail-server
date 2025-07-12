@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use sieve::{runtime::Variable, Context};
+use sieve::{Context, runtime::Variable};
 
 pub fn fn_img_metadata<'x>(ctx: &'x Context<'x>, v: Vec<Variable>) -> Variable {
     ctx.message()

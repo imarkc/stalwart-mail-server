@@ -1,13 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use mail_send::{smtp::AssertReply, Credentials};
+use mail_send::{Credentials, smtp::AssertReply};
 use smtp_proto::Severity;
 
-use crate::{backend::RcptType, IntoError, Principal, QueryBy};
+use crate::{IntoError, Principal, QueryBy, Type, backend::RcptType};
 
 use super::{SmtpClient, SmtpDirectory};
 
@@ -99,7 +99,7 @@ impl SmtpClient {
             .authenticate(credentials, &self.capabilities)
             .await
         {
-            Ok(_) => Ok(Some(Principal::default())),
+            Ok(_) => Ok(Some(Principal::new(u32::MAX, Type::Individual))),
             Err(err) => match &err {
                 mail_send::Error::AuthenticationFailed(err) if err.code() == 535 => {
                     self.num_auth_failures += 1;
@@ -120,7 +120,7 @@ impl SmtpClient {
             250 | 251 => Ok(reply
                 .message()
                 .split('\n')
-                .map(|p| p.to_string())
+                .map(|p| p.into())
                 .collect::<Vec<String>>()),
             code @ (550 | 551 | 553 | 500 | 502) => {
                 Err(trc::StoreEvent::NotSupported.ctx(trc::Key::Code, code))

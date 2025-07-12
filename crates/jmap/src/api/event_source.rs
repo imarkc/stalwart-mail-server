@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,18 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{auth::AccessToken, Server};
-use http_body_util::{combinators::BoxBody, StreamBody};
+use common::{LONG_1D_SLUMBER, Server, auth::AccessToken};
+use http_body_util::{StreamBody, combinators::BoxBody};
 use hyper::{
-    body::{Bytes, Frame},
     StatusCode,
+    body::{Bytes, Frame},
 };
-use jmap_proto::types::type_state::DataType;
+use jmap_proto::{response::status::StateChangeResponse, types::type_state::DataType};
 use utils::map::bitmap::Bitmap;
 
-use crate::{services::state::StateManager, LONG_SLUMBER};
-
-use super::{HttpRequest, HttpResponse, HttpResponseBody, StateChangeResponse};
+use http_proto::*;
 use std::future::Future;
 
 struct Ping {
@@ -48,7 +46,8 @@ impl EventSourceHandler for Server {
         let mut types = Bitmap::default();
         let mut close_after_state = false;
 
-        for (key, value) in form_urlencoded::parse(req.uri().query().unwrap_or_default().as_bytes())
+        for (key, value) in
+            http_proto::form_urlencoded::parse(req.uri().query().unwrap_or_default().as_bytes())
         {
             match key.as_ref() {
                 "types" => {
@@ -106,24 +105,22 @@ impl EventSourceHandler for Server {
             .subscribe_state_manager(access_token.primary_id(), types)
             .await?;
 
-        Ok(HttpResponse {
-            status: StatusCode::OK,
-            content_type: "text/event-stream".into(),
-            content_disposition: "".into(),
-            cache_control: "no-store".into(),
-            body: HttpResponseBody::Stream(BoxBody::new(StreamBody::new(async_stream::stream! {
+        Ok(HttpResponse::new(StatusCode::OK)
+            .with_content_type("text/event-stream")
+            .with_cache_control("no-store")
+            .with_stream_body(BoxBody::new(StreamBody::new(async_stream::stream! {
                 let mut last_message = Instant::now() - throttle;
                 let mut timeout =
-                    ping.as_ref().map(|p| p.interval).unwrap_or(LONG_SLUMBER);
+                    ping.as_ref().map(|p| p.interval).unwrap_or(LONG_1D_SLUMBER);
 
                 loop {
                     match tokio::time::timeout(timeout, change_rx.recv()).await {
                         Ok(Some(state_change)) => {
-                            for (type_state, change_id) in state_change.types {
+                            for type_state in state_change.types {
                                 response
                                     .changed
                                     .get_mut_or_insert(state_change.account_id.into())
-                                    .set(type_state, change_id.into());
+                                    .set(type_state, state_change.change_id.into());
                             }
                         }
                         Ok(None) => {
@@ -146,7 +143,7 @@ impl EventSourceHandler for Server {
                             }
 
                             response.changed.clear();
-                                ping.as_ref().map(|p| p.interval).unwrap_or(LONG_SLUMBER)
+                                ping.as_ref().map(|p| p.interval).unwrap_or(LONG_1D_SLUMBER)
                         } else {
                             throttle - elapsed
                         }
@@ -160,10 +157,9 @@ impl EventSourceHandler for Server {
                             ping.interval - elapsed
                         }
                     } else {
-                        LONG_SLUMBER
+                        LONG_1D_SLUMBER
                     };
                 }
-            }))),
-        })
+            }))))
     }
 }

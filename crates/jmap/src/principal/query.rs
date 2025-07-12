@@ -1,18 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::Server;
 use directory::QueryBy;
+use http_proto::HttpSessionData;
 use jmap_proto::{
     method::query::{Filter, QueryRequest, QueryResponse, RequestArguments},
-    types::collection::Collection,
+    types::{collection::Collection, state::State},
 };
 use store::{query::ResultSet, roaring::RoaringBitmap};
 
-use crate::{api::http::HttpSessionData, JmapMethods};
+use crate::JmapMethods;
 use std::future::Future;
 
 pub trait PrincipalQuery: Sync + Send {
@@ -77,7 +78,7 @@ impl PrincipalQuery for Server {
                 other => {
                     return Err(trc::JmapEvent::UnsupportedFilter
                         .into_err()
-                        .details(other.to_string()))
+                        .details(other.to_string()));
                 }
             }
         }
@@ -89,7 +90,9 @@ impl PrincipalQuery for Server {
                 .unwrap_or_default();
         }
 
-        let (response, paginate) = self.build_query_response(&result_set, &request).await?;
+        let (response, paginate) = self
+            .build_query_response(&result_set, State::Initial, &request)
+            .await?;
 
         if let Some(paginate) = paginate {
             self.sort(result_set, Vec::new(), paginate, response).await

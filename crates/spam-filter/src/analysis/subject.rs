@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -30,7 +30,7 @@ impl SpamFilterAnalyzeSubject for Server {
                     .input
                     .message
                     .raw_message()
-                    .get(header.offset_start..header.offset_end)
+                    .get(header.offset_start as usize..header.offset_end as usize)
                     .unwrap_or_default();
                 break;
             }

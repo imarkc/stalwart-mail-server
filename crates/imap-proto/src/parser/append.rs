@@ -1,17 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::{
-        append::{self, Message},
-        Flag, ProtocolVersion,
-    },
-    receiver::{bad, Request, Token},
-    utf7::utf7_maybe_decode,
     Command,
+    protocol::{
+        Flag, ProtocolVersion,
+        append::{self, Message},
+    },
+    receiver::{Request, Token, bad},
+    utf7::utf7_maybe_decode,
 };
 
 use super::parse_datetime;
@@ -35,7 +37,7 @@ impl Request<Command> {
                         .next()
                         .unwrap()
                         .unwrap_string()
-                        .map_err(|v| bad(self.tag.to_string(), v))?,
+                        .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                     version,
                 );
                 let mut messages = Vec::new();
@@ -61,18 +63,18 @@ impl Request<Command> {
                                     State::UTF8 => State::UTF8Data,
                                     _ => {
                                         return Err(bad(
-                                            self.tag.to_string(),
+                                            self.tag.to_compact_string(),
                                             "Invalid opening parenthesis found.",
-                                        ))
+                                        ));
                                     }
                                 };
                             }
                             Token::ParenthesisClose => match state {
                                 State::None | State::UTF8 => {
                                     return Err(bad(
-                                        self.tag.to_string(),
+                                        self.tag.to_compact_string(),
                                         "Invalid closing parenthesis found.",
-                                    ))
+                                    ));
                                 }
                                 State::Flags => {
                                     state = State::None;
@@ -93,7 +95,7 @@ impl Request<Command> {
                                             message.received_at = Some(date_time);
                                         } else {
                                             return Err(bad(
-                                                self.tag.to_string(),
+                                                self.tag.to_compact_string(),
                                                 "Failed to parse received time.",
                                             ));
                                         }
@@ -105,12 +107,12 @@ impl Request<Command> {
                                 State::Flags => {
                                     message.flags.push(
                                         Flag::parse_imap(value)
-                                            .map_err(|v| bad(self.tag.to_string(), v))?,
+                                            .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                                     );
                                 }
                                 State::UTF8 => {
                                     return Err(bad(
-                                        self.tag.to_string(),
+                                        self.tag.to_compact_string(),
                                         "Expected parenthesis after UTF8.",
                                     ));
                                 }
@@ -119,13 +121,18 @@ impl Request<Command> {
                                         message.message = value;
                                     } else {
                                         return Err(bad(
-                                            self.tag.to_string(),
+                                            self.tag.to_compact_string(),
                                             "Invalid parameter after message literal.",
                                         ));
                                     }
                                 }
                             },
-                            _ => return Err(bad(self.tag.to_string(), "Invalid arguments.")),
+                            _ => {
+                                return Err(bad(
+                                    self.tag.to_compact_string(),
+                                    "Invalid arguments.",
+                                ));
+                            }
                         }
                     }
 
@@ -147,8 +154,8 @@ mod tests {
 
     use crate::{
         protocol::{
-            append::{self, Message},
             Flag, ProtocolVersion,
+            append::{self, Message},
         },
         receiver::{Error, Receiver},
     };
@@ -161,8 +168,8 @@ mod tests {
             (
                 "A003 APPEND saved-messages (\\Seen) {1+}\r\na\r\n",
                 append::Arguments {
-                    tag: "A003".to_string(),
-                    mailbox_name: "saved-messages".to_string(),
+                    tag: "A003".into(),
+                    mailbox_name: "saved-messages".into(),
                     messages: vec![Message {
                         message: vec![b'a'],
                         flags: vec![Flag::Seen],
@@ -173,8 +180,8 @@ mod tests {
             (
                 "A003 APPEND \"hello world\" (\\Seen \\Draft $MDNSent) {1+}\r\na\r\n",
                 append::Arguments {
-                    tag: "A003".to_string(),
-                    mailbox_name: "hello world".to_string(),
+                    tag: "A003".into(),
+                    mailbox_name: "hello world".into(),
                     messages: vec![Message {
                         message: vec![b'a'],
                         flags: vec![Flag::Seen, Flag::Draft, Flag::MDNSent],
@@ -185,8 +192,8 @@ mod tests {
             (
                 "A003 APPEND \"hi\" ($Junk) \"7-Feb-1994 22:43:04 -0800\" {1+}\r\na\r\n",
                 append::Arguments {
-                    tag: "A003".to_string(),
-                    mailbox_name: "hi".to_string(),
+                    tag: "A003".into(),
+                    mailbox_name: "hi".into(),
                     messages: vec![Message {
                         message: vec![b'a'],
                         flags: vec![Flag::Junk],
@@ -197,8 +204,8 @@ mod tests {
             (
                 "A003 APPEND \"hi\" \"20-Nov-2022 23:59:59 +0300\" {1+}\r\na\r\n",
                 append::Arguments {
-                    tag: "A003".to_string(),
-                    mailbox_name: "hi".to_string(),
+                    tag: "A003".into(),
+                    mailbox_name: "hi".into(),
                     messages: vec![Message {
                         message: vec![b'a'],
                         flags: vec![],
@@ -209,8 +216,8 @@ mod tests {
             (
                 "A003 APPEND \"hi\" \"20-Nov-2022 23:59:59 +0300\" ~{1+}\r\na\r\n",
                 append::Arguments {
-                    tag: "A003".to_string(),
-                    mailbox_name: "hi".to_string(),
+                    tag: "A003".into(),
+                    mailbox_name: "hi".into(),
                     messages: vec![Message {
                         message: vec![b'a'],
                         flags: vec![],
@@ -221,8 +228,8 @@ mod tests {
             (
                 "42 APPEND \"Drafts\" (\\Draft) UTF8 (~{5+}\r\nhello)\r\n",
                 append::Arguments {
-                    tag: "42".to_string(),
-                    mailbox_name: "Drafts".to_string(),
+                    tag: "42".into(),
+                    mailbox_name: "Drafts".into(),
                     messages: vec![Message {
                         message: vec![b'h', b'e', b'l', b'l', b'o'],
                         flags: vec![Flag::Draft],
@@ -233,8 +240,8 @@ mod tests {
             (
                 "42 APPEND \"Drafts\" (\\Draft) \"20-Nov-2022 23:59:59 +0300\" UTF8 (~{5+}\r\nhello)\r\n",
                 append::Arguments {
-                    tag: "42".to_string(),
-                    mailbox_name: "Drafts".to_string(),
+                    tag: "42".into(),
+                    mailbox_name: "Drafts".into(),
                     messages: vec![Message {
                         message: vec![b'h', b'e', b'l', b'l', b'o'],
                         flags: vec![Flag::Draft],
@@ -282,8 +289,8 @@ mod tests {
                     assert_eq!(
                         request.parse_append(ProtocolVersion::Rev1).unwrap(),
                         append::Arguments {
-                            tag: "A003".to_string(),
-                            mailbox_name: "saved-messages".to_string(),
+                            tag: "A003".into(),
+                            mailbox_name: "saved-messages".into(),
                             messages: vec![
                                 Message {
                                     message: concat!(

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use common::{config::smtp::session::Stage, listener::SessionStream, scripts::ScriptModification};
+
 use mail_auth::{IprevOutput, IprevResult, SpfOutput, SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MAIL_REQUIRETLS, MailFrom, MtPriority};
 use trc::SmtpEvent;
@@ -109,7 +110,7 @@ impl<T: SessionStream> Session<T> {
 
         let (address, address_lcase, domain) = if !from.address.is_empty() {
             let address_lcase = from.address.to_lowercase();
-            let domain = address_lcase.domain_part().to_string();
+            let domain = address_lcase.domain_part().into();
             (from.address, address_lcase, domain)
         } else {
             (String::new(), String::new(), String::new())
@@ -220,7 +221,7 @@ impl<T: SessionStream> Session<T> {
 
             if new_address.contains('@') {
                 mail_from.address_lcase = new_address.to_lowercase();
-                mail_from.domain = mail_from.address_lcase.domain_part().to_string();
+                mail_from.domain = mail_from.address_lcase.domain_part().into();
                 mail_from.address = new_address;
             } else if new_address.is_empty() {
                 mail_from.address_lcase.clear();
@@ -245,19 +246,20 @@ impl<T: SessionStream> Session<T> {
                 let address_lcase = self.data.mail_from.as_ref().unwrap().address_lcase.as_str();
                 if authenticated_as != address_lcase
                     && !self.authenticated_emails().iter().any(|e| {
-                        e == address_lcase || (e.starts_with('@') && address_lcase.ends_with(e))
+                        e == address_lcase
+                            || (e.starts_with('@') && address_lcase.ends_with(e.as_str()))
                     })
                 {
                     trc::event!(
                         Smtp(SmtpEvent::MailFromUnauthorized),
                         SpanId = self.data.session_id,
                         From = address_lcase.to_string(),
-                        Details = [trc::Value::String(authenticated_as.to_string())]
+                        Details = [trc::Value::String(authenticated_as.into())]
                             .into_iter()
                             .chain(
                                 self.authenticated_emails()
                                     .iter()
-                                    .map(|e| trc::Value::String(e.to_string()))
+                                    .map(|e| trc::Value::String(e.as_str().into()))
                             )
                             .collect::<Vec<_>>()
                     );
@@ -390,11 +392,7 @@ impl<T: SessionStream> Session<T> {
                     let now = SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
-                    if from.hold_until > now {
-                        from.hold_until - now
-                    } else {
-                        0
-                    }
+                    from.hold_until.saturating_sub(now)
                 };
                 if hold_for <= max_hold {
                     self.data.future_release = hold_for;

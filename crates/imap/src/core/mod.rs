@@ -1,20 +1,27 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{
+    collections::BTreeMap,
     net::IpAddr,
-    sync::{atomic::AtomicU32, Arc},
+    sync::{Arc, atomic::AtomicU32},
 };
 
+use ahash::AHashMap;
 use common::{
+    Inner, Server,
     auth::AccessToken,
-    listener::{limiter::InFlight, ServerInstance, SessionStream},
-    Account, ImapId, Inner, MailboxId, MailboxState, Server,
+    listener::{ServerInstance, SessionStream, limiter::InFlight},
 };
-use imap_proto::{protocol::ProtocolVersion, receiver::Receiver, Command};
+
+use imap_proto::{
+    Command,
+    protocol::{ProtocolVersion, list::Attribute},
+    receiver::Receiver,
+};
 use tokio::{
     io::{ReadHalf, WriteHalf},
     sync::watch,
@@ -70,6 +77,63 @@ pub struct SelectedMailbox {
     pub saved_search: parking_lot::Mutex<SavedSearch>,
     pub is_select: bool,
     pub is_condstore: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct AccountId {
+    pub account_id: u32,
+    pub primary_id: u32,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub struct MailboxId {
+    pub account_id: u32,
+    pub mailbox_id: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Account {
+    pub account_id: u32,
+    pub prefix: Option<String>,
+    pub mailbox_names: BTreeMap<String, u32>,
+    pub mailbox_state: AHashMap<u32, Mailbox>,
+    pub last_change_id: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Mailbox {
+    pub has_children: bool,
+    pub is_subscribed: bool,
+    pub special_use: Option<Attribute>,
+    pub total_messages: u64,
+    pub total_unseen: u64,
+    pub total_deleted: u64,
+    pub total_deleted_storage: Option<u64>,
+    pub uid_validity: u64,
+    pub uid_next: u64,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MailboxState {
+    pub uid_max: u32,
+    pub id_to_imap: AHashMap<u32, ImapId>,
+    pub uid_to_id: AHashMap<u32, u32>,
+    pub total_messages: usize,
+    pub modseq: u64,
+    pub next_state: Option<Box<NextMailboxState>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NextMailboxState {
+    pub next_state: MailboxState,
+    pub deletions: Vec<ImapId>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImapId {
+    pub uid: u32,
+    pub seqnum: u32,
 }
 
 #[derive(Debug, Default)]
@@ -153,6 +217,23 @@ impl<T: SessionStream> SessionData<T> {
             state: self.state,
             in_flight: self.in_flight,
             access_token: self.access_token,
+        }
+    }
+}
+
+impl MailboxState {
+    pub fn map_result_id(&self, document_id: u32, is_uid: bool) -> Option<(u32, ImapId)> {
+        if let Some(imap_id) = self.id_to_imap.get(&document_id) {
+            Some((if is_uid { imap_id.uid } else { imap_id.seqnum }, *imap_id))
+        } else if is_uid {
+            self.next_state.as_ref().and_then(|s| {
+                s.next_state
+                    .id_to_imap
+                    .get(&document_id)
+                    .map(|imap_id| (imap_id.uid, *imap_id))
+            })
+        } else {
+            None
         }
     }
 }

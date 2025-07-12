@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,18 +7,19 @@
 use std::{borrow::Cow, time::Instant};
 
 use common::{
+    DAEMON_NAME,
     config::smtp::session::{Milter, Stage},
     listener::SessionStream,
-    DAEMON_NAME,
 };
+
 use mail_auth::AuthenticatedMessage;
-use smtp_proto::{request::parser::Rfc5321Parser, IntoString};
+use smtp_proto::{IntoString, request::parser::Rfc5321Parser};
 use tokio::io::{AsyncRead, AsyncWrite};
 use trc::MilterEvent;
 
 use crate::{
     core::{Session, SessionAddress, SessionData},
-    inbound::{milter::MilterClient, FilterResponse},
+    inbound::{FilterResponse, milter::MilterClient},
     queue::DomainPart,
 };
 
@@ -196,10 +197,11 @@ impl<T: SessionStream> Session<T> {
             .iprev
             .as_ref()
             .and_then(|ip_rev| ip_rev.ptr.as_ref())
-            .and_then(|ptrs| ptrs.first());
+            .and_then(|ptrs| ptrs.first())
+            .map(|s| s.as_str());
         client
             .connection(
-                client_ptr.unwrap_or(&self.data.helo_domain),
+                client_ptr.unwrap_or(self.data.helo_domain.as_str()),
                 self.data.remote_ip,
                 self.data.remote_port,
                 Macros::new()
@@ -207,7 +209,7 @@ impl<T: SessionStream> Session<T> {
                     .with_local_hostname(&self.hostname)
                     .with_client_address(self.data.remote_ip)
                     .with_client_port(self.data.remote_port)
-                    .with_client_ptr(client_ptr.map(|p| p.as_str()).unwrap_or("unknown")),
+                    .with_client_ptr(client_ptr.unwrap_or("unknown")),
             )
             .await?
             .assert_continue()?;
@@ -305,7 +307,7 @@ impl SessionData {
                     let sender = strip_brackets(&sender);
                     let address_lcase = sender.to_lowercase();
                     let mut mail_from = SessionAddress {
-                        domain: address_lcase.domain_part().to_string(),
+                        domain: address_lcase.domain_part().into(),
                         address_lcase,
                         address: sender,
                         flags: 0,
@@ -341,7 +343,7 @@ impl SessionData {
                     if recipient.contains('@') {
                         let address_lcase = recipient.to_lowercase();
                         let mut rcpt = SessionAddress {
-                            domain: address_lcase.domain_part().to_string(),
+                            domain: address_lcase.domain_part().into(),
                             address_lcase,
                             address: recipient,
                             flags: 0,
@@ -400,7 +402,7 @@ impl SessionData {
                     }
                 }
                 Modification::Quarantine { reason } => {
-                    header_changes.push((0, "X-Quarantine".to_string(), reason, false));
+                    header_changes.push((0, "X-Quarantine".into(), reason, false));
                 }
             }
         }
@@ -439,7 +441,7 @@ impl SessionData {
                             header_count += 1;
                             if header_count == index {
                                 if !header_value.is_empty() {
-                                    *value = Cow::from(header_value.into_bytes());
+                                    *value = Cow::from(header_value.as_bytes().to_vec());
                                 } else {
                                     headers.remove(pos);
                                 }
@@ -465,8 +467,8 @@ impl SessionData {
                     headers.insert(
                         header_pos,
                         (
-                            Cow::from(header_name.into_bytes()),
-                            Cow::from(header_value.into_bytes()),
+                            Cow::from(header_name.as_bytes().to_vec()),
+                            Cow::from(header_value.as_bytes().to_vec()),
                         ),
                     );
                 }
@@ -539,11 +541,11 @@ fn strip_brackets(addr: &str) -> String {
     let addr = addr.trim();
     if let Some(addr) = addr.strip_prefix('<') {
         if let Some((addr, _)) = addr.rsplit_once('>') {
-            addr.trim().to_string()
+            addr.trim().into()
         } else {
-            addr.trim().to_string()
+            addr.trim().into()
         }
     } else {
-        addr.to_string()
+        addr.into()
     }
 }

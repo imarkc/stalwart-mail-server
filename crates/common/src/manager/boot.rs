@@ -1,40 +1,37 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
-
-use std::{
-    net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
-    sync::Arc,
-};
-
-use arc_swap::ArcSwap;
-use pwhash::sha512_crypt;
-use store::{
-    Stores,
-    rand::{Rng, distr::Alphanumeric, rng},
-};
-use tokio::sync::{Notify, Semaphore, mpsc};
-use utils::{
-    Semver, UnwrapFailure,
-    config::{Config, ConfigKey},
-    failed,
-};
-
-use crate::{
-    Caches, Core, Data, IPC_CHANNEL_BUFFER, Inner, Ipc,
-    config::{network::AsnGeoLookupConfig, server::Listeners, telemetry::Telemetry},
-    core::BuildServer,
-    ipc::{HousekeeperEvent, QueueEvent, ReportingEvent, StateEvent},
-};
 
 use super::{
     WEBADMIN_KEY,
     backup::BackupParams,
     config::{ConfigManager, Patterns},
     console::store_console,
+};
+use crate::{
+    Caches, Core, Data, IPC_CHANNEL_BUFFER, Inner, Ipc,
+    config::{network::AsnGeoLookupConfig, server::Listeners, telemetry::Telemetry},
+    core::BuildServer,
+    ipc::{BroadcastEvent, HousekeeperEvent, QueueEvent, ReportingEvent, StateEvent},
+};
+use arc_swap::ArcSwap;
+use pwhash::sha512_crypt;
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+    sync::Arc,
+};
+use store::{
+    Stores,
+    rand::{Rng, distr::Alphanumeric, rng},
+};
+use tokio::sync::{Notify, mpsc};
+use utils::{
+    Semver, UnwrapFailure,
+    config::{Config, ConfigKey},
+    failed,
 };
 
 pub struct BootManager {
@@ -49,14 +46,15 @@ pub struct IpcReceivers {
     pub housekeeper_rx: Option<mpsc::Receiver<HousekeeperEvent>>,
     pub queue_rx: Option<mpsc::Receiver<QueueEvent>>,
     pub report_rx: Option<mpsc::Receiver<ReportingEvent>>,
+    pub broadcast_rx: Option<mpsc::Receiver<BroadcastEvent>>,
 }
 
 const HELP: &str = concat!(
-    "Stalwart Mail Server v",
+    "Stalwart Server v",
     env!("CARGO_PKG_VERSION"),
     r#"
 
-Usage: stalwart-mail [OPTIONS]
+Usage: stalwart [OPTIONS]
 
 Options:
   -c, --config <PATH>              Start server with the specified configuration file
@@ -167,12 +165,31 @@ impl BootManager {
 
         // Load stores
         let mut stores = Stores::parse(&mut config).await;
+        let local_patterns = Patterns::parse(&mut config);
+
+        // Build local keys and warn about database keys defined in the local configuration
+        let mut warn_keys = Vec::new();
+        for key in config.keys.keys() {
+            if !local_patterns.is_local_key(key) {
+                warn_keys.push(key.clone());
+            }
+        }
+        for warn_key in warn_keys {
+            config.new_build_warning(
+                warn_key,
+                concat!(
+                    "Database key defined in local configuration, this might cause issues. ",
+                    "See https://stalw.art/docs/configuration/overview/#loc",
+                    "al-and-database-settings"
+                ),
+            );
+        }
 
         // Build manager
         let manager = ConfigManager {
             cfg_local: ArcSwap::from_pointee(cfg_local),
             cfg_local_path,
-            cfg_local_patterns: Patterns::parse(&mut config).into(),
+            cfg_local_patterns: local_patterns.into(),
             cfg_store: config
                 .value("storage.data")
                 .and_then(|id| stores.stores.get(id))
@@ -182,10 +199,24 @@ impl BootManager {
 
         // Extend configuration with settings stored in the db
         if !manager.cfg_store.is_none() {
-            manager
-                .extend_config(&mut config, "")
+            for (key, value) in manager
+                .db_list("", false)
                 .await
-                .failed("Failed to read configuration");
+                .failed("Failed to read database configuration")
+            {
+                if manager.cfg_local_patterns.is_local_key(&key) {
+                    config.new_build_warning(
+                        &key,
+                        concat!(
+                            "Local key defined in database, this might cause issues. ",
+                            "See https://stalw.art/docs/configuration/overview/#loc",
+                            "al-and-database-settings"
+                        ),
+                    );
+                }
+
+                config.keys.entry(key).or_insert(value);
+            }
         }
 
         // Parse telemetry
@@ -212,25 +243,9 @@ impl BootManager {
                     )));
                 }
 
-                // Generate a Cluster encryption key if missing
-                if config
-                    .value("cluster.key")
-                    .filter(|v| !v.is_empty())
-                    .is_none()
-                {
-                    insert_keys.push(ConfigKey::from((
-                        "cluster.key",
-                        rng()
-                            .sample_iter(Alphanumeric)
-                            .take(64)
-                            .map(char::from)
-                            .collect::<String>(),
-                    )));
-                }
-
                 // Download Spam filter rules if missing
                 // TODO remove this check in 1.0
-                let mut update_webadmin = match config.value("version.spam-filter").and_then(|v| {
+                let update_webadmin = match config.value("version.spam-filter").and_then(|v| {
                     if !v.is_empty() {
                         Some(Semver::try_from(v))
                     } else {
@@ -247,7 +262,6 @@ impl BootManager {
                             .await;
                         let _ = manager.clear_prefix("sieve.trusted.scripts.greylist").await;
                         let _ = manager.clear_prefix("sieve.trusted.scripts.train").await;
-                        //let _ = manager.clear_prefix("session.data.script").await;
                         let _ = manager.clear("version.spam-filter").await;
 
                         match manager.fetch_spam_rules().await {
@@ -309,18 +323,6 @@ impl BootManager {
                     }
                 };
 
-                // TODO remove key migration in 1.0
-                for (old_key, new_key) in [
-                    ("lookup.default.hostname", "server.hostname"),
-                    ("lookup.default.domain", "report.domain"),
-                ] {
-                    if let (Some(old_value), None) = (config.value(old_key), config.value(new_key))
-                    {
-                        insert_keys.push(ConfigKey::from((new_key, old_value)));
-                        update_webadmin = true;
-                    }
-                }
-
                 // Download webadmin if missing
                 if let Some(blob_store) = config
                     .value("storage.blob")
@@ -371,7 +373,7 @@ impl BootManager {
                 stores.parse_in_memory(&mut config, false).await;
 
                 // Parse settings
-                let core = Core::parse(&mut config, stores, manager).await;
+                let core = Box::pin(Core::parse(&mut config, stores, manager)).await;
 
                 // Parse data
                 let data = Data::parse(&mut config);
@@ -424,7 +426,7 @@ impl BootManager {
                     core.network.asn_geo_lookup,
                     AsnGeoLookupConfig::Resource { .. }
                 );
-                let (ipc, ipc_rxs) = build_ipc(&mut config);
+                let (ipc, ipc_rxs) = build_ipc(!core.storage.pubsub.is_none());
                 let inner = Arc::new(Inner {
                     shared_core: ArcSwap::from_pointee(core),
                     data,
@@ -455,7 +457,7 @@ impl BootManager {
                 telemetry.enable(false);
 
                 // Parse settings and backup
-                Core::parse(&mut config, stores, manager)
+                Box::pin(Core::parse(&mut config, stores, manager))
                     .await
                     .backup(path)
                     .await;
@@ -466,7 +468,7 @@ impl BootManager {
                 telemetry.enable(false);
 
                 // Parse settings and restore
-                Core::parse(&mut config, stores, manager)
+                Box::pin(Core::parse(&mut config, stores, manager))
                     .await
                     .restore(path)
                     .await;
@@ -474,38 +476,41 @@ impl BootManager {
             }
             StoreOp::Console => {
                 // Store console
-                store_console(Core::parse(&mut config, stores, manager).await.storage.data).await;
+                store_console(
+                    Box::pin(Core::parse(&mut config, stores, manager))
+                        .await
+                        .storage
+                        .data,
+                )
+                .await;
                 std::process::exit(0);
             }
         }
     }
 }
 
-pub fn build_ipc(config: &mut Config) -> (Ipc, IpcReceivers) {
+pub fn build_ipc(has_pubsub: bool) -> (Ipc, IpcReceivers) {
     // Build ipc receivers
     let (state_tx, state_rx) = mpsc::channel(IPC_CHANNEL_BUFFER);
     let (housekeeper_tx, housekeeper_rx) = mpsc::channel(IPC_CHANNEL_BUFFER);
     let (queue_tx, queue_rx) = mpsc::channel(IPC_CHANNEL_BUFFER);
     let (report_tx, report_rx) = mpsc::channel(IPC_CHANNEL_BUFFER);
+    let (broadcast_tx, broadcast_rx) = mpsc::channel(IPC_CHANNEL_BUFFER);
     (
         Ipc {
             state_tx,
             housekeeper_tx,
             queue_tx,
             report_tx,
-            index_tx: Arc::new(Notify::new()),
-            local_delivery_sm: Arc::new(Semaphore::new(
-                config
-                    .property_or_default::<usize>("queue.threads.local", "10")
-                    .unwrap_or(10)
-                    .max(1),
-            )),
+            broadcast_tx: has_pubsub.then_some(broadcast_tx),
+            task_tx: Arc::new(Notify::new()),
         },
         IpcReceivers {
             state_rx: Some(state_rx),
             housekeeper_rx: Some(housekeeper_rx),
             queue_rx: Some(queue_rx),
             report_rx: Some(report_rx),
+            broadcast_rx: has_pubsub.then_some(broadcast_rx),
         },
     )
 }

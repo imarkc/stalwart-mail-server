@@ -2,6 +2,128 @@
 
 All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [0.12.5] - 2025-06-25
+
+If you are upgrading from v0.11.x, this version includes **breaking changes** to the database layout and requires a migration. Please read the [UPGRADING.md](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING.md) file for more information on how to upgrade from previous versions.
+
+## Added
+- Calendar Scheduling Extensions to CalDAV - RFC6368 (#1514)
+- Calendar E-Mail Notifications (#1514)
+- Limited i18n support for calendaring events.
+- Assisted CalDAV/CardDAV shared resource discovery (#1691).
+
+## Changed
+- JMAP: Allow unauthenticated access to JMAP session object.
+
+## Fixed
+- WebDAV: Return NOTFOUND error instead of MULTISTATUS on empty PROPFIND responses (#1657).
+- WebDAV: Update account name when refreshing DAV caches (#1694).
+- JMAP: Do not include email address in identity names (#1688).
+- IMAP: Normalize `INBOX` name when creating/renaming folders (#1636).
+- LDAP: Request `secret-changed` attribute in LDAP queries (#1409).
+- Branding: Unable to change logos (#1652).
+- Antispam: Skip `card-is-ham` override when sender does not pass DMARC (#1648).
+- FoundationDB: Renew old/expired FDB read transactions after the `1007` error code is received rather than estimating expiration time.
+
+## [0.12.4] - 2025-06-03
+
+If you are upgrading from v0.11.x, this version includes **breaking changes** to the database layout and requires a migration. Please read the [UPGRADING.md](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING.md) file for more information on how to upgrade from previous versions.
+
+## Added
+- LDAP authentication enhancements (#1269 #1471 #795 #1496).
+- MTA: Return Queue IDs during message acceptance (#927).
+
+## Changed
+- LDAP: `bind.auth.enable` is now `bind.auth.method`, read the updated [LDAP documentation](https://stalw.art/docs/auth/backend/ldap) for more information.
+
+## Fixed
+- DNS: `hickory-resolver` bug hitting 100% CPU usage when resolving DNSSEC records.
+- IMAP: Return the message UID in the destination mailbox if the message already exists (#1201).
+- MTA: TLS reports being issued for sent TLS reports (infinite loop) (#1301).
+- WebDAV: Return `CTag` on `/dav/cal/account` resources to force iOS synchronize.
+- CardDAV: Strict vCard parsing (#1607).
+- WebDAV: Dead property updates (#1611).
+- WebDAV: Use last change id in `CTag`.
+
+## [0.12.3] - 2025-05-30
+
+If you are upgrading from v0.11.x, this version includes **breaking changes** to the database layout and requires a migration. Please read the [UPGRADING.md](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING.md) file for more information on how to upgrade from previous versions.
+
+## Added
+- Store vanished IMAP UIDs and WebDAV paths in the changelog.
+
+## Changed
+
+## Fixed
+- XML `CDATA` injection (credits to @andreymal for the report).
+- Macro references are replaced with their content when writing config file (#1595).
+- Double nested CalDAV and CardDAV property tags (#1591).
+- Allow empty properties in PROPPATCH requests (#1580).
+
+## [0.12.2] - 2025-05-27
+
+If you are upgrading from v0.11.x, this version includes **breaking changes** to the database layout and requires a migration. Please read the [UPGRADING.md](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING.md) file for more information on how to upgrade from previous versions.
+
+## Added
+- CardDAV: Legacy vCard 2.1 and 3.0 serialization support.
+- WebDAV: Add SRV Records to help DAV autodiscovery (closes #1565).
+
+## Changed
+
+## Fixed
+- Report list attempts to deserialize empty values (#1562)
+- Refresh expired FoundationDB transactions while retrieving large blobs (#1555).
+
+## [0.12.1] - 2025-05-26
+
+If you are upgrading from v0.11.x, this version includes **breaking changes** to the database layout and requires a migration. Please read the [UPGRADING.md](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING.md) file for more information on how to upgrade from previous versions.
+
+## Added
+
+## Changed
+
+## Fixed
+- Migration tool to generate the correct next id (#1561).
+- Failed to parse setting dav.lock.max-timeout (closes #1559).
+- Failed to build OpenTelemetry span exporter: no http client specified (#1571).
+
+## [0.12.0] - 2025-05-26
+
+This version includes **breaking changes** to the database layout and requires a migration. Please read the [UPGRADING.md](https://github.com/stalwartlabs/stalwart/blob/main/UPGRADING.md) file for more information on how to upgrade from previous versions.
+
+### Added
+- [Collaboration](https://stalw.art/docs/collaboration/overview) features including [Calendars over CalDAV](https://stalw.art/docs/http/calendar/), [Contacts over CardDAV](https://stalw.art/docs/http/contact/) and [File Storage over WebDAV](https://stalw.art/docs/http/file-storage/).
+- Peer-to-peer [cluster coordination](https://stalw.art/docs/cluster/coordination/overview) or with Apache Kafka, Redpanda, NATS or Redis.
+- Incremental caching of emails, calendars, contacts and file metadata.
+- Zero-copy deserialization.
+- Train spam messages as ham when the sender is in the user's address book.  
+- `XOAUTH2` SASL mechanism support (#1194 #1369).
+- Support for RFC9698, the `JMAPACCESS` Extension for IMAP.
+- Search index for accounts and other principals (#1368).
+- Add `description` property to OIDC ID token (#1234).
+
+### Changed
+- Deprecated gossip protocol in favor of the new [coordinator](https://stalw.art/docs/cluster/coordination/overview) options.
+- Renamed Git repository from `stalwartlabs/mail-server` to `stalwartlabs/stalwart` and the Docker image from `stalwartlabs/mail-server` to `stalwartlabs/stalwart`.
+- Renamed multiple settings:
+  - `server.http.*` to `http.*`.
+  - `jmap.folders.*` to `email.folders.*`.
+  - `jmap.account.purge.frequency` to `account.purge.frequency`.
+  - `jmap.email.auto-expunge` to `email.auto-expunge`.
+  - `jmap.protocol.changes.max-history` to `changes.max-history`.
+  - `storage.encryption.*` to `email.encryption.*`.
+- Deprecated `lookup.default.*` settings in favor of `server.hostname` and `report.domain`. v0.11 and before supported both, v0.12 will only support the new settings.
+
+### Fixed
+- Allow undiscovered UIDs to be used in IMAP `COPY`/`MOVE` operations (#1201).
+- Refuse loopback SMTP delivery (#1377).
+- Hide the current server version (#1435).
+- Use the newest `X-Spam-Status` Header (#1308).
+- MySQL Driver error: Transactions couldn't be nested (#1271).
+- Spawn a delivery thread for `EmailSubmission/set` requests (#1540).
+- ACME: Don't restrict challenge types (#1522).
+- Autoconfig: return `%EMAILADDRESS%` if no e-mail address is provided (#1537).
+
 ## [0.11.8] - 2025-04-30
 
 To upgrade replace the `stalwart-mail` binary and then upgrade to the latest web-admin.

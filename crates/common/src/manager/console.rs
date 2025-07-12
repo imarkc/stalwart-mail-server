@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,16 +7,16 @@
 use std::env;
 use std::io::{self, Write};
 
-use base64::engine::general_purpose;
 use base64::Engine;
+use base64::engine::general_purpose;
 use store::write::{AnyClass, AnyKey, BatchBuilder, ValueClass};
 use store::{
-    Deserialize, IterateParams, Store, SUBSPACE_BITMAP_ID, SUBSPACE_BITMAP_TAG,
-    SUBSPACE_BITMAP_TEXT, SUBSPACE_INDEXES,
+    Deserialize, IterateParams, SUBSPACE_BITMAP_ID, SUBSPACE_BITMAP_TAG, SUBSPACE_BITMAP_TEXT,
+    SUBSPACE_INDEXES, Store,
 };
 
 const HELP: &str = concat!(
-    "Stalwart Mail Server v",
+    "Stalwart Server v",
     env!("CARGO_PKG_VERSION"),
     r#" Data Store CLI
 
@@ -160,7 +160,7 @@ pub async fn store_console(store: Store) {
                             subspace: key.next().unwrap(),
                             key: key.collect(),
                         }));
-                        if let Err(err) = store.write(batch.build()).await {
+                        if let Err(err) = store.write(batch.build_all()).await {
                             println!("Failed to delete key: {}", err);
                         }
                     }
@@ -210,7 +210,7 @@ pub async fn store_console(store: Store) {
                         }),
                         value,
                     );
-                    if let Err(err) = store.write(batch.build()).await {
+                    if let Err(err) = store.write(batch.build_all()).await {
                         println!("Failed to insert key: {}", err);
                     }
                 }

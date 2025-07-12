@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::core::{Session, State};
 use common::listener::SessionStream;
-use imap_proto::{receiver::Request, Command, StatusResponse};
+use imap_proto::{Command, StatusResponse, receiver::Request};
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_noop(&mut self, request: Request<Command>) -> trc::Result<()> {

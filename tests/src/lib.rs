@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -16,6 +16,8 @@ use trc::Collector;
 static GLOBAL: Jemalloc = Jemalloc;
 
 #[cfg(test)]
+pub mod cluster;
+#[cfg(test)]
 pub mod directory;
 #[cfg(test)]
 pub mod http_server;
@@ -27,6 +29,8 @@ pub mod jmap;
 pub mod smtp;
 #[cfg(test)]
 pub mod store;
+#[cfg(test)]
+pub mod webdav;
 
 pub fn add_test_certs(config: &str) -> String {
     let mut cert_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -74,3 +78,16 @@ pub fn enable_logging() {
         }
     }
 }
+
+pub const TEST_USERS: &[(&str, &str, &str, &str)] = &[
+    ("admin", "secret", "Superuser", "admin@example.com"),
+    ("john", "secret2", "John Doe", "jdoe@example.com"),
+    (
+        "jane",
+        "secret3",
+        "Jane Doe-Smith",
+        "jane.smith@example.com",
+    ),
+    ("bill", "secret4", "Bill Foobar", "bill@example.com"),
+    ("mike", "secret5", "Mike Noquota", "mike@example.com"),
+];

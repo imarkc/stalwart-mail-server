@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -12,8 +12,8 @@ use serde_json::Value;
 use crate::modules::{Principal, Type};
 
 use super::{
-    cli::{Client, ListCommands},
     PrincipalField, PrincipalUpdate, PrincipalValue,
+    cli::{Client, ListCommands},
 };
 
 impl ListCommands {

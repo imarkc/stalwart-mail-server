@@ -1,17 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use ahash::AHashSet;
 use directory::{
+    Permission, Principal, PrincipalData, QueryBy, Type,
     backend::internal::{
         lookup::DirectoryStore,
         manage::{ChangedPrincipals, ManageDirectory},
-        PrincipalField,
     },
-    Permission, Principal, QueryBy, Type,
 };
 use jmap_proto::{
     request::RequestMethod,
@@ -29,11 +28,11 @@ use utils::map::{
 };
 
 use crate::{
+    KV_TOKEN_REVISION, Server,
     listener::limiter::{ConcurrencyLimiter, LimiterResult},
-    Server, KV_TOKEN_REVISION,
 };
 
-use super::{roles::RolePermissions, AccessToken, ResourceToken, TenantInfo};
+use super::{AccessToken, ResourceToken, TenantInfo, roles::RolePermissions};
 
 pub enum PrincipalOrId {
     Principal(Principal),
@@ -49,26 +48,16 @@ impl Server {
         let mut role_permissions = RolePermissions::default();
 
         // Apply role permissions
-        for role_id in principal.iter_int(PrincipalField::Roles) {
-            role_permissions.union(self.get_role_permissions(role_id as u32).await?.as_ref());
+        for role_id in principal.roles() {
+            role_permissions.union(self.get_role_permissions(*role_id).await?.as_ref());
         }
 
         // Add principal permissions
-        for (permissions, field) in [
-            (
-                &mut role_permissions.enabled,
-                PrincipalField::EnabledPermissions,
-            ),
-            (
-                &mut role_permissions.disabled,
-                PrincipalField::DisabledPermissions,
-            ),
-        ] {
-            for permission in principal.iter_int(field) {
-                let permission = permission as usize;
-                if permission < Permission::COUNT {
-                    permissions.set(permission);
-                }
+        for permission in principal.permissions() {
+            if permission.grant {
+                role_permissions.enabled.set(permission.permission.id());
+            } else {
+                role_permissions.disabled.set(permission.permission.id());
             }
         }
 
@@ -76,13 +65,13 @@ impl Server {
         let mut permissions = role_permissions.finalize();
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         let mut tenant = None;
         #[cfg(feature = "enterprise")]
         if self.is_enterprise_edition() {
-            if let Some(tenant_id) = principal.get_int(PrincipalField::Tenant).map(|v| v as u32) {
+            if let Some(tenant_id) = principal.tenant {
                 // Limit tenant permissions
                 permissions.intersection(&self.get_role_permissions(tenant_id).await?.enabled);
 
@@ -101,7 +90,7 @@ impl Server {
                                 .id(tenant_id)
                                 .caused_by(trc::location!())
                         })?
-                        .get_int(PrincipalField::Quota)
+                        .quota
                         .unwrap_or_default(),
                 });
             }
@@ -113,17 +102,22 @@ impl Server {
         let mut access_token = AccessToken {
             primary_id: principal.id(),
             member_of: principal
-                .iter_int(PrincipalField::MemberOf)
-                .map(|v| v as u32)
-                .collect(),
+                .member_of_mut()
+                .map(std::mem::take)
+                .unwrap_or_default(),
             access_to: VecMap::new(),
             tenant,
-            name: principal.take_str(PrincipalField::Name).unwrap_or_default(),
-            description: principal.take_str(PrincipalField::Description),
-            emails: principal
-                .take_str_array(PrincipalField::Emails)
-                .unwrap_or_default(),
-            quota: principal.quota(),
+            name: principal.name,
+            description: principal.description,
+            emails: principal.emails,
+            quota: principal.quota.unwrap_or_default(),
+            locale: principal.data.iter().find_map(|data| {
+                if let PrincipalData::Locale(v) = data {
+                    Some(v.to_string())
+                } else {
+                    None
+                }
+            }),
             permissions,
             concurrent_imap_requests: self.core.imap.rate_concurrent.map(ConcurrencyLimiter::new),
             concurrent_http_requests: self
@@ -189,7 +183,7 @@ impl Server {
             Ok(Some(principal)) => {
                 return self
                     .build_access_token_from_principal(principal, revision)
-                    .await
+                    .await;
             }
             Ok(None) => Err(trc::AuthEvent::Error
                 .into_err()
@@ -280,7 +274,7 @@ impl Server {
                             None,
                             (*id).into(),
                             &[Type::Individual, Type::Group, Type::Role, Type::ApiKey],
-                            &[PrincipalField::Name],
+                            false,
                             0,
                             0,
                         )
@@ -294,10 +288,11 @@ impl Server {
                             }
                         }
                         Err(err) => {
-                            trc::error!(err
-                                .details("Failed to list principals")
-                                .caused_by(trc::location!())
-                                .account_id(*id));
+                            trc::error!(
+                                err.details("Failed to list principals")
+                                    .caused_by(trc::location!())
+                                    .account_id(*id)
+                            );
                         }
                     }
                 } else {
@@ -330,10 +325,11 @@ impl Server {
                             ids = members.into_iter();
                         }
                         Err(err) => {
-                            trc::error!(err
-                                .details("Failed to obtain principal")
-                                .caused_by(trc::location!())
-                                .account_id(id));
+                            trc::error!(
+                                err.details("Failed to obtain principal")
+                                    .caused_by(trc::location!())
+                                    .account_id(id)
+                            );
                         }
                     }
                 } else if let Some(prev_ids) = ids_stack.pop() {
@@ -354,9 +350,10 @@ impl Server {
             )
             .await
         {
-            trc::error!(err
-                .details("Failed to increment principal revision")
-                .account_id(id));
+            trc::error!(
+                err.details("Failed to increment principal revision")
+                    .account_id(id)
+            );
         }
     }
 
@@ -371,9 +368,10 @@ impl Server {
         {
             Ok(revision) => (revision as u64).into(),
             Err(err) => {
-                trc::error!(err
-                    .details("Failed to obtain principal revision")
-                    .account_id(id));
+                trc::error!(
+                    err.details("Failed to obtain principal revision")
+                        .account_id(id)
+                );
                 None
             }
         }
@@ -436,6 +434,26 @@ impl AccessToken {
             .chain(self.access_to.iter().map(|(id, _)| id))
     }
 
+    pub fn all_ids(&self) -> impl Iterator<Item = u32> {
+        [self.primary_id]
+            .into_iter()
+            .chain(self.member_of.iter().copied())
+            .chain(self.access_to.iter().map(|(id, _)| *id))
+    }
+
+    pub fn all_ids_by_collection(&self, collection: Collection) -> impl Iterator<Item = u32> {
+        [self.primary_id]
+            .into_iter()
+            .chain(self.member_of.iter().copied())
+            .chain(self.access_to.iter().filter_map(move |(id, cols)| {
+                if cols.contains(collection) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            }))
+    }
+
     pub fn is_member(&self, account_id: u32) -> bool {
         self.primary_id == account_id
             || self.member_of.contains(&account_id)
@@ -451,9 +469,9 @@ impl AccessToken {
         self.permissions.get(permission.id())
     }
 
-    pub fn assert_has_permission(&self, permission: Permission) -> trc::Result<()> {
+    pub fn assert_has_permission(&self, permission: Permission) -> trc::Result<bool> {
         if self.has_permission(permission) {
-            Ok(())
+            Ok(true)
         } else {
             Err(trc::SecurityEvent::Unauthorized
                 .into_err()
@@ -505,6 +523,10 @@ impl AccessToken {
             || self.access_to.iter().any(|(id, collections)| {
                 *id == to_account_id && collections.contains(to_collection)
             })
+    }
+
+    pub fn has_account_access(&self, to_account_id: u32) -> bool {
+        self.is_member(to_account_id) || self.access_to.iter().any(|(id, _)| *id == to_account_id)
     }
 
     pub fn assert_has_access(

@@ -1,26 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::time::{Duration, Instant};
-
+use super::{PostgresStore, into_error};
+use crate::{
+    IndexKey, Key, LogKey, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_QUOTA, U64_LEN,
+    write::{
+        AssignedIds, Batch, BitmapClass, MAX_COMMIT_ATTEMPTS, MAX_COMMIT_TIME, Operation,
+        ValueClass, ValueOp,
+    },
+};
 use ahash::AHashMap;
 use deadpool_postgres::Object;
-use futures::{pin_mut, TryStreamExt};
 use rand::Rng;
-use roaring::RoaringBitmap;
-use tokio_postgres::{error::SqlState, IsolationLevel};
-
-use crate::{
-    write::{
-        key::DeserializeBigEndian, AssignedIds, Batch, BitmapClass, Operation, RandomAvailableId,
-        ValueOp, MAX_COMMIT_ATTEMPTS, MAX_COMMIT_TIME,
-    }, BitmapKey, IndexKey, Key, LogKey, SUBSPACE_COUNTER, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_QUOTA, U32_LEN
-};
-
-use super::{into_error, PostgresStore};
+use std::time::{Duration, Instant};
+use tokio_postgres::{IsolationLevel, error::SqlState};
 
 #[derive(Debug)]
 enum CommitError {
@@ -30,13 +26,13 @@ enum CommitError {
 }
 
 impl PostgresStore {
-    pub(crate) async fn write(&self, batch: Batch) -> trc::Result<AssignedIds> {
+    pub(crate) async fn write(&self, mut batch: Batch<'_>) -> trc::Result<AssignedIds> {
         let mut conn = self.conn_pool.get().await.map_err(into_error)?;
         let start = Instant::now();
         let mut retry_count = 0;
 
         loop {
-            match self.write_trx(&mut conn, &batch).await {
+            match self.write_trx(&mut conn, &mut batch).await {
                 Ok(result) => {
                     return Ok(result);
                 }
@@ -49,7 +45,9 @@ impl PostgresStore {
                             ) if retry_count < MAX_COMMIT_ATTEMPTS
                                 && start.elapsed() < MAX_COMMIT_TIME => {}
                             Some(&SqlState::UNIQUE_VIOLATION) => {
-                                return Err(trc::StoreEvent::AssertValueFailed.into());
+                                return Err(trc::StoreEvent::AssertValueFailed
+                                    .into_err()
+                                    .caused_by(trc::location!()));
                             }
                             _ => return Err(into_error(err)),
                         },
@@ -58,7 +56,9 @@ impl PostgresStore {
                             if retry_count > MAX_COMMIT_ATTEMPTS
                                 || start.elapsed() > MAX_COMMIT_TIME
                             {
-                                return Err(trc::StoreEvent::AssertValueFailed.into());
+                                return Err(trc::StoreEvent::AssertValueFailed
+                                    .into_err()
+                                    .caused_by(trc::location!()));
                             }
                         }
                     }
@@ -74,12 +74,12 @@ impl PostgresStore {
     async fn write_trx(
         &self,
         conn: &mut Object,
-        batch: &Batch,
+        batch: &mut Batch<'_>,
     ) -> Result<AssignedIds, CommitError> {
         let mut account_id = u32::MAX;
         let mut collection = u8::MAX;
         let mut document_id = u32::MAX;
-        let mut change_id = u64::MAX;
+        let mut change_id = 0u64;
         let mut asserted_values = AHashMap::new();
         let trx = conn
             .build_transaction()
@@ -87,13 +87,34 @@ impl PostgresStore {
             .start()
             .await?;
         let mut result = AssignedIds::default();
+        let has_changes = !batch.changes.is_empty();
 
-        for op in &batch.ops {
+        if has_changes {
+            for &account_id in batch.changes.keys() {
+                let key = ValueClass::ChangeId.serialize(account_id, 0, 0, 0);
+                let s = trx
+                    .prepare_cached(concat!(
+                        "INSERT INTO n (k, v) VALUES ($1, 1) ",
+                        "ON CONFLICT(k) DO UPDATE SET v = n.v + 1 RETURNING v"
+                    ))
+                    .await?;
+                let change_id = trx
+                    .query_one(&s, &[&key])
+                    .await
+                    .and_then(|row| row.try_get::<_, i64>(0))?;
+                result.push_change_id(account_id, change_id as u64);
+            }
+        }
+
+        for op in batch.ops.iter_mut() {
             match op {
                 Operation::AccountId {
                     account_id: account_id_,
                 } => {
                     account_id = *account_id_;
+                    if has_changes {
+                        change_id = result.last_change_id(account_id)?;
+                    }
                 }
                 Operation::Collection {
                     collection: collection_,
@@ -105,18 +126,20 @@ impl PostgresStore {
                 } => {
                     document_id = *document_id_;
                 }
-                Operation::ChangeId {
-                    change_id: change_id_,
-                } => {
-                    change_id = *change_id_;
-                }
                 Operation::Value { class, op } => {
-                    let key =
-                        class.serialize(account_id, collection, document_id, 0, (&result).into());
+                    let key = class.serialize(account_id, collection, document_id, 0);
                     let table = char::from(class.subspace(collection));
 
                     match op {
-                        ValueOp::Set(value) => {
+                        ValueOp::Set {
+                            value,
+                            version_offset,
+                        } => {
+                            if let Some(offset) = version_offset {
+                                value[*offset..*offset + U64_LEN]
+                                    .copy_from_slice(&change_id.to_be_bytes());
+                            }
+
                             let s = if let Some(exists) = asserted_values.get(&key) {
                                 if *exists {
                                     trx.prepare_cached(&format!(
@@ -142,12 +165,11 @@ impl PostgresStore {
                                 .await?
                             };
 
-                            if trx
-                                .execute(&s, &[&key, &value.resolve(&result)?.as_ref()])
-                                .await?
-                                == 0
-                            {
-                                return Err(trc::StoreEvent::AssertValueFailed.into_err().into());
+                            if trx.execute(&s, &[&key, &(*value)]).await? == 0 {
+                                return Err(trc::StoreEvent::AssertValueFailed
+                                    .into_err()
+                                    .caused_by(trc::location!())
+                                    .into());
                             }
                         }
                         ValueOp::AtomicAdd(by) => {
@@ -161,14 +183,14 @@ impl PostgresStore {
                                         table, table
                                     ))
                                     .await?;
-                                trx.execute(&s, &[&key, &by]).await?;
+                                trx.execute(&s, &[&key, &*by]).await?;
                             } else {
                                 let s = trx
                                     .prepare_cached(&format!(
                                         "UPDATE {table} SET v = v + $1 WHERE k = $2"
                                     ))
                                     .await?;
-                                trx.execute(&s, &[&by, &key]).await?;
+                                trx.execute(&s, &[&*by, &key]).await?;
                             }
                         }
                         ValueOp::AddAndGet(by) => {
@@ -182,16 +204,62 @@ impl PostgresStore {
                                 ))
                                 .await?;
                             result.push_counter_id(
-                                trx.query_one(&s, &[&key, &by])
+                                trx.query_one(&s, &[&key, &*by])
                                     .await
                                     .and_then(|row| row.try_get::<_, i64>(0))?,
                             );
+                        }
+                        ValueOp::Merge(merge) => {
+                            let s = trx
+                                .prepare_cached(&format!(
+                                    "SELECT v FROM {} WHERE k = $1 FOR UPDATE",
+                                    table
+                                ))
+                                .await?;
+                            let (exists, value) = trx
+                                .query_opt(&s, &[&key])
+                                .await?
+                                .map(|row| {
+                                    row.try_get::<_, &[u8]>(0)
+                                        .map_err(CommitError::from)
+                                        .and_then(|v| {
+                                            (merge.fnc)(Some(v))
+                                                .map(|v| (true, v))
+                                                .map_err(CommitError::from)
+                                        })
+                                })
+                                .unwrap_or_else(|| {
+                                    (merge.fnc)(None)
+                                        .map(|v| (false, v))
+                                        .map_err(CommitError::from)
+                                })?;
+
+                            let s = if exists {
+                                trx.prepare_cached(&format!(
+                                    "UPDATE {} SET v = $2 WHERE k = $1",
+                                    table
+                                ))
+                                .await?
+                            } else {
+                                trx.prepare_cached(&format!(
+                                    "INSERT INTO {} (k, v) VALUES ($1, $2)",
+                                    table
+                                ))
+                                .await?
+                            };
+
+                            trx.execute(&s, &[&key, &value]).await?;
                         }
                         ValueOp::Clear => {
                             let s = trx
                                 .prepare_cached(&format!("DELETE FROM {} WHERE k = $1", table))
                                 .await?;
                             trx.execute(&s, &[&key]).await?;
+
+                            // Update asserted value
+                            if let Some(exists) = asserted_values.get_mut(&key) {
+                                *exists = false;
+                            }
                         }
                     }
                 }
@@ -201,7 +269,7 @@ impl PostgresStore {
                         collection,
                         document_id,
                         field: *field,
-                        key,
+                        key: &*key,
                     }
                     .serialize(0);
 
@@ -216,47 +284,8 @@ impl PostgresStore {
                     trx.execute(&s, &[&key]).await?;
                 }
                 Operation::Bitmap { class, set } => {
-                    // Find the next available document id
                     let is_document_id = matches!(class, BitmapClass::DocumentIds);
-                    if *set && is_document_id && document_id == u32::MAX {
-                        let begin = BitmapKey {
-                            account_id,
-                            collection,
-                            class: BitmapClass::DocumentIds,
-                            document_id: 0,
-                        }
-                        .serialize(0);
-                        let end = BitmapKey {
-                            account_id,
-                            collection,
-                            class: BitmapClass::DocumentIds,
-                            document_id: u32::MAX,
-                        }
-                        .serialize(0);
-                        let key_len = begin.len();
-
-                        let s = trx
-                            .prepare_cached("SELECT k FROM b WHERE k >= $1 AND k <= $2")
-                            .await?;
-                        let rows = trx.query_raw(&s, &[&begin, &end]).await?;
-
-                        pin_mut!(rows);
-
-                        let mut found_ids = RoaringBitmap::new();
-
-                        while let Some(row) = rows.try_next().await? {
-                            let key: &[u8] = row.try_get(0)?;
-                            if key.len() == key_len {
-                                found_ids.insert(key.deserialize_be_u32(key_len - U32_LEN)?);
-                            }
-                        }
-
-                        document_id = found_ids.random_available_id();
-                        result.push_document_id(document_id);
-                    }
-
-                    let key =
-                        class.serialize(account_id, collection, document_id, 0, (&result).into());
+                    let key = class.serialize(account_id, collection, document_id, 0);
                     let table = char::from(class.subspace());
 
                     let s = if *set {
@@ -283,10 +312,10 @@ impl PostgresStore {
                         }
                     })?;
                 }
-                Operation::Log { set } => {
+                Operation::Log { collection, set } => {
                     let key = LogKey {
                         account_id,
-                        collection,
+                        collection: *collection,
                         change_id,
                     }
                     .serialize(0);
@@ -298,15 +327,13 @@ impl PostgresStore {
                         ))
                         .await?;
 
-                    trx.execute(&s, &[&key, &set.resolve(&result)?.as_ref()])
-                        .await?;
+                    trx.execute(&s, &[&key, &*set]).await?;
                 }
                 Operation::AssertValue {
                     class,
                     assert_value,
                 } => {
-                    let key =
-                        class.serialize(account_id, collection, document_id, 0, (&result).into());
+                    let key = class.serialize(account_id, collection, document_id, 0);
                     let table = char::from(class.subspace(collection));
 
                     let s = trx
@@ -321,7 +348,10 @@ impl PostgresStore {
                         })
                         .unwrap_or_else(|| (false, assert_value.is_none()));
                     if !matches {
-                        return Err(trc::StoreEvent::AssertValueFailed.into_err().into());
+                        return Err(trc::StoreEvent::AssertValueFailed
+                            .into_err()
+                            .caused_by(trc::location!())
+                            .into());
                     }
                     asserted_values.insert(key, exists);
                 }

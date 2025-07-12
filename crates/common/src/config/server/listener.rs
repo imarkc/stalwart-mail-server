@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,28 +7,28 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use rustls::{
-    crypto::ring::{default_provider, ALL_CIPHER_SUITES},
-    ServerConfig, SupportedCipherSuite, ALL_VERSIONS,
+    ALL_VERSIONS, ServerConfig, SupportedCipherSuite,
+    crypto::ring::{ALL_CIPHER_SUITES, default_provider},
 };
 
 use tokio::net::TcpSocket;
 use tokio_rustls::TlsAcceptor;
 use utils::{
     config::{
-        utils::{AsKey, ParseValue},
         Config,
+        utils::{AsKey, ParseValue},
     },
     snowflake::SnowflakeIdGenerator,
 };
 
 use crate::{
-    listener::{tls::CertificateResolver, TcpAcceptor},
     Inner,
+    listener::{TcpAcceptor, tls::CertificateResolver},
 };
 
 use super::{
-    tls::{TLS12_VERSION, TLS13_VERSION},
     Listener, Listeners, ServerProtocol, TcpListener,
+    tls::{TLS12_VERSION, TLS13_VERSION},
 };
 
 impl Listeners {
@@ -45,11 +45,7 @@ impl Listeners {
         };
 
         // Parse servers
-        for id in config
-            .sub_keys("server.listener", ".protocol")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id in config.sub_keys("server.listener", ".protocol") {
             servers.parse_server(config, id);
         }
         servers
@@ -216,11 +212,7 @@ impl Listeners {
     pub fn parse_tcp_acceptors(&mut self, config: &mut Config, inner: Arc<Inner>) {
         let resolver = Arc::new(CertificateResolver::new(inner.clone()));
 
-        for id_ in config
-            .sub_keys("server.listener", ".protocol")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        for id_ in config.sub_keys("server.listener", ".protocol") {
             let id = id_.as_str();
             // Build TLS config
             let acceptor = if config

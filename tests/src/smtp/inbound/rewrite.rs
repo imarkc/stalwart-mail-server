@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,7 +9,7 @@ use common::Core;
 use smtp::core::Session;
 use utils::config::Config;
 
-use crate::smtp::{session::TestSession, TestSMTP};
+use crate::smtp::{TestSMTP, session::TestSession};
 
 const CONFIG: &str = r#"
 [session.mail]
@@ -75,7 +75,7 @@ async fn address_rewrite() {
 
     // Init session
     let mut session = Session::test(TestSMTP::from_core(core).server);
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.doe.org").await;
 

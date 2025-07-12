@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -16,11 +16,6 @@ impl<T: AsyncRead + AsyncWrite> Session<T> {
             Elapsed = trc::Value::Duration(0)
         );
 
-        Ok(StatusResponse::ok(concat!(
-            "Stalwart ManageSieve v",
-            env!("CARGO_PKG_VERSION"),
-            " bids you farewell."
-        ))
-        .into_bytes())
+        Ok(StatusResponse::ok("Stalwart ManageSieve bids you farewell.").into_bytes())
     }
 }

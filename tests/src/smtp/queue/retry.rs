@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,13 +7,17 @@
 use std::time::Duration;
 
 use crate::smtp::{
-    inbound::{TestMessage, TestQueueEvent},
-    session::{TestSession, VerifyResponse},
     TestSMTP,
+    inbound::{TestMessage, TestQueueEvent},
+    queue::QueuedEvents,
+    session::{TestSession, VerifyResponse},
 };
 use ahash::AHashSet;
-use common::ipc::{QueueEvent, QueueEventStatus};
-use smtp::queue::spool::SmtpSpool;
+use common::{
+    config::smtp::queue::QueueName,
+    ipc::{QueueEvent, QueueEventStatus},
+};
+use smtp::queue::spool::{QUEUE_REFRESH, SmtpSpool};
 use store::write::now;
 
 const CONFIG: &str = r#"
@@ -27,12 +31,22 @@ relay = true
 deliver-by = "1h"
 future-release = "1h"
 
-[queue.schedule]
-retry = "[1s, 2s, 3s]"
-notify = [{if = "sender_domain = 'test.org'", then = "[1s, 2s]"},
-           {else = ['15h', '22h']}]
-expire = [{if = "sender_domain = 'test.org'", then = "6s"},
-          {else = '1d'}]
+[queue.schedule.sender-default]
+retry = ["1s", "2s", "3s"]
+notify = ["15h", "22h"]
+expire = "1d"
+queue-name = "default"
+
+[queue.schedule.sender-test]
+retry = ["1s", "2s", "3s"]
+notify = ["1s", "2s"]
+expire = "6s"
+#max-attempts = 3
+queue-name = "default"
+
+[queue.strategy]
+schedule = [{if = "sender_domain == 'test.org'", then = "'sender-test'"},
+           {else = "'sender-default'"}]
 "#;
 
 #[tokio::test]
@@ -48,7 +62,7 @@ async fn queue_retry() {
     let mut session = local.new_session();
     let qr = &mut local.queue_receiver;
 
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -59,9 +73,11 @@ async fn queue_retry() {
     // Expect a failed DSN
     attempt.try_deliver(core.clone());
     let message = qr.expect_message().await;
-    assert_eq!(message.return_path, "");
-    assert_eq!(message.domains.first().unwrap().domain, "test.org");
-    assert_eq!(message.recipients.first().unwrap().address, "john@test.org");
+    assert_eq!(message.message.return_path, "");
+    assert_eq!(
+        message.message.recipients.first().unwrap().address,
+        "john@test.org"
+    );
     message
         .read_lines(qr)
         .await
@@ -90,34 +106,41 @@ async fn queue_retry() {
 
     loop {
         match qr.try_read_event().await {
-            Some(QueueEvent::WorkerDone { queue_id, status }) => {
+            Some(QueueEvent::WorkerDone {
+                queue_id, status, ..
+            }) => {
                 in_fight.remove(&queue_id);
                 match &status {
                     QueueEventStatus::Completed | QueueEventStatus::Deferred => (),
                     _ => panic!("unexpected status {queue_id}: {status:?}"),
                 }
             }
-            Some(QueueEvent::Refresh) => (),
+            Some(QueueEvent::Refresh) | Some(QueueEvent::ReloadSettings) => (),
             None | Some(QueueEvent::Stop) | Some(QueueEvent::Paused(_)) => break,
         }
 
         let now = now();
-        let events = core.next_event().await;
-
-        if events.is_empty() && in_fight.is_empty() {
-            break;
+        let mut events = core.all_queued_messages().await;
+        if events.messages.is_empty() {
+            if events.next_refresh < now + QUEUE_REFRESH {
+                tokio::time::sleep(Duration::from_secs(events.next_refresh - now)).await;
+                events = core.all_queued_messages().await;
+            } else if in_fight.is_empty() {
+                break;
+            }
         }
-        for event in events {
+
+        for event in events.messages {
             if in_fight.contains(&event.queue_id) {
                 continue;
             }
-            if event.due > now {
-                tokio::time::sleep(Duration::from_secs(event.due - now)).await;
-            }
 
-            let message = core.read_message(event.queue_id).await.unwrap();
-            if message.return_path.is_empty() {
-                message.clone().remove(&core, event.due).await;
+            let message = core
+                .read_message(event.queue_id, QueueName::default())
+                .await
+                .unwrap();
+            if message.message.return_path.is_empty() {
+                message.clone().remove(&core, event.due.into()).await;
                 dsn.push(message);
             } else {
                 retries.push(event.due.saturating_sub(now));
@@ -165,7 +188,7 @@ async fn queue_retry() {
         .assert_contains("Action: failed");
 
     // Test FUTURERELEASE + DELIVERBY (RETURN)
-    session.data.remote_ip_str = "10.0.0.2".to_string();
+    session.data.remote_ip_str = "10.0.0.2".into();
     session.eval_session_params().await;
     session
         .send_message(
@@ -178,9 +201,22 @@ async fn queue_retry() {
     let now_ = now();
     let message = qr.expect_message().await;
     assert!([59, 60].contains(&(qr.message_due(message.queue_id).await - now_)));
-    assert!([59, 60].contains(&(message.next_delivery_event() - now_)));
-    assert!([3599, 3600].contains(&(message.domains.first().unwrap().expires - now_)));
-    assert!([54059, 54060].contains(&(message.domains.first().unwrap().notify.due - now_)));
+    assert!([59, 60].contains(&(message.message.next_delivery_event(None).unwrap() - now_)));
+    assert!(
+        [3599, 3600].contains(
+            &(message
+                .message
+                .recipients
+                .first()
+                .unwrap()
+                .expiration_time(message.message.created)
+                .unwrap()
+                - now_)
+        )
+    );
+    assert!(
+        [54059, 54060].contains(&(message.message.recipients.first().unwrap().notify.due - now_))
+    );
 
     // Test DELIVERBY (NOTIFY)
     session
@@ -192,5 +228,7 @@ async fn queue_retry() {
         )
         .await;
     let schedule = qr.expect_message().await;
-    assert!([3599, 3600].contains(&(schedule.domains.first().unwrap().notify.due - now())));
+    assert!(
+        [3599, 3600].contains(&(schedule.message.recipients.first().unwrap().notify.due - now()))
+    );
 }

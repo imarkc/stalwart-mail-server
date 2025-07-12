@@ -1,22 +1,23 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use common::manager::webadmin::Resource;
+use http_proto::{ToHttpResponse, request::fetch_body};
 use hyper::{body, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
-use jmap::api::http::{fetch_body, ToHttpResponse};
+use jmap::api::ToJmapHttpResponse;
 use jmap_proto::error::request::RequestError;
 use ring::hmac;
 use store::parking_lot::Mutex;
@@ -92,7 +93,7 @@ pub fn spawn_mock_webhook_endpoint() -> Arc<MockWebhookEndpoint> {
         let listener = TcpListener::bind("127.0.0.1:8821")
             .await
             .unwrap_or_else(|e| {
-                panic!("Failed to bind mock Milter server to 127.0.0.1:8821: {e}");
+                panic!("Failed to bind mock Webhooks server to 127.0.0.1:8821: {e}");
             });
         let mut rx_ = rx.clone();
 
@@ -112,7 +113,7 @@ pub fn spawn_mock_webhook_endpoint() -> Arc<MockWebhookEndpoint> {
                                     async move {
                                         // Verify HMAC signature
                                         let key = hmac::Key::new(hmac::HMAC_SHA256, "ovos-moles".as_bytes());
-                                        let body = fetch_body(&mut req, 1024 * 1024, 0).await.unwrap();
+                                        let body = fetch_body(&mut req, usize::MAX, 0).await.unwrap();
                                         let tag = STANDARD.decode(req.headers().get("X-Signature").unwrap().to_str().unwrap()).unwrap();
                                         hmac::verify(&key, &body, &tag).expect("Invalid signature");
 

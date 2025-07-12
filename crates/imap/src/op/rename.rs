@@ -1,30 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{collections::BTreeMap, time::Instant};
+use std::time::Instant;
 
 use crate::{
     core::{Session, SessionData},
     spawn_op,
 };
-use common::listener::SessionStream;
+use common::{listener::SessionStream, sharing::EffectiveAcl, storage::index::ObjectIndexBuilder};
 use directory::Permission;
-use email::mailbox::SCHEMA;
 use imap_proto::{
-    protocol::rename::Arguments, receiver::Request, Command, ResponseCode, StatusResponse,
+    Command, ResponseCode, StatusResponse, protocol::rename::Arguments, receiver::Request,
 };
-use jmap::auth::acl::EffectiveAcl;
-use jmap_proto::{
-    object::{index::ObjectIndexBuilder, Object},
-    types::{
-        acl::Acl, collection::Collection, id::Id, property::Property, state::StateChange,
-        type_state::DataType, value::Value,
-    },
-};
-use store::write::{assert::HashedValue, BatchBuilder};
+use jmap_proto::types::{acl::Acl, collection::Collection};
+use store::write::BatchBuilder;
 use trc::AddContext;
 
 use super::ImapContext;
@@ -92,14 +84,9 @@ impl<T: SessionStream> SessionData<T> {
         };
 
         // Obtain mailbox
-        let mailbox = self
+        let mailbox_ = self
             .server
-            .get_property::<HashedValue<Object<Value>>>(
-                params.account_id,
-                Collection::Mailbox,
-                mailbox_id,
-                Property::Value,
-            )
+            .get_archive(params.account_id, Collection::Mailbox, mailbox_id)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?
             .ok_or_else(|| {
@@ -110,6 +97,9 @@ impl<T: SessionStream> SessionData<T> {
                     .code(ResponseCode::NonExistent)
                     .id(arguments.tag.clone())
             })?;
+        let mailbox = mailbox_
+            .to_unarchived::<email::mailbox::Mailbox>()
+            .imap_ctx(&arguments.tag, trc::location!())?;
 
         // Validate ACL
         let access_token = self
@@ -119,6 +109,7 @@ impl<T: SessionStream> SessionData<T> {
         if access_token.is_shared(params.account_id)
             && !mailbox
                 .inner
+                .acls
                 .effective_acl(&access_token)
                 .contains(Acl::Modify)
         {
@@ -133,129 +124,58 @@ impl<T: SessionStream> SessionData<T> {
         let new_mailbox_name = params.path.pop().unwrap();
 
         // Build batch
-        let mut changes = self
-            .server
-            .begin_changes(params.account_id)
-            .imap_ctx(&arguments.tag, trc::location!())?;
-
         let mut parent_id = params.parent_mailbox_id.map(|id| id + 1).unwrap_or(0);
         let mut create_ids = Vec::with_capacity(params.path.len());
+        let mut next_document_id = self
+            .server
+            .store()
+            .assign_document_ids(
+                params.account_id,
+                Collection::Mailbox,
+                params.path.len() as u64,
+            )
+            .await
+            .caused_by(trc::location!())?;
+        let mut batch = BatchBuilder::new();
+
         for &path_item in params.path.iter() {
-            let mut batch = BatchBuilder::new();
+            let mailbox_id = next_document_id;
+            next_document_id -= 1;
+
             batch
                 .with_account_id(params.account_id)
                 .with_collection(Collection::Mailbox)
-                .create_document()
-                .custom(
-                    ObjectIndexBuilder::new(SCHEMA).with_changes(
-                        Object::with_capacity(3)
-                            .with_property(Property::Name, path_item)
-                            .with_property(Property::ParentId, Value::Id(Id::from(parent_id)))
-                            .with_property(
-                                Property::Cid,
-                                Value::UnsignedInt(rand::random::<u32>() as u64),
-                            ),
-                    ),
-                );
+                .create_document(mailbox_id)
+                .custom(ObjectIndexBuilder::<(), _>::new().with_changes(
+                    email::mailbox::Mailbox::new(path_item).with_parent_id(parent_id),
+                ))
+                .imap_ctx(&arguments.tag, trc::location!())?
+                .commit_point();
 
-            let mailbox_id = self
-                .server
-                .store()
-                .write_expect_id(batch)
-                .await
-                .imap_ctx(&arguments.tag, trc::location!())?;
-
-            changes.log_insert(Collection::Mailbox, mailbox_id);
             parent_id = mailbox_id + 1;
             create_ids.push(mailbox_id);
         }
 
-        let mut batch = BatchBuilder::new();
+        let mut new_mailbox = mailbox
+            .deserialize::<email::mailbox::Mailbox>()
+            .caused_by(trc::location!())?;
+        new_mailbox.name = new_mailbox_name.into();
+        new_mailbox.parent_id = parent_id;
+        new_mailbox.uid_validity = rand::random::<u32>();
         batch
             .with_account_id(params.account_id)
             .with_collection(Collection::Mailbox)
             .update_document(mailbox_id)
             .custom(
-                ObjectIndexBuilder::new(SCHEMA)
+                ObjectIndexBuilder::new()
                     .with_current(mailbox)
-                    .with_changes(
-                        Object::with_capacity(3)
-                            .with_property(Property::Name, new_mailbox_name)
-                            .with_property(Property::ParentId, Value::Id(Id::from(parent_id)))
-                            .with_property(
-                                Property::Cid,
-                                Value::UnsignedInt(rand::random::<u32>() as u64),
-                            ),
-                    ),
-            );
-        changes.log_update(Collection::Mailbox, mailbox_id);
-
-        let change_id = changes.change_id;
-        batch.custom(changes);
+                    .with_changes(new_mailbox),
+            )
+            .imap_ctx(&arguments.tag, trc::location!())?;
         self.server
-            .store()
-            .write(batch)
+            .commit_batch(batch)
             .await
             .imap_ctx(&arguments.tag, trc::location!())?;
-
-        // Broadcast changes
-        self.server
-            .broadcast_state_change(
-                StateChange::new(params.account_id).with_change(DataType::Mailbox, change_id),
-            )
-            .await;
-
-        let mut mailboxes = if !create_ids.is_empty() {
-            self.add_created_mailboxes(&mut params, change_id, create_ids)
-                .add_context(|err| err.id(arguments.tag.clone()))?
-        } else {
-            self.mailboxes.lock()
-        };
-
-        // Rename mailbox cache
-        for account in mailboxes.iter_mut() {
-            if account.account_id == params.account_id {
-                // Update state
-                account.state_mailbox = change_id.into();
-
-                // Update parents
-                if arguments.mailbox_name.contains('/') {
-                    let mut parent_path = arguments.mailbox_name.split('/').collect::<Vec<_>>();
-                    parent_path.pop();
-                    let parent_path = parent_path.join("/");
-                    if let Some(old_parent_id) = account.mailbox_names.get(&parent_path) {
-                        if let Some(old_parent) = account.mailbox_state.get_mut(old_parent_id) {
-                            let prefix = format!("{}/", parent_path);
-                            old_parent.has_children = account.mailbox_names.keys().any(|name| {
-                                name != &arguments.mailbox_name && name.starts_with(&prefix)
-                            });
-                        }
-                    }
-                }
-                if let Some(parent_mailbox) = params
-                    .parent_mailbox_id
-                    .and_then(|id| account.mailbox_state.get_mut(&id))
-                {
-                    parent_mailbox.has_children = true;
-                }
-
-                let prefix = format!("{}/", arguments.mailbox_name);
-                let mut new_mailbox_names = BTreeMap::new();
-                for (mailbox_name, mailbox_id) in std::mem::take(&mut account.mailbox_names) {
-                    if mailbox_name != arguments.mailbox_name {
-                        if let Some(child_name) = mailbox_name.strip_prefix(&prefix) {
-                            new_mailbox_names
-                                .insert(format!("{}/{}", params.full_path, child_name), mailbox_id);
-                        } else {
-                            new_mailbox_names.insert(mailbox_name, mailbox_id);
-                        }
-                    }
-                }
-                new_mailbox_names.insert(params.full_path, mailbox_id);
-                account.mailbox_names = new_mailbox_names;
-                break;
-            }
-        }
 
         trc::event!(
             Imap(trc::ImapEvent::RenameMailbox),

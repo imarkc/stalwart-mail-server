@@ -1,16 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::format_compact;
+
 use crate::{
-    parser::{json::Parser, Ignore, JsonObjectParser, Token},
-    request::{method::MethodObject, RequestProperty, RequestPropertyParser},
+    parser::{Ignore, JsonObjectParser, Token, json::Parser},
+    request::{RequestProperty, RequestPropertyParser, method::MethodObject},
     types::{id::Id, state::State},
 };
 
-use super::query::{parse_filter, parse_sort, Comparator, Filter, RequestArguments};
+use super::query::{Comparator, Filter, RequestArguments, parse_filter, parse_sort};
 
 #[derive(Debug, Clone)]
 pub struct QueryChangesRequest {
@@ -72,7 +74,7 @@ impl JsonObjectParser for QueryChangesRequest {
                 _ => {
                     return Err(trc::JmapEvent::UnknownMethod
                         .into_err()
-                        .details(format!("{}/queryChanges", parser.ctx)))
+                        .details(format_compact!("{}/queryChanges", parser.ctx)));
                 }
             },
             filter: vec![],

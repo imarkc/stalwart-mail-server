@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use utils::config::{utils::AsKey, Config, Rate};
+use utils::config::{Config, Rate, utils::AsKey};
 
-use crate::expr::{tokenizer::TokenMap, Expression};
+use crate::expr::{Expression, tokenizer::TokenMap};
 
 use super::*;
 
@@ -18,11 +18,7 @@ pub fn parse_queue_rate_limiter(
 ) -> Vec<QueueRateLimiter> {
     let prefix_ = prefix.as_key();
     let mut rate_limiters = Vec::new();
-    for rate_limiter_id in config
-        .sub_keys(prefix, "")
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-    {
+    for rate_limiter_id in config.sub_keys(prefix, "") {
         let rate_limiter_id = rate_limiter_id.as_str();
         if let Some(rate_limiter) = parse_queue_rate_limiter_item(
             config,

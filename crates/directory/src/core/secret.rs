@@ -1,10 +1,11 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use argon2::Argon2;
+use compact_str::ToCompactString;
 use mail_builder::encoders::base64::base64_encode;
 use mail_parser::decoders::base64::base64_decode;
 use password_hash::PasswordHash;
@@ -18,9 +19,8 @@ use sha2::Sha512;
 use tokio::sync::oneshot;
 use totp_rs::TOTP;
 
-use crate::backend::internal::PrincipalField;
-use crate::backend::internal::SpecialSecrets;
 use crate::Principal;
+use crate::backend::internal::SpecialSecrets;
 
 impl Principal {
     pub async fn verify_secret(&self, mut code: &str) -> trc::Result<bool> {
@@ -31,7 +31,7 @@ impl Principal {
         let mut is_authenticated = false;
         let mut is_app_authenticated = false;
 
-        for secret in self.iter_str(PrincipalField::Secrets) {
+        for secret in self.secrets.iter() {
             if secret.is_otp_auth() {
                 if !is_totp_verified && !is_totp_token_missing {
                     is_totp_required = true;
@@ -58,7 +58,7 @@ impl Principal {
                         .map_err(|err| {
                             trc::AuthEvent::Error
                                 .reason(err)
-                                .details(secret.to_string())
+                                .details(secret.to_compact_string())
                         })?
                         .check_current(totp_token)
                         .unwrap_or(false);
@@ -96,7 +96,7 @@ impl Principal {
         } else {
             if is_totp_verified {
                 // TOTP URL appeared after password hash in secrets list
-                for secret in self.iter_str(PrincipalField::Secrets) {
+                for secret in &self.secrets {
                     if secret.is_password() && verify_secret_hash(secret, code).await? {
                         return Ok(true);
                     }

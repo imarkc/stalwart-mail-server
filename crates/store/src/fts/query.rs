@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -15,12 +15,10 @@ use roaring::RoaringBitmap;
 use trc::AddContext;
 
 use crate::{
+    BitmapKey, IterateParams, Store, U32_LEN, ValueKey,
     backend::MAX_TOKEN_LENGTH,
     fts::FtsFilter,
-    write::{
-        hash::TokenType, key::DeserializeBigEndian, BitmapHash, DynamicDocumentId, ValueClass,
-    },
-    BitmapKey, IterateParams, Store, ValueKey, U32_LEN,
+    write::{BitmapHash, ValueClass, hash::TokenType, key::DeserializeBigEndian},
 };
 
 use super::postings::SerializedPostings;
@@ -294,12 +292,9 @@ impl Store {
                                             .insert(*document_id, postings.positions());
                                     }
                                     bm.insert(*document_id);
-                                } else if position_candidates
-                                    .get(document_id)
-                                    .is_some_and(|positions| {
-                                        postings.matches_positions(positions, pos as u32)
-                                    })
-                                {
+                                } else if position_candidates.get(document_id).is_some_and(
+                                    |positions| postings.matches_positions(positions, pos as u32),
+                                ) {
                                     bm.insert(*document_id);
                                 }
                             } else {
@@ -327,7 +322,7 @@ impl Store {
             }
 
             // Fetch from store
-            let key_len = ValueClass::FtsIndex::<DynamicDocumentId>(*token).serialized_size();
+            let key_len = ValueClass::FtsIndex(*token).serialized_size();
             self.iterate(
                 IterateParams::new(
                     ValueKey {
@@ -358,12 +353,9 @@ impl Store {
                                     position_candidates.insert(document_id, postings.positions());
                                 }
                                 bm.insert(document_id);
-                            } else if position_candidates
-                                .get(&document_id)
-                                .is_some_and(|positions| {
-                                    postings.matches_positions(positions, pos as u32)
-                                })
-                            {
+                            } else if position_candidates.get(&document_id).is_some_and(
+                                |positions| postings.matches_positions(positions, pos as u32),
+                            ) {
                                 bm.insert(document_id);
                             }
                         } else {

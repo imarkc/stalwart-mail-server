@@ -1,19 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::{PrincipalInfo, manage::ManageDirectory};
+use crate::{Principal, PrincipalData, QueryBy, Type, backend::RcptType};
+
 use mail_send::Credentials;
 use store::{
-    write::{DirectoryClass, ValueClass},
     Deserialize, IterateParams, Store, ValueKey,
+    write::{DirectoryClass, ValueClass},
 };
 use trc::AddContext;
-
-use crate::{backend::RcptType, Principal, QueryBy, Type};
-
-use super::{manage::ManageDirectory, PrincipalField, PrincipalInfo};
 
 #[allow(async_fn_in_trait)]
 pub trait DirectoryStore: Sync + Send {
@@ -63,13 +62,26 @@ impl DirectoryStore for Store {
                 }
 
                 if return_member_of {
+                    let mut roles = vec![];
+                    let mut lists = vec![];
+                    let mut member_of = vec![];
+
                     for member in self.get_member_of(principal.id).await? {
-                        let field = match member.typ {
-                            Type::List => PrincipalField::Lists,
-                            Type::Role => PrincipalField::Roles,
-                            _ => PrincipalField::MemberOf,
-                        };
-                        principal.append_int(field, member.principal_id);
+                        match member.typ {
+                            Type::List => lists.push(member.principal_id),
+                            Type::Role => roles.push(member.principal_id),
+                            _ => member_of.push(member.principal_id),
+                        }
+                    }
+
+                    if !roles.is_empty() {
+                        principal.data.push(PrincipalData::Roles(roles));
+                    }
+                    if !lists.is_empty() {
+                        principal.data.push(PrincipalData::Lists(lists));
+                    }
+                    if !member_of.is_empty() {
+                        principal.data.push(PrincipalData::MemberOf(member_of));
                     }
                 }
                 return Ok(Some(principal));
@@ -131,7 +143,7 @@ impl DirectoryStore for Store {
                             .typ
                             != Type::List
                     {
-                        results.push(key.to_string());
+                        results.push(key.into());
                     }
                     Ok(true)
                 },
@@ -163,17 +175,21 @@ impl DirectoryStore for Store {
             if let Some(email) = self
                 .get_principal(account_id)
                 .await?
-                .and_then(|mut p| p.take_str(PrincipalField::Emails))
+                .and_then(|p| p.emails.into_iter().next())
             {
                 results.push(email);
             }
         }
 
-        if let Some(emails) = self
-            .get_principal(list_id)
-            .await?
-            .and_then(|mut p| p.take_str_array(PrincipalField::ExternalMembers))
-        {
+        if let Some(emails) = self.get_principal(list_id).await?.and_then(|p| {
+            p.data.into_iter().find_map(|data| {
+                if let PrincipalData::ExternalMembers(members) = data {
+                    Some(members)
+                } else {
+                    None
+                }
+            })
+        }) {
             results.extend(emails);
         }
 

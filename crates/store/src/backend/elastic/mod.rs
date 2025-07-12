@@ -1,22 +1,22 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use elasticsearch::{
+    Elasticsearch, Error,
     auth::Credentials,
     cert::CertificateValidation,
     http::{
+        StatusCode, Url,
         response::Response,
         transport::{SingleNodeConnectionPool, Transport, TransportBuilder},
-        StatusCode, Url,
     },
     indices::{IndicesCreateParts, IndicesExistsParts},
-    Elasticsearch, Error,
 };
 use serde_json::json;
-use utils::config::{utils::AsKey, Config};
+use utils::config::{Config, utils::AsKey};
 
 pub mod index;
 pub mod query;

@@ -1,58 +1,80 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use ahash::AHashMap;
-use mail_auth::IpLookupStrategy;
-use mail_send::Credentials;
-use throttle::parse_queue_rate_limiter_key;
-use utils::config::{utils::ParseValue, Config};
-
+use self::throttle::parse_queue_rate_limiter;
+use super::*;
 use crate::{
     config::server::ServerProtocol,
     expr::{if_block::IfBlock, *},
 };
+use ahash::AHashMap;
+use mail_auth::IpLookupStrategy;
+use mail_send::Credentials;
+use std::{
+    fmt::Display,
+    hash::{Hash, Hasher},
+    net::IpAddr,
+    time::Duration,
+};
+use throttle::parse_queue_rate_limiter_key;
+use utils::config::{Config, utils::ParseValue};
 
-use self::throttle::parse_queue_rate_limiter;
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    serde::Deserialize,
+)]
+#[repr(transparent)]
+pub struct QueueName([u8; 8]);
 
-use super::*;
+pub const DEFAULT_QUEUE_NAME: QueueName = QueueName([b'd', b'e', b'f', b'a', b'u', b'l', b't', 0]);
 
 #[derive(Clone)]
 pub struct QueueConfig {
-    // Schedule
-    pub retry: IfBlock,
-    pub notify: IfBlock,
-    pub expire: IfBlock,
+    // Strategy resolver
+    pub gateway: IfBlock,
+    pub queue: IfBlock,
+    pub connection: IfBlock,
+    pub tls: IfBlock,
 
-    // Outbound
-    pub hostname: IfBlock,
-    pub next_hop: IfBlock,
-    pub max_mx: IfBlock,
-    pub max_multihomed: IfBlock,
-    pub ip_strategy: IfBlock,
-    pub source_ip: QueueOutboundSourceIp,
-    pub tls: QueueOutboundTls,
+    // DSN
     pub dsn: Dsn,
-
-    // Timeouts
-    pub timeout: QueueOutboundTimeout,
 
     // Rate limits
     pub inbound_limiters: QueueRateLimiters,
     pub outbound_limiters: QueueRateLimiters,
     pub quota: QueueQuotas,
-    pub max_threads: usize,
 
-    // Relay hosts
-    pub relay_hosts: AHashMap<String, RelayHost>,
+    // Strategies
+    pub queue_strategy: AHashMap<String, QueueStrategy>,
+    pub connection_strategy: AHashMap<String, ConnectionStrategy>,
+    pub gateway_strategy: AHashMap<String, GatewayStrategy>,
+    pub tls_strategy: AHashMap<String, TlsStrategy>,
+    pub virtual_queues: AHashMap<QueueName, VirtualQueue>,
 }
 
-#[derive(Clone)]
-pub struct QueueOutboundSourceIp {
-    pub ipv4: IfBlock,
-    pub ipv6: IfBlock,
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub enum GatewayStrategy {
+    Local,
+    Mx(MxConfig),
+    Relay(RelayConfig),
+}
+
+#[derive(Clone, Debug)]
+pub struct MxConfig {
+    pub max_mx: usize,
+    pub max_multi_homed: usize,
+    pub ip_lookup_strategy: IpLookupStrategy,
 }
 
 #[derive(Clone)]
@@ -62,24 +84,64 @@ pub struct Dsn {
     pub sign: IfBlock,
 }
 
-#[derive(Clone)]
-pub struct QueueOutboundTls {
-    pub dane: IfBlock,
-    pub mta_sts: IfBlock,
-    pub start: IfBlock,
-    pub invalid_certs: IfBlock,
+#[derive(Clone, Debug)]
+pub struct VirtualQueue {
+    pub threads: usize,
 }
 
-#[derive(Clone)]
-pub struct QueueOutboundTimeout {
-    pub connect: IfBlock,
-    pub greeting: IfBlock,
-    pub tls: IfBlock,
-    pub ehlo: IfBlock,
-    pub mail: IfBlock,
-    pub rcpt: IfBlock,
-    pub data: IfBlock,
-    pub mta_sts: IfBlock,
+#[derive(Clone, Debug)]
+pub struct QueueStrategy {
+    pub retry: Vec<u64>,
+    pub notify: Vec<u64>,
+    pub expiry: QueueExpiry,
+    pub virtual_queue: QueueName,
+}
+
+#[derive(
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    rkyv::Archive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+)]
+pub enum QueueExpiry {
+    Duration(u64),
+    Count(u32),
+}
+
+#[derive(Clone, Debug)]
+pub struct TlsStrategy {
+    pub dane: RequireOptional,
+    pub mta_sts: RequireOptional,
+    pub tls: RequireOptional,
+    pub allow_invalid_certs: bool,
+
+    pub timeout_tls: Duration,
+    pub timeout_mta_sts: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConnectionStrategy {
+    pub source_ipv4: Vec<IpAndHost>,
+    pub source_ipv6: Vec<IpAndHost>,
+    pub ehlo_hostname: Option<String>,
+
+    pub timeout_connect: Duration,
+    pub timeout_greeting: Duration,
+    pub timeout_ehlo: Duration,
+    pub timeout_mail: Duration,
+    pub timeout_rcpt: Duration,
+    pub timeout_data: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct IpAndHost {
+    pub ip: IpAddr,
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,12 +163,12 @@ pub struct QueueQuota {
     pub id: String,
     pub expr: Expression,
     pub keys: u16,
-    pub size: Option<usize>,
-    pub messages: Option<usize>,
+    pub size: Option<u64>,
+    pub messages: Option<u64>,
 }
 
-#[derive(Clone)]
-pub struct RelayHost {
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct RelayConfig {
     pub address: String,
     pub port: u16,
     pub protocol: ServerProtocol,
@@ -126,57 +188,17 @@ pub enum RequireOptional {
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            retry: IfBlock::new::<()>(
-                "queue.schedule.retry",
-                [],
-                "[2m, 5m, 10m, 15m, 30m, 1h, 2h]",
-            ),
-            notify: IfBlock::new::<()>("queue.schedule.notify", [], "[1d, 3d]"),
-            expire: IfBlock::new::<()>("queue.schedule.expire", [], "5d"),
-            hostname: IfBlock::new::<()>("queue.outbound.hostname", [], "config_get('server.hostname')"),
-            next_hop: IfBlock::new::<()>(
-                "queue.outbound.next-hop",
+            gateway: IfBlock::new::<()>(
+                "queue.strategy.gateway",
                 #[cfg(not(feature = "test_mode"))]
                 [("is_local_domain('*', rcpt_domain)", "'local'")],
                 #[cfg(feature = "test_mode")]
                 [],
-                "false",
+                "'mx'",
             ),
-            max_mx: IfBlock::new::<()>("queue.outbound.limits.mx", [], "5"),
-            max_multihomed: IfBlock::new::<()>("queue.outbound.limits.multihomed", [], "2"),
-            ip_strategy: IfBlock::new::<IpLookupStrategy>(
-                "queue.outbound.ip-strategy",
-                [],
-                "ipv4_then_ipv6",
-            ),
-            source_ip: QueueOutboundSourceIp {
-                ipv4: IfBlock::empty("queue.outbound.source-ip.v4"),
-                ipv6: IfBlock::empty("queue.outbound.source-ip.v6"),
-            },
-            tls: QueueOutboundTls {
-                dane: IfBlock::new::<RequireOptional>("queue.outbound.tls.dane", [], "optional"),
-                mta_sts: IfBlock::new::<RequireOptional>(
-                    "queue.outbound.tls.mta-sts",
-                    [],
-                    "optional",
-                ),
-                start: IfBlock::new::<RequireOptional>(
-                    "queue.outbound.tls.starttls",
-                    [],
-                    #[cfg(not(feature = "test_mode"))]
-                    "require",
-                    #[cfg(feature = "test_mode")]
-                    "optional",
-                ),
-                invalid_certs: IfBlock::new::<()>(
-                    "queue.outbound.tls.allow-invalid-certs",
-                    #[cfg(not(feature = "test_mode"))]
-                    [("retry_num > 0 && last_error == 'tls'", "true")],
-                    #[cfg(feature = "test_mode")]
-                    [],
-                    "false",
-                ),
-            },
+            queue: IfBlock::new::<()>("queue.strategy.schedule", [], "'default'"),
+            connection: IfBlock::new::<()>("queue.strategy.connection", [], "'default'"),
+            tls: IfBlock::new::<()>("queue.strategy.tls", [], "'default'"),
             dsn: Dsn {
                 name: IfBlock::new::<()>("report.dsn.from-name", [], "'Mail Delivery Subsystem'"),
                 address: IfBlock::new::<()>(
@@ -190,21 +212,14 @@ impl Default for QueueConfig {
                     "['rsa-' + config_get('report.domain'), 'ed25519-' + config_get('report.domain')]",
                 ),
             },
-            timeout: QueueOutboundTimeout {
-                connect: IfBlock::new::<()>("queue.outbound.timeouts.connect", [], "5m"),
-                greeting: IfBlock::new::<()>("queue.outbound.timeouts.greeting", [], "5m"),
-                tls: IfBlock::new::<()>("queue.outbound.timeouts.tls", [], "3m"),
-                ehlo: IfBlock::new::<()>("queue.outbound.timeouts.ehlo", [], "5m"),
-                mail: IfBlock::new::<()>("queue.outbound.timeouts.mail-from", [], "5m"),
-                rcpt: IfBlock::new::<()>("queue.outbound.timeouts.rcpt-to", [], "5m"),
-                data: IfBlock::new::<()>("queue.outbound.timeouts.data", [], "10m"),
-                mta_sts: IfBlock::new::<()>("queue.outbound.timeouts.mta-sts", [], "10m"),
-            },
-            max_threads: 25,
             inbound_limiters: QueueRateLimiters::default(),
             outbound_limiters: QueueRateLimiters::default(),
             quota: QueueQuotas::default(),
-            relay_hosts: Default::default(),
+            queue_strategy: Default::default(),
+            virtual_queues: Default::default(),
+            connection_strategy: Default::default(),
+            gateway_strategy: Default::default(),
+            tls_strategy: Default::default(),
         }
     }
 }
@@ -214,95 +229,17 @@ impl QueueConfig {
         let mut queue = QueueConfig::default();
         let rcpt_vars = TokenMap::default().with_variables(SMTP_QUEUE_RCPT_VARS);
         let sender_vars = TokenMap::default().with_variables(SMTP_QUEUE_SENDER_VARS);
-        let mx_vars = TokenMap::default().with_variables(SMTP_QUEUE_MX_VARS);
         let host_vars = TokenMap::default().with_variables(SMTP_QUEUE_HOST_VARS);
-        let ip_strategy_vars = sender_vars.clone().with_constants::<IpLookupStrategy>();
-        let dane_vars = mx_vars.clone().with_constants::<RequireOptional>();
-        let mta_sts_vars = rcpt_vars.clone().with_constants::<RequireOptional>();
 
         for (value, key, token_map) in [
-            (&mut queue.retry, "queue.schedule.retry", &host_vars),
-            (&mut queue.notify, "queue.schedule.notify", &rcpt_vars),
-            (&mut queue.expire, "queue.schedule.expire", &rcpt_vars),
-            (&mut queue.hostname, "queue.outbound.hostname", &sender_vars),
-            (&mut queue.max_mx, "queue.outbound.limits.mx", &rcpt_vars),
+            (&mut queue.gateway, "queue.strategy.gateway", &rcpt_vars),
+            (&mut queue.queue, "queue.strategy.schedule", &rcpt_vars),
             (
-                &mut queue.max_multihomed,
-                "queue.outbound.limits.multihomed",
-                &rcpt_vars,
-            ),
-            (
-                &mut queue.ip_strategy,
-                "queue.outbound.ip-strategy",
-                &ip_strategy_vars,
-            ),
-            (
-                &mut queue.source_ip.ipv4,
-                "queue.outbound.source-ip.v4",
-                &mx_vars,
-            ),
-            (
-                &mut queue.source_ip.ipv6,
-                "queue.outbound.source-ip.v6",
-                &mx_vars,
-            ),
-            (&mut queue.next_hop, "queue.outbound.next-hop", &rcpt_vars),
-            (&mut queue.tls.dane, "queue.outbound.tls.dane", &dane_vars),
-            (
-                &mut queue.tls.mta_sts,
-                "queue.outbound.tls.mta-sts",
-                &mta_sts_vars,
-            ),
-            (
-                &mut queue.tls.start,
-                "queue.outbound.tls.starttls",
-                &dane_vars,
-            ),
-            (
-                &mut queue.tls.invalid_certs,
-                "queue.outbound.tls.allow-invalid-certs",
-                &mx_vars,
-            ),
-            (
-                &mut queue.timeout.connect,
-                "queue.outbound.timeouts.connect",
+                &mut queue.connection,
+                "queue.strategy.connection",
                 &host_vars,
             ),
-            (
-                &mut queue.timeout.greeting,
-                "queue.outbound.timeouts.greeting",
-                &host_vars,
-            ),
-            (
-                &mut queue.timeout.tls,
-                "queue.outbound.timeouts.tls",
-                &host_vars,
-            ),
-            (
-                &mut queue.timeout.ehlo,
-                "queue.outbound.timeouts.ehlo",
-                &host_vars,
-            ),
-            (
-                &mut queue.timeout.mail,
-                "queue.outbound.timeouts.mail-from",
-                &host_vars,
-            ),
-            (
-                &mut queue.timeout.rcpt,
-                "queue.outbound.timeouts.rcpt-to",
-                &host_vars,
-            ),
-            (
-                &mut queue.timeout.data,
-                "queue.outbound.timeouts.data",
-                &host_vars,
-            ),
-            (
-                &mut queue.timeout.mta_sts,
-                "queue.outbound.timeouts.mta-sts",
-                &host_vars,
-            ),
+            (&mut queue.tls, "queue.strategy.tls", &host_vars),
             (&mut queue.dsn.name, "report.dsn.from-name", &sender_vars),
             (
                 &mut queue.dsn.address,
@@ -316,68 +253,305 @@ impl QueueConfig {
             }
         }
 
+        // Parse strategies
+        queue.virtual_queues = parse_virtual_queues(config);
+        queue.queue_strategy = parse_queue_strategies(config, &queue.virtual_queues);
+        queue.connection_strategy = parse_connection_strategies(config);
+        queue.gateway_strategy = parse_gateway_strategies(config);
+        queue.tls_strategy = parse_tls_strategies(config);
+
         // Parse rate limiters
-        queue.max_threads = config
-            .property_or_default::<usize>("queue.threads.remote", "25")
-            .unwrap_or(25)
-            .max(1);
-        queue.inbound_limiters = parse_inbound_rate_limters(config);
+        queue.inbound_limiters = parse_inbound_rate_limiters(config);
         queue.outbound_limiters = parse_outbound_rate_limiters(config);
         queue.quota = parse_queue_quota(config);
-
-        // Parse relay hosts
-        queue.relay_hosts = config
-            .sub_keys("remote", ".address")
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter_map(|id| parse_relay_host(config, &id).map(|host| (id, host)))
-            .collect();
-
-        // Add local delivery host
-        queue.relay_hosts.insert(
-            "local".to_string(),
-            RelayHost {
-                address: String::new(),
-                port: 0,
-                protocol: ServerProtocol::Http,
-                tls_implicit: Default::default(),
-                tls_allow_invalid_certs: Default::default(),
-                auth: None,
-            },
-        );
-
         queue
     }
 }
 
-fn parse_relay_host(config: &mut Config, id: &str) -> Option<RelayHost> {
-    Some(RelayHost {
-        address: config.property_require(("remote", id, "address"))?,
-        port: config
-            .property_require(("remote", id, "port"))
-            .unwrap_or(25),
-        protocol: config
-            .property_require(("remote", id, "protocol"))
-            .unwrap_or(ServerProtocol::Smtp),
-        auth: if let (Some(username), Some(secret)) = (
-            config.value(("remote", id, "auth.username")),
-            config.value(("remote", id, "auth.secret")),
+fn parse_queue_strategies(
+    config: &mut Config,
+    queues: &AHashMap<QueueName, VirtualQueue>,
+) -> AHashMap<String, QueueStrategy> {
+    let mut entries = AHashMap::new();
+    for key in config.sub_keys_with_suffixes(
+        "queue.schedule",
+        &[
+            ".queue-name",
+            ".retry",
+            ".notify",
+            ".expire",
+            ".max-attempts",
+        ],
+    ) {
+        if let Some(strategy) = parse_queue_strategy(config, &key, queues) {
+            entries.insert(key, strategy);
+        }
+    }
+    entries
+}
+
+fn parse_queue_strategy(
+    config: &mut Config,
+    id: &str,
+    queues: &AHashMap<QueueName, VirtualQueue>,
+) -> Option<QueueStrategy> {
+    let virtual_queue = config
+        .property_require::<QueueName>(("queue.schedule", id, "queue-name"))
+        .unwrap_or_default();
+    if virtual_queue != DEFAULT_QUEUE_NAME && !queues.contains_key(&virtual_queue) {
+        config.new_parse_error(
+            ("queue.schedule", id, "queue-name"),
+            format!("Virtual queue '{virtual_queue}' does not exist."),
+        );
+        return None;
+    }
+    let mut retry: Vec<u64> = config
+        .properties::<Duration>(("queue.schedule", id, "retry"))
+        .into_iter()
+        .map(|(_, d)| d.as_secs())
+        .collect();
+    let mut notify: Vec<u64> = config
+        .properties::<Duration>(("queue.schedule", id, "notify"))
+        .into_iter()
+        .map(|(_, d)| d.as_secs())
+        .collect();
+    if retry.is_empty() {
+        config.new_parse_error(
+            ("queue.schedule", id, "retry"),
+            "At least one 'retry' duration must be specified.".to_string(),
+        );
+        retry.push(60 * 60); // Default to 1 minute
+    }
+    if notify.is_empty() {
+        notify.push(10000 * 86400); // Disable notifications by default
+    }
+
+    Some(QueueStrategy {
+        retry,
+        notify,
+        expiry: match (
+            config.property::<Duration>(("queue.schedule", id, "expire")),
+            config.property::<u32>(("queue.schedule", id, "max-attempts")),
         ) {
-            Credentials::new(username.to_string(), secret.to_string()).into()
-        } else {
-            None
+            (Some(duration), None) => QueueExpiry::Duration(duration.as_secs()),
+            (None, Some(count)) => QueueExpiry::Count(count),
+            (Some(_), Some(_)) => {
+                config.new_parse_error(
+                    ("queue.schedule", id, "expire"),
+                    "Cannot specify both 'expire' and 'max-attempts'.".to_string(),
+                );
+                return None;
+            }
+            (None, None) => QueueExpiry::Duration(60 * 60 * 24 * 3), // Default to 3 days
         },
-        tls_implicit: config
-            .property(("remote", id, "tls.implicit"))
-            .unwrap_or(true),
-        tls_allow_invalid_certs: config
-            .property(("remote", id, "tls.allow-invalid-certs"))
-            .unwrap_or(false),
+        virtual_queue,
     })
 }
 
-fn parse_inbound_rate_limters(config: &mut Config) -> QueueRateLimiters {
+fn parse_virtual_queues(config: &mut Config) -> AHashMap<QueueName, VirtualQueue> {
+    let mut entries = AHashMap::new();
+    for key in config.sub_keys("queue.virtual", ".threads-per-node") {
+        if let Some(queue_name) = QueueName::new(&key) {
+            if let Some(queue) = parse_virtual_queue(config, &key) {
+                entries.insert(queue_name, queue);
+            }
+        } else {
+            config.new_parse_error(
+                ("queue.virtual", &key, "threads-per-node"),
+                format!("Invalid virtual queue name: {key:?}. Must be 1-8 bytes long."),
+            );
+        }
+    }
+    entries
+}
+
+fn parse_virtual_queue(config: &mut Config, id: &str) -> Option<VirtualQueue> {
+    Some(VirtualQueue {
+        threads: config
+            .property_require::<usize>(("queue.virtual", id, "threads-per-node"))
+            .unwrap_or(1),
+    })
+}
+
+fn parse_gateway_strategies(config: &mut Config) -> AHashMap<String, GatewayStrategy> {
+    let mut entries = AHashMap::new();
+    for key in config.sub_keys("queue.gateway", ".type") {
+        if let Some(strategy) = parse_gateway(config, &key) {
+            entries.insert(key, strategy);
+        }
+    }
+    entries
+}
+
+fn parse_gateway(config: &mut Config, id: &str) -> Option<GatewayStrategy> {
+    match config.value_require_non_empty(("queue.gateway", id, "type"))? {
+        "relay" => GatewayStrategy::Relay(RelayConfig {
+            address: config.property_require(("queue.gateway", id, "address"))?,
+            port: config
+                .property_require(("queue.gateway", id, "port"))
+                .unwrap_or(25),
+            protocol: config
+                .property_require(("queue.gateway", id, "protocol"))
+                .unwrap_or(ServerProtocol::Smtp),
+            auth: if let (Some(username), Some(secret)) = (
+                config.value(("queue.gateway", id, "auth.username")),
+                config.value(("queue.gateway", id, "auth.secret")),
+            ) {
+                Credentials::new(username.to_string(), secret.to_string()).into()
+            } else {
+                None
+            },
+            tls_implicit: config
+                .property(("queue.gateway", id, "tls.implicit"))
+                .unwrap_or(true),
+            tls_allow_invalid_certs: config
+                .property(("queue.gateway", id, "tls.allow-invalid-certs"))
+                .unwrap_or(false),
+        })
+        .into(),
+        "local" => GatewayStrategy::Local.into(),
+        "mx" => GatewayStrategy::Mx(MxConfig {
+            max_mx: config
+                .property_require(("queue.gateway", id, "limits.mx"))
+                .unwrap_or(5),
+            max_multi_homed: config
+                .property_require(("queue.gateway", id, "limits.multihomed"))
+                .unwrap_or(2),
+            ip_lookup_strategy: config
+                .property_require(("queue.gateway", id, "ip-lookup"))
+                .unwrap_or(IpLookupStrategy::Ipv4thenIpv6),
+        })
+        .into(),
+        invalid => {
+            let details =
+                format!("Invalid gateway type: {invalid:?}. Expected 'relay', 'local', or 'mx'.");
+            config.new_parse_error(("queue.gateway", id, "type"), details);
+            None
+        }
+    }
+}
+
+fn parse_tls_strategies(config: &mut Config) -> AHashMap<String, TlsStrategy> {
+    let mut entries = AHashMap::new();
+    for key in config.sub_keys_with_suffixes(
+        "queue.tls",
+        &[
+            ".allow-invalid-certs",
+            ".dane",
+            ".mta-sts",
+            ".starttls",
+            ".timeout.tls",
+            ".timeout.mta-sts",
+        ],
+    ) {
+        if let Some(strategy) = parse_tls(config, &key) {
+            entries.insert(key, strategy);
+        }
+    }
+    entries
+}
+
+fn parse_tls(config: &mut Config, id: &str) -> Option<TlsStrategy> {
+    Some(TlsStrategy {
+        dane: config
+            .property_require::<RequireOptional>(("queue.tls", id, "dane"))
+            .unwrap_or(RequireOptional::Optional),
+        mta_sts: config
+            .property_require::<RequireOptional>(("queue.tls", id, "mta-sts"))
+            .unwrap_or(RequireOptional::Optional),
+        tls: config
+            .property_require::<RequireOptional>(("queue.tls", id, "starttls"))
+            .unwrap_or(RequireOptional::Optional),
+        allow_invalid_certs: config
+            .property_require::<bool>(("queue.tls", id, "allow-invalid-certs"))
+            .unwrap_or(false),
+        timeout_tls: config
+            .property_require::<Duration>(("queue.tls", id, "timeout.tls"))
+            .unwrap_or(Duration::from_secs(3 * 60)),
+        timeout_mta_sts: config
+            .property_require::<Duration>(("queue.tls", id, "timeout.mta-sts"))
+            .unwrap_or(Duration::from_secs(5 * 60)),
+    })
+}
+
+fn parse_connection_strategies(config: &mut Config) -> AHashMap<String, ConnectionStrategy> {
+    let mut entries = AHashMap::new();
+    for key in config.sub_keys_with_suffixes(
+        "queue.connection",
+        &[
+            ".timeout.connect",
+            ".timeout.greeting",
+            ".timeout.ehlo",
+            ".timeout.mail-from",
+            ".timeout.rcpt-to",
+            ".timeout.data",
+            ".ehlo-hostname",
+        ],
+    ) {
+        if let Some(strategy) = parse_connection(config, &key) {
+            entries.insert(key, strategy);
+        }
+    }
+    entries
+}
+
+fn parse_connection(config: &mut Config, id: &str) -> Option<ConnectionStrategy> {
+    let mut source_ipv4 = Vec::new();
+    let mut source_ipv6 = Vec::new();
+
+    for ip_num in config.sub_keys(("queue.connection", id, "source-ip"), ".address") {
+        if let Some(ip) = config.property_require::<IpAddr>((
+            "queue.connection",
+            id,
+            "source-ip",
+            ip_num.as_str(),
+            "address",
+        )) {
+            let ip_and_host = IpAndHost {
+                ip,
+                host: config.property::<String>((
+                    "queue.connection",
+                    id,
+                    "source-ip",
+                    ip_num.as_str(),
+                    "ehlo-hostname",
+                )),
+            };
+
+            if ip.is_ipv4() {
+                source_ipv4.push(ip_and_host);
+            } else {
+                source_ipv6.push(ip_and_host);
+            }
+        }
+    }
+
+    Some(ConnectionStrategy {
+        source_ipv4,
+        source_ipv6,
+        ehlo_hostname: config.property::<String>(("queue.connection", id, "ehlo-hostname")),
+        timeout_connect: config
+            .property_require::<Duration>(("queue.connection", id, "timeout.connect"))
+            .unwrap_or(Duration::from_secs(5 * 60)),
+        timeout_greeting: config
+            .property_require::<Duration>(("queue.connection", id, "timeout.greeting"))
+            .unwrap_or(Duration::from_secs(5 * 60)),
+        timeout_ehlo: config
+            .property_require::<Duration>(("queue.connection", id, "timeout.ehlo"))
+            .unwrap_or(Duration::from_secs(5 * 60)),
+        timeout_mail: config
+            .property_require::<Duration>(("queue.connection", id, "timeout.mail-from"))
+            .unwrap_or(Duration::from_secs(5 * 60)),
+        timeout_rcpt: config
+            .property_require::<Duration>(("queue.connection", id, "timeout.rcpt-to"))
+            .unwrap_or(Duration::from_secs(5 * 60)),
+        timeout_data: config
+            .property_require::<Duration>(("queue.connection", id, "timeout.data"))
+            .unwrap_or(Duration::from_secs(10 * 60)),
+    })
+}
+
+fn parse_inbound_rate_limiters(config: &mut Config) -> QueueRateLimiters {
     let mut throttle = QueueRateLimiters::default();
     let all_throttles = parse_queue_rate_limiter(
         config,
@@ -469,11 +643,7 @@ fn parse_queue_quota(config: &mut Config) -> QueueQuotas {
         rcpt_domain: Vec::new(),
     };
 
-    for quota_id in config
-        .sub_keys("queue.quota", "")
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-    {
+    for quota_id in config.sub_keys("queue.quota", "") {
         if let Some(quota) = parse_queue_quota_item(config, ("queue.quota", &quota_id), &quota_id) {
             if (quota.keys & THROTTLE_RCPT) != 0
                 || quota
@@ -548,11 +718,11 @@ fn parse_queue_quota_item(config: &mut Config, prefix: impl AsKey, id: &str) -> 
         .unwrap_or_default(),
         keys,
         size: config
-            .property::<Option<usize>>((prefix.as_str(), "size"))
+            .property::<Option<u64>>((prefix.as_str(), "size"))
             .filter(|&v| v.as_ref().is_some_and(|v| *v > 0))
             .unwrap_or_default(),
         messages: config
-            .property::<Option<usize>>((prefix.as_str(), "messages"))
+            .property::<Option<u64>>((prefix.as_str(), "messages"))
             .filter(|&v| v.as_ref().is_some_and(|v| *v > 0))
             .unwrap_or_default(),
     };
@@ -632,7 +802,9 @@ impl<'x> TryFrom<Variable<'x>> for IpLookupStrategy {
                 5 => Ok(IpLookupStrategy::Ipv4thenIpv6),
                 _ => Err(()),
             },
-            Variable::String(value) => IpLookupStrategy::parse_value(&value).map_err(|_| ()),
+            Variable::String(value) => {
+                IpLookupStrategy::parse_value(value.as_str()).map_err(|_| ())
+            }
             _ => Err(()),
         }
     }
@@ -659,14 +831,129 @@ impl ConstantValue for IpLookupStrategy {
     }
 }
 
-impl std::fmt::Debug for RelayHost {
+impl std::fmt::Debug for RelayConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RelayHost")
+        f.debug_struct("RelayConfig")
             .field("address", &self.address)
             .field("port", &self.port)
             .field("protocol", &self.protocol)
             .field("tls_implicit", &self.tls_implicit)
             .field("tls_allow_invalid_certs", &self.tls_allow_invalid_certs)
             .finish()
+    }
+}
+
+impl TlsStrategy {
+    #[inline(always)]
+    pub fn try_dane(&self) -> bool {
+        matches!(
+            self.dane,
+            RequireOptional::Require | RequireOptional::Optional
+        )
+    }
+
+    #[inline(always)]
+    pub fn try_start_tls(&self) -> bool {
+        matches!(
+            self.tls,
+            RequireOptional::Require | RequireOptional::Optional
+        )
+    }
+
+    #[inline(always)]
+    pub fn is_dane_required(&self) -> bool {
+        matches!(self.dane, RequireOptional::Require)
+    }
+
+    #[inline(always)]
+    pub fn try_mta_sts(&self) -> bool {
+        matches!(
+            self.mta_sts,
+            RequireOptional::Require | RequireOptional::Optional
+        )
+    }
+
+    #[inline(always)]
+    pub fn is_mta_sts_required(&self) -> bool {
+        matches!(self.mta_sts, RequireOptional::Require)
+    }
+
+    #[inline(always)]
+    pub fn is_tls_required(&self) -> bool {
+        matches!(self.tls, RequireOptional::Require)
+            || self.is_dane_required()
+            || self.is_mta_sts_required()
+    }
+}
+
+impl Hash for MxConfig {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.max_mx.hash(state);
+        self.max_multi_homed.hash(state);
+    }
+}
+
+impl PartialEq for MxConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_mx == other.max_mx && self.max_multi_homed == other.max_multi_homed
+    }
+}
+
+impl Eq for MxConfig {}
+
+impl QueueName {
+    pub fn new(name: impl AsRef<[u8]>) -> Option<Self> {
+        let name_bytes = name.as_ref();
+        if (1..=8).contains(&name_bytes.len()) {
+            let mut bytes = [0; 8];
+            bytes[..name_bytes.len()].copy_from_slice(name_bytes);
+            QueueName(bytes).into()
+        } else {
+            None
+        }
+    }
+
+    pub fn from_bytes(name: &[u8]) -> Option<Self> {
+        name.try_into().ok().map(|bytes: [u8; 8]| QueueName(bytes))
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0)
+            .unwrap_or_default()
+            .trim_end_matches('\0')
+    }
+
+    pub fn into_inner(self) -> [u8; 8] {
+        self.0
+    }
+}
+
+impl Default for QueueName {
+    fn default() -> Self {
+        DEFAULT_QUEUE_NAME
+    }
+}
+
+impl ParseValue for QueueName {
+    fn parse_value(value: &str) -> Result<Self, String> {
+        if let Some(name) = QueueName::new(value.trim().as_bytes()) {
+            Ok(name)
+        } else {
+            Err(format!(
+                "Queue name '{value}' is too long. Maximum length is 8 bytes."
+            ))
+        }
+    }
+}
+
+impl Display for QueueName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl AsRef<[u8]> for QueueName {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }

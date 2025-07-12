@@ -1,21 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::{Duration, Instant};
 
-use common::{config::server::ServerProtocol, ipc::QueueEvent};
+use common::{
+    config::{server::ServerProtocol, smtp::queue::QueueName},
+    ipc::QueueEvent,
+};
 use mail_auth::MX;
 use store::write::now;
 
 use crate::smtp::{
-    inbound::{TestMessage, TestQueueEvent},
-    session::{TestSession, VerifyResponse},
     DnsCache, TestSMTP,
+    inbound::{TestMessage, TestQueueEvent},
+    queue::QueuedEvents,
+    session::{TestSession, VerifyResponse},
 };
-use smtp::queue::spool::SmtpSpool;
+use smtp::queue::spool::{QUEUE_REFRESH, SmtpSpool};
 
 const LOCAL: &str = r#"
 [session.rcpt]
@@ -25,13 +29,33 @@ max-recipients = 100
 [session.extensions]
 dsn = true
 
-[queue.schedule]
+[queue.schedule.default]
 retry = "1s"
-notify = [{if = "rcpt_domain = 'foobar.org'", then = "[1s, 2s]"},
-          {if = "rcpt_domain = 'foobar.com'", then = "[5s, 6s]"},
-          {else = [1s]}]
-expire = [{if = "rcpt_domain = 'foobar.org'", then = "6s"},
-          {else = "7s"}]
+notify = "1s"
+expire = "7s"
+queue-name = "default"
+
+[queue.schedule.foobar-org]
+retry = "1s"
+notify = ["1s", "2s"]
+expire = "6s"
+queue-name = "default"
+
+[queue.schedule.foobar-com]
+retry = "1s"
+notify = ["5s", "6s"]
+expire = "7s"
+queue-name = "default"
+
+
+[queue.strategy]
+schedule = [{if = "rcpt_domain == 'foobar.org'", then = "'foobar-org'"},
+            {if = "rcpt_domain == 'foobar.com'", then = "'foobar-com'"},
+            {else = "'default'"}]
+
+[spam-filter]
+enable = false
+
 "#;
 
 const REMOTE: &str = r#"
@@ -44,6 +68,10 @@ relay = true
 [session.extensions]
 dsn = true
 chunking = false
+
+[spam-filter]
+enable = false
+
 "#;
 
 const SMUGGLER: &str = r#"From: Joe SixPack <john@foobar.net>
@@ -105,7 +133,7 @@ async fn smtp_delivery() {
     }
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -125,51 +153,61 @@ async fn smtp_delivery() {
         )
         .await;
     let message = local.queue_receiver.expect_message().await;
-    let num_domains = message.domains.len();
-    assert_eq!(num_domains, 3);
+    let num_recipients = message.message.recipients.len();
+    assert_eq!(num_recipients, 7);
     local
         .queue_receiver
         .delivery_attempt(message.queue_id)
         .await
         .try_deliver(core.clone());
     let mut dsn = Vec::new();
-    let mut domain_retries = vec![0; num_domains];
+    let mut rcpt_retries = vec![0; num_recipients];
     loop {
         match local.queue_receiver.try_read_event().await {
             Some(QueueEvent::Refresh | QueueEvent::WorkerDone { .. }) => {}
-            Some(QueueEvent::Paused(_)) => unreachable!(),
-            None | Some(QueueEvent::Stop) => break,
-        }
-
-        let events = core.next_event().await;
-        if events.is_empty() {
-            break;
-        }
-        let now = now();
-        for event in events {
-            if event.due > now {
-                tokio::time::sleep(Duration::from_secs(event.due - now)).await;
+            Some(QueueEvent::Paused(_)) | Some(QueueEvent::ReloadSettings) => unreachable!(),
+            None | Some(QueueEvent::Stop) => {
+                break;
             }
+        }
 
-            let message = core.read_message(event.queue_id).await.unwrap();
-            if message.return_path.is_empty() {
-                message.clone().remove(&core, event.due).await;
+        let mut events = core.all_queued_messages().await;
+        if events.messages.is_empty() {
+            let now = now();
+            if events.next_refresh < now + QUEUE_REFRESH {
+                tokio::time::sleep(Duration::from_secs(events.next_refresh - now)).await;
+                events = core.all_queued_messages().await;
+            } else {
+                break;
+            }
+        }
+        for event in events.messages {
+            let message = core
+                .read_message(event.queue_id, QueueName::default())
+                .await
+                .unwrap();
+            if message.message.return_path.is_empty() {
+                message.clone().remove(&core, event.due.into()).await;
                 dsn.push(message);
             } else {
-                for (idx, domain) in message.domains.iter().enumerate() {
-                    domain_retries[idx] = domain.retry.inner;
+                for (idx, rcpt) in message.message.recipients.iter().enumerate() {
+                    rcpt_retries[idx] = rcpt.retry.inner;
                 }
                 event.try_deliver(core.clone());
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
-    assert_eq!(domain_retries[0], 0, "retries {domain_retries:?}");
-    assert!(domain_retries[1] >= 5, "retries {domain_retries:?}");
-    assert!(domain_retries[2] >= 5, "retries {domain_retries:?}");
+    assert_eq!(rcpt_retries[0], 0, "retries {rcpt_retries:?}");
+    assert!(rcpt_retries[1] >= 5, "retries {rcpt_retries:?}");
+    assert_eq!(rcpt_retries[2], 0, "retries {rcpt_retries:?}");
+    assert_eq!(rcpt_retries[3], 0, "retries {rcpt_retries:?}");
+    assert!(rcpt_retries[4] >= 5, "retries {rcpt_retries:?}");
+    assert_eq!(rcpt_retries[5], 0, "retries {rcpt_retries:?}");
+    assert_eq!(rcpt_retries[6], 0, "retries {rcpt_retries:?}");
     assert!(
-        domain_retries[1] >= domain_retries[2],
-        "retries {domain_retries:?}"
+        rcpt_retries[1] >= rcpt_retries[4],
+        "retries {rcpt_retries:?}"
     );
 
     local.queue_receiver.assert_queue_is_empty().await;
@@ -215,34 +253,36 @@ async fn smtp_delivery() {
         .assert_contains("<delay@foobar.net> (host ")
         .assert_contains("Action: failed");
 
-    assert_eq!(
+    let mut recipients = remote
+        .queue_receiver
+        .consume_message(&remote_core)
+        .await
+        .message
+        .recipients
+        .into_iter()
+        .map(|r| r.address)
+        .collect::<Vec<_>>();
+    recipients.extend(
         remote
             .queue_receiver
             .consume_message(&remote_core)
             .await
+            .message
             .recipients
             .into_iter()
-            .map(|r| r.address)
-            .collect::<Vec<_>>(),
-        vec!["ok@foobar.org".to_string()]
+            .map(|r| r.address),
     );
+    recipients.sort();
     assert_eq!(
-        remote
-            .queue_receiver
-            .consume_message(&remote_core)
-            .await
-            .recipients
-            .into_iter()
-            .map(|r| r.address)
-            .collect::<Vec<_>>(),
-        vec!["ok@foobar.net".to_string()]
+        recipients,
+        vec!["ok@foobar.net".to_string(), "ok@foobar.org".to_string()]
     );
 
     remote.queue_receiver.assert_no_events();
 
     // SMTP smuggling
     for separator in ["\n", "\r"].iter() {
-        session.data.remote_ip_str = "10.0.0.2".to_string();
+        session.data.remote_ip_str = "10.0.0.2".into();
         session.eval_session_params().await;
         session.ehlo("mx.test.org").await;
 

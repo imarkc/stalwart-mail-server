@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,9 +7,8 @@
 use crate::utf7::utf7_encode;
 
 use super::{
-    quoted_string,
+    ImapResponse, quoted_string,
     status::{Status, StatusItem},
-    ImapResponse,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,9 +275,10 @@ impl ImapResponse for Response {
 
 #[cfg(test)]
 mod tests {
+
     use crate::protocol::{
-        status::{Status, StatusItem, StatusItemType},
         ImapResponse,
+        status::{Status, StatusItem, StatusItemType},
     };
 
     use super::{Attribute, ChildInfo, ListItem, Tag};
@@ -288,7 +288,7 @@ mod tests {
         for (response, expected_v2, expected_v1) in [
             (
                 super::ListItem {
-                    mailbox_name: "".to_string(),
+                    mailbox_name: "".into(),
                     attributes: vec![],
                     tags: vec![],
                 },
@@ -297,7 +297,7 @@ mod tests {
             ),
             (
                 super::ListItem {
-                    mailbox_name: "中國書店".to_string(),
+                    mailbox_name: "中國書店".into(),
                     attributes: vec![Attribute::NoInferiors, Attribute::Drafts],
                     tags: vec![],
                 },
@@ -309,7 +309,7 @@ mod tests {
             ),
             (
                 super::ListItem {
-                    mailbox_name: "☺".to_string(),
+                    mailbox_name: "☺".into(),
                     attributes: vec![Attribute::Subscribed, Attribute::Remote],
                     tags: vec![Tag::ChildInfo(vec![ChildInfo::Subscribed])],
                 },
@@ -324,7 +324,7 @@ mod tests {
             ),
             (
                 super::ListItem {
-                    mailbox_name: "foo".to_string(),
+                    mailbox_name: "foo".into(),
                     attributes: vec![Attribute::HasNoChildren],
                     tags: vec![Tag::ChildInfo(vec![ChildInfo::Subscribed])],
                 },
@@ -351,23 +351,23 @@ mod tests {
         let mut response = super::Response {
             list_items: vec![
                 ListItem {
-                    mailbox_name: "INBOX".to_string(),
+                    mailbox_name: "INBOX".into(),
                     attributes: vec![Attribute::Subscribed],
                     tags: vec![],
                 },
                 ListItem {
-                    mailbox_name: "foo".to_string(),
+                    mailbox_name: "foo".into(),
                     attributes: vec![],
                     tags: vec![Tag::ChildInfo(vec![ChildInfo::Subscribed])],
                 },
             ],
             status_items: vec![
                 StatusItem {
-                    mailbox_name: "INBOX".to_string(),
+                    mailbox_name: "INBOX".into(),
                     items: vec![(Status::Messages, StatusItemType::Number(17))],
                 },
                 StatusItem {
-                    mailbox_name: "foo".to_string(),
+                    mailbox_name: "foo".into(),
                     items: vec![
                         (Status::Messages, StatusItemType::Number(30)),
                         (Status::Unseen, StatusItemType::Number(29)),

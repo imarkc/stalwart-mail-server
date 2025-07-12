@@ -1,15 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::fmt;
 
-use biscuit::{jws::RegisteredHeader, ClaimsSet, RegisteredClaims, SingleOrMultiple, JWT};
+use biscuit::{ClaimsSet, JWT, RegisteredClaims, SingleOrMultiple, jws::RegisteredHeader};
+
 use serde::{
-    de::{self, Visitor},
     Deserialize, Deserializer, Serialize,
+    de::{self, Visitor},
 };
 use store::write::now;
 
@@ -91,6 +92,10 @@ pub struct StandardClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub email: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Server {

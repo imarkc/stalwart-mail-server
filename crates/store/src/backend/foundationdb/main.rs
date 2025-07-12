@@ -1,13 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::Duration;
 
-use foundationdb::{api, options::DatabaseOption, Database};
-use utils::config::{utils::AsKey, Config};
+use foundationdb::{Database, api, options::DatabaseOption};
+use utils::config::{Config, utils::AsKey};
 
 use super::FdbStore;
 

@@ -1,15 +1,15 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use store::Store;
-use utils::config::{utils::AsKey, Config};
+use utils::config::{Config, utils::AsKey};
 
 use crate::{
-    backend::internal::{manage::ManageDirectory, PrincipalField},
-    Principal, Type, ROLE_ADMIN, ROLE_USER,
+    Principal, PrincipalData, ROLE_ADMIN, ROLE_USER, Type,
+    backend::internal::manage::ManageDirectory,
 };
 
 use super::{EmailType, MemoryDirectory};
@@ -28,11 +28,7 @@ impl MemoryDirectory {
             domains: Default::default(),
         };
 
-        for lookup_id in config
-            .sub_keys((prefix.as_str(), "principals"), ".name")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        {
+        for lookup_id in config.sub_keys((prefix.as_str(), "principals"), ".name") {
             let lookup_id = lookup_id.as_str();
             let name = config
                 .value_require((prefix.as_str(), "principals", lookup_id, "name"))?
@@ -62,15 +58,15 @@ impl MemoryDirectory {
                 .ok()?;
 
             // Create principal
-            let mut principal = Principal {
-                id,
-                typ,
-                ..Default::default()
-            }
-            .with_field(
-                PrincipalField::Roles,
-                if is_superuser { ROLE_ADMIN } else { ROLE_USER },
-            );
+            let mut principal = Principal::new(id, typ);
+            let mut member_of = Vec::with_capacity(2);
+            principal
+                .data
+                .push(PrincipalData::Roles(vec![if is_superuser {
+                    ROLE_ADMIN
+                } else {
+                    ROLE_USER
+                }]));
 
             // Obtain group ids
             for group in config
@@ -78,8 +74,7 @@ impl MemoryDirectory {
                 .map(|(_, s)| s.to_string())
                 .collect::<Vec<_>>()
             {
-                principal.append_int(
-                    PrincipalField::MemberOf,
+                member_of.push(
                     directory
                         .data_store
                         .get_or_create_principal_id(&group, Type::Group)
@@ -96,6 +91,7 @@ impl MemoryDirectory {
                         .ok()?,
                 );
             }
+            principal.data.push(PrincipalData::MemberOf(member_of));
 
             // Parse email addresses
             for (pos, (_, email)) in config
@@ -116,7 +112,7 @@ impl MemoryDirectory {
                     directory.domains.insert(domain.to_lowercase());
                 }
 
-                principal.append_str(PrincipalField::Emails, email.to_lowercase());
+                principal.emails.push(email.to_lowercase());
             }
 
             // Parse mailing lists
@@ -133,19 +129,19 @@ impl MemoryDirectory {
                 }
             }
 
-            principal.set(PrincipalField::Name, name.clone());
+            principal.name = name.as_str().into();
             for (_, secret) in config.values((prefix.as_str(), "principals", lookup_id, "secret")) {
-                principal.append_str(PrincipalField::Secrets, secret.to_string());
+                principal.secrets.push(secret.into());
             }
             if let Some(description) =
                 config.value((prefix.as_str(), "principals", lookup_id, "description"))
             {
-                principal.set(PrincipalField::Description, description.to_string());
+                principal.description = Some(description.into());
             }
             if let Some(quota) =
                 config.property::<u64>((prefix.as_str(), "principals", lookup_id, "quota"))
             {
-                principal.set(PrincipalField::Quota, quota);
+                principal.quota = quota.into();
             }
 
             directory.principals.push(principal);

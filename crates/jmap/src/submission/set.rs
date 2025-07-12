@@ -1,60 +1,50 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::{collections::HashMap, sync::Arc};
-
+use crate::blob::download::BlobDownload;
 use common::{
-    listener::{stream::NullIo, ServerInstance},
     Server,
+    config::smtp::queue::QueueName,
+    listener::{ServerInstance, stream::NullIo},
+    storage::index::ObjectIndexBuilder,
 };
-use email::metadata::MessageMetadata;
+use email::{
+    identity::Identity,
+    message::metadata::MessageMetadata,
+    submission::{Address, Delivered, DeliveryStatus, EmailSubmission, UndoStatus},
+};
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     method::set::{self, SetRequest, SetResponse},
-    object::{
-        email_submission::SetArguments,
-        index::{IndexAs, IndexProperty, ObjectIndexBuilder},
-        Object,
-    },
+    object::email_submission::SetArguments,
     request::{
+        Call, RequestMethod,
         method::{MethodFunction, MethodName, MethodObject},
         reference::MaybeReference,
-        Call, RequestMethod,
     },
     response::references::EvalObjectReferences,
     types::{
         collection::Collection,
-        date::UTCDate,
+        id::Id,
         property::Property,
-        value::{MaybePatchValue, SetValue, Value},
+        state::State,
+        value::{MaybePatchValue, Object, SetValue, Value},
     },
 };
-use mail_parser::{HeaderName, HeaderValue};
+use mail_parser::{ArchivedHeaderName, ArchivedHeaderValue};
 use smtp::{
-    core::{Session, SessionData, State},
+    core::{Session, SessionData},
     queue::spool::SmtpSpool,
 };
-use smtp_proto::{request::parser::Rfc5321Parser, MailFrom, RcptTo};
-use store::write::{assert::HashedValue, log::ChangeLogBuilder, now, BatchBuilder, Bincode};
-use trc::AddContext;
-use utils::{map::vec_map::VecMap, sanitize_email};
-
-use crate::blob::download::BlobDownload;
+use smtp_proto::{MailFrom, RcptTo, request::parser::Rfc5321Parser};
 use std::future::Future;
-
-pub static SCHEMA: &[IndexProperty] = &[
-    IndexProperty::new(Property::UndoStatus).index_as(IndexAs::Text {
-        tokenize: false,
-        index: true,
-    }),
-    IndexProperty::new(Property::EmailId).index_as(IndexAs::LongInteger),
-    IndexProperty::new(Property::IdentityId).index_as(IndexAs::Integer),
-    IndexProperty::new(Property::ThreadId).index_as(IndexAs::Integer),
-    IndexProperty::new(Property::SendAt).index_as(IndexAs::LongInteger),
-];
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use store::write::{BatchBuilder, now};
+use trc::AddContext;
+use utils::{BlobHash, map::vec_map::VecMap, sanitize_email};
 
 pub trait EmailSubmissionSet: Sync + Send {
     fn email_submission_set(
@@ -70,7 +60,7 @@ pub trait EmailSubmissionSet: Sync + Send {
         response: &SetResponse,
         instance: &Arc<ServerInstance>,
         object: Object<SetValue>,
-    ) -> impl Future<Output = trc::Result<Result<Object<Value>, SetError>>> + Send;
+    ) -> impl Future<Output = trc::Result<Result<EmailSubmission, SetError>>> + Send;
 }
 
 impl EmailSubmissionSet for Server {
@@ -85,8 +75,8 @@ impl EmailSubmissionSet for Server {
         let will_destroy = request.unwrap_destroy();
 
         // Process creates
-        let mut changes = ChangeLogBuilder::new();
         let mut success_email_ids = HashMap::new();
+        let mut batch = BatchBuilder::new();
         for (id, object) in request.unwrap_create() {
             match self
                 .send_message(account_id, &response, instance, object)
@@ -96,22 +86,22 @@ impl EmailSubmissionSet for Server {
                     // Add id mapping
                     success_email_ids.insert(
                         id.clone(),
-                        *submission.get(&Property::EmailId).as_id().unwrap(),
+                        Id::from_parts(submission.thread_id, submission.email_id),
                     );
 
                     // Insert record
-                    let mut batch = BatchBuilder::new();
+                    let document_id = self
+                        .store()
+                        .assign_document_ids(account_id, Collection::EmailSubmission, 1)
+                        .await
+                        .caused_by(trc::location!())?;
                     batch
                         .with_account_id(account_id)
                         .with_collection(Collection::EmailSubmission)
-                        .create_document()
-                        .custom(ObjectIndexBuilder::new(SCHEMA).with_changes(submission));
-                    let document_id = self
-                        .store()
-                        .write_expect_id(batch)
-                        .await
-                        .caused_by(trc::location!())?;
-                    changes.log_insert(Collection::EmailSubmission, document_id);
+                        .create_document(document_id)
+                        .custom(ObjectIndexBuilder::<(), _>::new().with_changes(submission))
+                        .caused_by(trc::location!())?
+                        .commit_point();
                     response.created(id, document_id);
                 }
                 Err(err) => {
@@ -131,15 +121,12 @@ impl EmailSubmissionSet for Server {
             // Obtain submission
             let document_id = id.document_id();
             let submission = if let Some(submission) = self
-                .get_property::<HashedValue<Object<Value>>>(
-                    account_id,
-                    Collection::EmailSubmission,
-                    document_id,
-                    Property::Value,
-                )
+                .get_archive(account_id, Collection::EmailSubmission, document_id)
                 .await?
             {
                 submission
+                    .into_deserialized::<EmailSubmission>()
+                    .caused_by(trc::location!())?
             } else {
                 response.not_updated.append(id, SetError::not_found());
                 continue 'update;
@@ -148,7 +135,7 @@ impl EmailSubmissionSet for Server {
             let mut queue_id = u64::MAX;
             let mut undo_status = None;
 
-            for (property, value) in object.properties {
+            for (property, value) in object.0 {
                 let value = match response.eval_object_references(value) {
                     Ok(value) => value,
                     Err(err) => {
@@ -159,11 +146,11 @@ impl EmailSubmissionSet for Server {
                 if let (
                     Property::UndoStatus,
                     MaybePatchValue::Value(Value::Text(undo_status_)),
-                    Value::UnsignedInt(queue_id_),
-                ) = (&property, value, submission.inner.get(&Property::MessageId))
+                    Some(queue_id_),
+                ) = (&property, value, submission.inner.queue_id)
                 {
                     undo_status = undo_status_.into();
-                    queue_id = *queue_id_;
+                    queue_id = queue_id_;
                 } else {
                     response.not_updated.append(
                         id,
@@ -177,30 +164,26 @@ impl EmailSubmissionSet for Server {
 
             match undo_status {
                 Some(undo_status) if undo_status == "canceled" => {
-                    if let Some(queue_message) = self.read_message(queue_id).await {
+                    if let Some(queue_message) =
+                        self.read_message(queue_id, QueueName::default()).await
+                    {
                         // Delete message from queue
-                        let message_due = queue_message.next_event().unwrap_or_default();
-                        queue_message.remove(self, message_due).await;
+                        queue_message.remove(self, None).await;
 
                         // Update record
-                        let mut batch = BatchBuilder::new();
+                        let mut new_submission = submission.inner.clone();
+                        new_submission.undo_status = UndoStatus::Canceled;
                         batch
                             .with_account_id(account_id)
                             .with_collection(Collection::EmailSubmission)
                             .update_document(document_id)
                             .custom(
-                                ObjectIndexBuilder::new(SCHEMA)
+                                ObjectIndexBuilder::new()
                                     .with_current(submission)
-                                    .with_changes(
-                                        Object::with_capacity(1)
-                                            .with_property(Property::UndoStatus, undo_status),
-                                    ),
-                            );
-                        self.store()
-                            .write(batch)
-                            .await
-                            .caused_by(trc::location!())?;
-                        changes.log_update(Collection::EmailSubmission, document_id);
+                                    .with_changes(new_submission),
+                            )
+                            .caused_by(trc::location!())?
+                            .commit_point();
                         response.updated.append(id, None);
                     } else {
                         response.not_updated.append(
@@ -233,26 +216,23 @@ impl EmailSubmissionSet for Server {
         for id in will_destroy {
             let document_id = id.document_id();
             if let Some(submission) = self
-                .get_property::<HashedValue<Object<Value>>>(
-                    account_id,
-                    Collection::EmailSubmission,
-                    document_id,
-                    Property::Value,
-                )
+                .get_archive(account_id, Collection::EmailSubmission, document_id)
                 .await?
             {
                 // Update record
-                let mut batch = BatchBuilder::new();
                 batch
                     .with_account_id(account_id)
                     .with_collection(Collection::EmailSubmission)
                     .delete_document(document_id)
-                    .custom(ObjectIndexBuilder::new(SCHEMA).with_current(submission));
-                self.store()
-                    .write(batch)
-                    .await
-                    .caused_by(trc::location!())?;
-                changes.log_delete(Collection::EmailSubmission, document_id);
+                    .custom(
+                        ObjectIndexBuilder::<_, ()>::new().with_current(
+                            submission
+                                .to_unarchived::<EmailSubmission>()
+                                .caused_by(trc::location!())?,
+                        ),
+                    )
+                    .caused_by(trc::location!())?
+                    .commit_point();
                 response.destroyed.push(id);
             } else {
                 response.not_destroyed.append(id, SetError::not_found());
@@ -260,8 +240,13 @@ impl EmailSubmissionSet for Server {
         }
 
         // Write changes
-        if !changes.is_empty() {
-            response.new_state = Some(self.commit_changes(account_id, changes).await?.into());
+        if !batch.is_empty() {
+            let change_id = self
+                .commit_batch(batch)
+                .await
+                .and_then(|ids| ids.last_change_id(account_id))
+                .caused_by(trc::location!())?;
+            response.new_state = State::Exact(change_id).into();
         }
 
         // On success
@@ -328,14 +313,17 @@ impl EmailSubmissionSet for Server {
         response: &SetResponse,
         instance: &Arc<ServerInstance>,
         object: Object<SetValue>,
-    ) -> trc::Result<Result<Object<Value>, SetError>> {
-        let mut submission = Object::with_capacity(object.properties.len());
-        let mut email_id = u32::MAX;
-        let mut identity_id = u32::MAX;
-        let mut mail_from = None;
+    ) -> trc::Result<Result<EmailSubmission, SetError>> {
+        let mut submission = EmailSubmission {
+            email_id: u32::MAX,
+            identity_id: u32::MAX,
+            thread_id: u32::MAX,
+            ..Default::default()
+        };
+        let mut mail_from: Option<MailFrom<String>> = None;
         let mut rcpt_to: Vec<RcptTo<String>> = Vec::new();
 
-        for (property, value) in object.properties {
+        for (property, value) in object.0 {
             let value = match response.eval_object_references(value) {
                 Ok(value) => value,
                 Err(err) => {
@@ -343,23 +331,21 @@ impl EmailSubmissionSet for Server {
                 }
             };
 
-            let value = match (&property, value) {
+            match (&property, value) {
                 (Property::EmailId, MaybePatchValue::Value(Value::Id(value))) => {
-                    submission.append(Property::ThreadId, Value::Id(value.prefix_id().into()));
-                    email_id = value.document_id();
-                    Value::Id(value)
+                    submission.email_id = value.document_id();
+                    submission.thread_id = value.prefix_id();
                 }
                 (Property::IdentityId, MaybePatchValue::Value(Value::Id(value))) => {
-                    identity_id = value.document_id();
-                    Value::Id(value)
+                    submission.identity_id = value.document_id();
                 }
                 (Property::Envelope, MaybePatchValue::Value(Value::Object(value))) => {
-                    for (property, value) in &value.properties {
-                        match (property, value) {
-                            (Property::MailFrom, _) => match parse_envelope_address(value) {
-                                Ok((addr, params)) => {
+                    for (property, value) in value.0 {
+                        match (&property, value) {
+                            (Property::MailFrom, value) => match parse_envelope_address(value) {
+                                Ok((addr, params, smtp_params)) => {
                                     match Rfc5321Parser::new(
-                                        &mut params
+                                        &mut smtp_params
                                             .as_ref()
                                             .map_or(&b"\n"[..], |p| p.as_bytes())
                                             .iter(),
@@ -367,6 +353,10 @@ impl EmailSubmissionSet for Server {
                                     .mail_from_parameters(addr)
                                     {
                                         Ok(addr) => {
+                                            submission.envelope.mail_from = Address {
+                                                email: addr.address.clone(),
+                                                parameters: params,
+                                            };
                                             mail_from = addr.into();
                                         }
                                         Err(err) => {
@@ -385,9 +375,9 @@ impl EmailSubmissionSet for Server {
                             (Property::RcptTo, Value::List(value)) => {
                                 for addr in value {
                                     match parse_envelope_address(addr) {
-                                        Ok((addr, params)) => {
+                                        Ok((addr, params, smtp_params)) => {
                                             match Rfc5321Parser::new(
-                                                &mut params
+                                                &mut smtp_params
                                                     .as_ref()
                                                     .map_or(&b"\n"[..], |p| p.as_bytes())
                                                     .iter(),
@@ -399,6 +389,10 @@ impl EmailSubmissionSet for Server {
                                                         .iter()
                                                         .any(|rcpt| rcpt.address == addr.address)
                                                     {
+                                                        submission.envelope.rcpt_to.push(Address {
+                                                            email: addr.address.clone(),
+                                                            parameters: params,
+                                                        });
                                                         rcpt_to.push(addr);
                                                     }
                                                 }
@@ -426,7 +420,6 @@ impl EmailSubmissionSet for Server {
                             }
                         }
                     }
-                    Value::Object(value)
                 }
                 (Property::Envelope, MaybePatchValue::Value(Value::Null)) => {
                     continue;
@@ -437,13 +430,11 @@ impl EmailSubmissionSet for Server {
                         .with_property(property)
                         .with_description("Field could not be set.")));
                 }
-            };
-
-            submission.append(property, value);
+            }
         }
 
         // Make sure we have all required fields.
-        if email_id == u32::MAX || identity_id == u32::MAX {
+        if submission.email_id == u32::MAX || submission.identity_id == u32::MAX {
             return Ok(Err(SetError::invalid_properties()
                 .with_properties([Property::EmailId, Property::IdentityId])
                 .with_description(
@@ -452,18 +443,15 @@ impl EmailSubmissionSet for Server {
         }
 
         // Fetch identity's mailFrom
-        let identity_mail_from = if let Some(identity_mail_from) = self
-            .get_property::<Object<Value>>(
-                account_id,
-                Collection::Identity,
-                identity_id,
-                Property::Value,
-            )
+        let identity_mail_from = if let Some(identity) = self
+            .get_archive(account_id, Collection::Identity, submission.identity_id)
             .await?
-            .and_then(|mut obj| obj.properties.remove(&Property::Email))
-            .and_then(|value| value.try_unwrap_string())
         {
-            identity_mail_from
+            identity
+                .unarchive::<Identity>()
+                .caused_by(trc::location!())?
+                .email
+                .to_string()
         } else {
             return Ok(Err(SetError::invalid_properties()
                 .with_property(Property::IdentityId)
@@ -480,18 +468,10 @@ impl EmailSubmissionSet for Server {
             }
             mail_from
         } else {
-            submission
-                .properties
-                .get_mut_or_insert_with(Property::Envelope, || {
-                    Value::Object(Object::with_capacity(2))
-                })
-                .as_obj_mut()
-                .unwrap()
-                .set(
-                    Property::MailFrom,
-                    Object::with_capacity(1)
-                        .with_property(Property::Email, identity_mail_from.clone()),
-                );
+            submission.envelope.mail_from = Address {
+                email: identity_mail_from.clone(),
+                parameters: None,
+            };
             MailFrom {
                 address: identity_mail_from,
                 ..Default::default()
@@ -499,42 +479,44 @@ impl EmailSubmissionSet for Server {
         };
 
         // Obtain message metadata
-        let metadata = if let Some(metadata) = self
-            .get_property::<Bincode<MessageMetadata>>(
+        let metadata_ = if let Some(metadata) = self
+            .get_archive_by_property(
                 account_id,
                 Collection::Email,
-                email_id,
+                submission.email_id,
                 Property::BodyStructure,
             )
             .await?
         {
-            metadata.inner
+            metadata
         } else {
             return Ok(Err(SetError::invalid_properties()
                 .with_property(Property::EmailId)
                 .with_description("Email not found.")));
         };
+        let metadata = metadata_
+            .unarchive::<MessageMetadata>()
+            .caused_by(trc::location!())?;
 
         // Add recipients to envelope if missing
         let mut bcc_header = None;
         if rcpt_to.is_empty() {
-            let mut envelope_values = Vec::new();
-            for header in &metadata.contents.parts[0].headers {
+            for header in metadata.contents[0].parts[0].headers.iter() {
                 if matches!(
                     header.name,
-                    HeaderName::To | HeaderName::Cc | HeaderName::Bcc
+                    ArchivedHeaderName::To | ArchivedHeaderName::Cc | ArchivedHeaderName::Bcc
                 ) {
-                    if matches!(header.name, HeaderName::Bcc) {
+                    if matches!(header.name, ArchivedHeaderName::Bcc) {
                         bcc_header = Some(header);
                     }
-                    if let HeaderValue::Address(addr) = &header.value {
+                    if let ArchivedHeaderValue::Address(addr) = &header.value {
                         for address in addr.iter() {
                             if let Some(address) = address.address().and_then(sanitize_email) {
                                 if !rcpt_to.iter().any(|rcpt| rcpt.address == address) {
-                                    envelope_values.push(Value::Object(
-                                        Object::with_capacity(1)
-                                            .with_property(Property::Email, address.clone()),
-                                    ));
+                                    submission.envelope.rcpt_to.push(Address {
+                                        email: address.to_string(),
+                                        parameters: None,
+                                    });
                                     rcpt_to.push(RcptTo {
                                         address,
                                         ..Default::default()
@@ -546,167 +528,195 @@ impl EmailSubmissionSet for Server {
                 }
             }
 
-            if !rcpt_to.is_empty() {
-                submission
-                    .properties
-                    .get_mut_or_insert_with(Property::Envelope, || {
-                        Value::Object(Object::with_capacity(1))
-                    })
-                    .as_obj_mut()
-                    .unwrap()
-                    .set(Property::RcptTo, Value::List(envelope_values));
-            } else {
+            if rcpt_to.is_empty() {
                 return Ok(Err(SetError::new(SetErrorType::NoRecipients)
                     .with_description("No recipients found in email.")));
             }
         } else {
-            bcc_header = metadata.contents.parts[0]
+            bcc_header = metadata.contents[0].parts[0]
                 .headers
                 .iter()
-                .find(|header| matches!(header.name, HeaderName::Bcc));
+                .find(|header| matches!(header.name, ArchivedHeaderName::Bcc));
         }
 
         // Update sendAt
-        submission.append(
-            Property::SendAt,
-            UTCDate::from_timestamp(if mail_from.hold_until > 0 {
-                mail_from.hold_until
-            } else if mail_from.hold_for > 0 {
-                mail_from.hold_for + now()
-            } else {
-                now()
-            } as i64),
-        );
+        submission.send_at = if mail_from.hold_until > 0 {
+            mail_from.hold_until
+        } else if mail_from.hold_for > 0 {
+            mail_from.hold_for + now()
+        } else {
+            now()
+        };
 
         // Obtain raw message
-        let mut message =
-            if let Some(message) = self.get_blob(&metadata.blob_hash, 0..usize::MAX).await? {
-                if message.len() > self.core.jmap.mail_max_size {
-                    return Ok(Err(SetError::new(SetErrorType::InvalidEmail)
-                        .with_description(format!(
-                            "Message exceeds maximum size of {} bytes.",
-                            self.core.jmap.mail_max_size
-                        ))));
-                }
+        let mut message = if let Some(message) = self
+            .get_blob(&BlobHash::from(&metadata.blob_hash), 0..usize::MAX)
+            .await?
+        {
+            if message.len() > self.core.jmap.mail_max_size {
+                return Ok(Err(SetError::new(SetErrorType::InvalidEmail)
+                    .with_description(format!(
+                        "Message exceeds maximum size of {} bytes.",
+                        self.core.jmap.mail_max_size
+                    ))));
+            }
 
-                message
-            } else {
-                return Ok(Err(SetError::invalid_properties()
-                    .with_property(Property::EmailId)
-                    .with_description("Blob for email not found.")));
-            };
+            message
+        } else {
+            return Ok(Err(SetError::invalid_properties()
+                .with_property(Property::EmailId)
+                .with_description("Blob for email not found.")));
+        };
 
         // Remove BCC header if present
         if let Some(bcc_header) = bcc_header {
             let mut new_message = Vec::with_capacity(message.len());
-            new_message.extend_from_slice(&message[..bcc_header.offset_field]);
-            new_message.extend_from_slice(&message[bcc_header.offset_end..]);
+            new_message.extend_from_slice(&message[..u32::from(bcc_header.offset_field) as usize]);
+            new_message.extend_from_slice(&message[u32::from(bcc_header.offset_end) as usize..]);
             message = new_message;
         }
 
         // Begin local SMTP session
-        let mut session =
-            Session::<NullIo>::local(self.clone(), instance.clone(), SessionData::default());
-
-        // MAIL FROM
-        let _ = session.handle_mail_from(mail_from).await;
-        if let Some(error) = session.has_failed() {
-            return Ok(Err(SetError::new(SetErrorType::ForbiddenMailFrom)
-                .with_description(format!(
-                    "Server rejected MAIL-FROM: {}",
-                    error.trim()
-                ))));
-        }
-
-        // RCPT TO
-        let mut responses = Vec::new();
-        let mut has_success = false;
-        for rcpt in rcpt_to {
-            let addr = rcpt.address.clone();
-            let _ = session.handle_rcpt_to(rcpt).await;
-            let response = session.has_failed();
-            if response.is_none() {
-                has_success = true;
-            }
-            responses.push((addr, response));
-        }
-
-        // DATA
-        if has_success {
-            session.data.message = message;
-            let response = session.queue_message().await;
-            if let State::Accepted(queue_id) = session.state {
-                submission.append(Property::MessageId, queue_id);
-            } else {
-                return Ok(Err(SetError::new(SetErrorType::ForbiddenToSend)
-                    .with_description(format!(
-                        "Server rejected DATA: {}",
-                        std::str::from_utf8(&response).unwrap().trim()
-                    ))));
-            }
-        }
-
-        // Set responses
-        submission.append(
-            Property::UndoStatus,
-            if has_success { "final" } else { "failed" },
+        let mut session = Session::<NullIo>::local(
+            self.clone(),
+            instance.clone(),
+            SessionData::local(
+                self.get_access_token(account_id)
+                    .await
+                    .caused_by(trc::location!())?,
+                None,
+                vec![],
+                vec![],
+                0,
+            ),
         );
-        submission.append(
-            Property::DeliveryStatus,
-            Object {
-                properties: responses
+
+        // Spawn SMTP session to avoid overflowing the stack
+        let handle = tokio::spawn(async move {
+            // MAIL FROM
+            let _ = session.handle_mail_from(mail_from).await;
+            if let Some(error) = session.has_failed() {
+                return Err(SetError::new(SetErrorType::ForbiddenMailFrom)
+                    .with_description(format!("Server rejected MAIL-FROM: {}", error.trim())));
+            }
+
+            // RCPT TO
+            let mut responses = Vec::new();
+            let mut has_success = false;
+            session.params.rcpt_errors_wait = Duration::from_secs(0);
+            for rcpt in rcpt_to {
+                let addr = rcpt.address.clone();
+                let _ = session.handle_rcpt_to(rcpt).await;
+                let response = session.has_failed();
+                if response.is_none() {
+                    has_success = true;
+                }
+                responses.push((addr, response));
+            }
+
+            // DATA
+            if has_success {
+                session.data.message = message;
+                let response = session.queue_message().await;
+                if let smtp::core::State::Accepted(queue_id) = session.state {
+                    Ok((true, responses, Some(queue_id)))
+                } else {
+                    Err(
+                        SetError::new(SetErrorType::ForbiddenToSend).with_description(format!(
+                            "Server rejected DATA: {}",
+                            std::str::from_utf8(&response).unwrap().trim()
+                        )),
+                    )
+                }
+            } else {
+                Ok((false, responses, None))
+            }
+        });
+
+        match handle.await {
+            Ok(Ok((has_success, responses, queue_id))) => {
+                // Set queue ID
+                if let Some(queue_id) = queue_id {
+                    submission.queue_id = Some(queue_id);
+                }
+
+                // Set responses
+                submission.undo_status = if has_success {
+                    UndoStatus::Final
+                } else {
+                    UndoStatus::Pending
+                };
+                submission.delivery_status = responses
                     .into_iter()
                     .map(|(addr, response)| {
                         (
-                            Property::_T(addr),
-                            Value::Object(
-                                Object::with_capacity(3)
-                                    .with_property(
-                                        Property::Delivered,
-                                        if response.is_none() { "unknown" } else { "no" },
-                                    )
-                                    .with_property(
-                                        Property::SmtpReply,
-                                        response.unwrap_or_else(|| "250 2.1.5 Queued".to_string()),
-                                    )
-                                    .with_property(Property::Displayed, "unknown"),
-                            ),
+                            addr.to_string(),
+                            DeliveryStatus {
+                                delivered: if response.is_none() {
+                                    Delivered::Unknown
+                                } else {
+                                    Delivered::No
+                                },
+                                smtp_reply: response
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "250 2.1.5 Queued".to_string()),
+                                displayed: false,
+                            },
                         )
                     })
-                    .collect::<VecMap<Property, Value>>(),
-            },
-        );
+                    .collect();
 
-        Ok(Ok(submission))
+                Ok(Ok(submission))
+            }
+            Ok(Err(err)) => Ok(Err(err)),
+            Err(err) => Err(trc::EventType::Server(trc::ServerEvent::ThreadError)
+                .reason(err)
+                .caused_by(trc::location!())
+                .details("Join Error")),
+        }
     }
 }
 
-fn parse_envelope_address(envelope: &Value) -> Result<(String, Option<String>), SetError> {
-    if let Value::Object(envelope) = envelope {
-        if let Some(Value::Text(addr)) = envelope.properties.get(&Property::Email) {
-            if let Some(addr) = sanitize_email(addr) {
-                if let Some(Value::Object(params)) = envelope.properties.get(&Property::Parameters)
-                {
+#[allow(clippy::type_complexity)]
+fn parse_envelope_address(
+    envelope: Value,
+) -> Result<
+    (
+        String,
+        Option<VecMap<String, Option<String>>>,
+        Option<String>,
+    ),
+    SetError,
+> {
+    if let Value::Object(mut envelope) = envelope {
+        if let Some(Value::Text(addr)) = envelope.0.remove(&Property::Email) {
+            if let Some(addr) = sanitize_email(&addr) {
+                if let Some(Value::Object(params)) = envelope.0.remove(&Property::Parameters) {
                     let mut params_text = String::new();
-                    for (k, v) in params.properties.iter() {
-                        if let Property::_T(k) = &k {
+                    let mut params_list = VecMap::with_capacity(params.0.len());
+
+                    for (k, v) in params.0 {
+                        if let Property::_T(k) = k {
                             if !k.is_empty() {
                                 if !params_text.is_empty() {
                                     params_text.push(' ');
                                 }
-                                params_text.push_str(k);
+                                params_text.push_str(&k);
                                 if let Value::Text(v) = v {
                                     params_text.push('=');
-                                    params_text.push_str(v);
+                                    params_text.push_str(&v);
+                                    params_list.append(k, Some(v));
+                                } else {
+                                    params_list.append(k, None);
                                 }
                             }
                         }
                     }
                     params_text.push('\n');
 
-                    Ok((addr, Some(params_text)))
+                    Ok((addr.to_string(), Some(params_list), Some(params_text)))
                 } else {
-                    Ok((addr, None))
+                    Ok((addr.to_string(), None, None))
                 }
             } else {
                 Err(SetError::invalid_properties()

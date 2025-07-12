@@ -1,40 +1,41 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::{Duration, Instant};
 
-use base64::{engine::general_purpose, Engine};
-use biscuit::{jwk::JWKSet, SingleOrMultiple, JWT};
+use base64::{Engine, engine::general_purpose};
+use biscuit::{JWT, SingleOrMultiple, jwk::JWKSet};
 use bytes::Bytes;
 use common::auth::oauth::{
     introspect::OAuthIntrospect,
     oidc::StandardClaims,
     registration::{ClientRegistrationRequest, ClientRegistrationResponse},
 };
-use imap_proto::ResponseType;
-use jmap::auth::oauth::{
-    auth::OAuthMetadata, openid::OpenIdMetadata, DeviceAuthResponse, ErrorType, OAuthCodeRequest,
-    TokenResponse,
+
+use http::auth::oauth::{
+    DeviceAuthResponse, ErrorType, OAuthCodeRequest, TokenResponse, auth::OAuthMetadata,
+    openid::OpenIdMetadata,
 };
+use imap_proto::ResponseType;
 use jmap_client::{
     client::{Client, Credentials},
     mailbox::query::Filter,
 };
 use jmap_proto::types::id::Id;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use store::ahash::AHashMap;
 
 use crate::{
     directory::internal::TestInternalDirectory,
     imap::{
-        pop::{self, Pop3Connection},
         ImapConnection, Type,
+        pop::{self, Pop3Connection},
     },
     jmap::{
-        assert_is_empty, delivery::SmtpConnection, mailbox::destroy_all_mailboxes, ManagementApi,
+        ManagementApi, assert_is_empty, delivery::SmtpConnection, mailbox::destroy_all_mailboxes,
     },
 };
 
@@ -144,16 +145,19 @@ pub async fn test(params: &mut JMAPTest) {
     let john_client = Client::new()
         .credentials(Credentials::bearer(&token))
         .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
         .connect("https://127.0.0.1:8899")
         .await
         .unwrap();
     assert_eq!(john_client.default_account_id(), john_id);
-    assert!(!john_client
-        .mailbox_query(None::<Filter>, None::<Vec<_>>)
-        .await
-        .unwrap()
-        .ids()
-        .is_empty());
+    assert!(
+        !john_client
+            .mailbox_query(None::<Filter>, None::<Vec<_>>)
+            .await
+            .unwrap()
+            .ids()
+            .is_empty()
+    );
 
     // Verify ID token using the JWK set
     let id_token = JWT::<StandardClaims, biscuit::Empty>::new_encoded(&id_token)
@@ -168,12 +172,12 @@ pub async fn test(params: &mut JMAPTest) {
         registered_claims.audience,
         Some(SingleOrMultiple::Single(client_id.to_string()))
     );
-    assert_eq!(private_claims.nonce, Some("abc1234".to_string()));
+    assert_eq!(private_claims.nonce, Some("abc1234".into()));
     assert_eq!(
         private_claims.preferred_username,
-        Some("jdoe@example.com".to_string())
+        Some("jdoe@example.com".into())
     );
-    assert_eq!(private_claims.email, Some("jdoe@example.com".to_string()));
+    assert_eq!(private_claims.email, Some("jdoe@example.com".into()));
 
     // Introspect token
     let access_introspect: OAuthIntrospect = post_with_auth::<OAuthIntrospect>(
@@ -320,16 +324,19 @@ pub async fn test(params: &mut JMAPTest) {
     let john_client = Client::new()
         .credentials(Credentials::bearer(&token))
         .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
         .connect("https://127.0.0.1:8899")
         .await
         .unwrap();
     assert_eq!(john_client.default_account_id(), john_id);
-    assert!(!john_client
-        .mailbox_query(None::<Filter>, None::<Vec<_>>)
-        .await
-        .unwrap()
-        .ids()
-        .is_empty());
+    assert!(
+        !john_client
+            .mailbox_query(None::<Filter>, None::<Vec<_>>)
+            .await
+            .unwrap()
+            .ids()
+            .is_empty()
+    );
 
     // Connecting using the refresh token should not work
     assert_unauthorized("https://127.0.0.1:8899", &refresh_token).await;
@@ -490,6 +497,7 @@ async fn assert_unauthorized(base_url: &str, token: &str) {
     match Client::new()
         .credentials(Credentials::bearer(token))
         .accept_invalid_certs(true)
+        .follow_redirects(["127.0.0.1"])
         .connect(base_url)
         .await
     {

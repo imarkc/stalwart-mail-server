@@ -1,16 +1,17 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use common::{
     auth::{
-        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
         AuthRequest,
+        sasl::{sasl_decode_challenge_oauth, sasl_decode_challenge_plain},
     },
-    listener::{limiter::LimiterResult, SessionStream},
+    listener::{SessionStream, limiter::LimiterResult},
 };
+
 use directory::Permission;
 use imap_proto::{
     protocol::authenticate::Mechanism,
@@ -36,7 +37,7 @@ impl<T: SessionStream> Session<T> {
             .collect();
 
         let credentials = match mechanism {
-            Mechanism::Plain | Mechanism::OAuthBearer => {
+            Mechanism::Plain | Mechanism::OAuthBearer | Mechanism::XOauth2 => {
                 if !params.is_empty() {
                     base64_decode(params.pop().unwrap().as_bytes())
                         .and_then(|challenge| {
@@ -53,7 +54,7 @@ impl<T: SessionStream> Session<T> {
                         })?
                 } else {
                     self.receiver.request = receiver::Request {
-                        tag: String::new(),
+                        tag: "".into(),
                         command: Command::Authenticate,
                         tokens: vec![receiver::Token::Argument(mechanism.into_bytes())],
                     };
@@ -64,7 +65,7 @@ impl<T: SessionStream> Session<T> {
             _ => {
                 return Err(trc::AuthEvent::Error
                     .into_err()
-                    .details("Authentication mechanism not supported."))
+                    .details("Authentication mechanism not supported."));
             }
         };
 

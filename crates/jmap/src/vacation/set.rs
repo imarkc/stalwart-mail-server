@@ -1,41 +1,36 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use std::borrow::Cow;
-
-use common::{auth::AccessToken, Server};
+use super::get::VacationResponseGet;
+use crate::{JmapMethods, changes::state::StateManager};
+use common::{Server, auth::AccessToken, storage::index::ObjectIndexBuilder};
+use email::sieve::{
+    SieveScript, VacationResponse, activate::SieveScriptActivate, delete::SieveScriptDelete,
+};
 use jmap_proto::{
     error::set::{SetError, SetErrorType},
     method::set::{RequestArguments, SetRequest, SetResponse},
-    object::{index::ObjectIndexBuilder, Object},
     response::references::EvalObjectReferences,
     types::{
-        blob::BlobId,
-        collection::Collection,
+        collection::{Collection, SyncCollection},
+        date::UTCDate,
         id::Id,
         property::Property,
-        value::{MaybePatchValue, Value},
+        value::{MaybePatchValue, Object, Value},
     },
 };
 use mail_builder::MessageBuilder;
 use mail_parser::decoders::html::html_to_text;
+use std::borrow::Cow;
 use std::future::Future;
-use store::write::{
-    assert::HashedValue,
-    log::{Changes, LogInsert},
-    BatchBuilder, BlobOp, DirectoryClass, F_CLEAR, F_VALUE,
+use store::{
+    Serialize,
+    write::{Archiver, BatchBuilder},
 };
 use trc::AddContext;
-
-use crate::{
-    sieve::set::{ObjectBlobId, SieveScriptSet, SCHEMA},
-    JmapMethods,
-};
-
-use super::get::VacationResponseGet;
 
 pub trait VacationResponseSet: Sync + Send {
     fn vacation_response_set(
@@ -44,7 +39,7 @@ pub trait VacationResponseSet: Sync + Send {
         access_token: &AccessToken,
     ) -> impl Future<Output = trc::Result<SetResponse>> + Send;
 
-    fn build_script(&self, obj: &mut ObjectIndexBuilder) -> trc::Result<Vec<u8>>;
+    fn build_script(&self, obj: &mut SieveScript) -> trc::Result<Vec<u8>>;
 }
 
 impl VacationResponseSet for Server {
@@ -55,7 +50,15 @@ impl VacationResponseSet for Server {
     ) -> trc::Result<SetResponse> {
         let account_id = request.account_id.document_id();
         let mut response = self
-            .prepare_set_response(&request, Collection::SieveScript)
+            .prepare_set_response(
+                &request,
+                self.assert_state(
+                    account_id,
+                    SyncCollection::SieveScript,
+                    &request.if_in_state,
+                )
+                .await?,
+            )
             .await?;
         let will_destroy = request.unwrap_destroy();
         let resource_token = self.get_resource_token(access_token, account_id).await?;
@@ -118,20 +121,53 @@ impl VacationResponseSet for Server {
 
         // Prepare write batch
         let mut batch = BatchBuilder::new();
-        let change_id = self.assign_change_id(account_id)?;
         batch
-            .with_change_id(change_id)
             .with_account_id(account_id)
             .with_collection(Collection::SieveScript);
 
         // Process changes
-        if let Some(changes_) = changes {
+        if let Some(changes) = changes {
+            // Obtain current script
+            let document_id = self.get_vacation_sieve_script_id(account_id).await?;
+            let mut was_active = false;
+
+            let (mut sieve, prev_sieve) = if let Some(document_id) = document_id {
+                let prev_sieve = self
+                    .get_archive(account_id, Collection::SieveScript, document_id)
+                    .await?
+                    .ok_or_else(|| {
+                        trc::StoreEvent::NotFound
+                            .into_err()
+                            .caused_by(trc::location!())
+                    })?
+                    .into_deserialized::<SieveScript>()
+                    .caused_by(trc::location!())?;
+                was_active = prev_sieve.inner.is_active;
+                let mut sieve = prev_sieve.inner.clone();
+                if sieve.vacation_response.is_none() {
+                    sieve.vacation_response = VacationResponse::default().into();
+                }
+
+                (sieve, Some(prev_sieve))
+            } else {
+                (
+                    SieveScript {
+                        name: "vacation".into(),
+                        is_active: false,
+                        blob_hash: Default::default(),
+                        size: 0,
+                        vacation_response: VacationResponse::default().into(),
+                    },
+                    None,
+                )
+            };
+
             // Parse properties
-            let mut changes = Object::with_capacity(changes_.properties.len());
             let mut is_active = false;
             let mut build_script = create_id.is_some();
+            let vacation = sieve.vacation_response.as_mut().unwrap();
 
-            for (property, value) in changes_.properties {
+            for (property, value) in changes.0 {
                 let value = match response.eval_object_references(value) {
                     Ok(value) => value,
                     Err(err) => {
@@ -143,29 +179,33 @@ impl VacationResponseSet for Server {
                         if value.len() < 512 =>
                     {
                         build_script = true;
-                        changes.append(property, Value::Text(value));
+                        vacation.subject = Some(value);
                     }
-                    (
-                        Property::HtmlBody | Property::TextBody,
-                        MaybePatchValue::Value(Value::Text(value)),
-                    ) if value.len() < 2048 => {
+                    (Property::HtmlBody, MaybePatchValue::Value(Value::Text(value)))
+                        if value.len() < 2048 =>
+                    {
                         build_script = true;
-
-                        changes.append(property, Value::Text(value));
+                        vacation.html_body = Some(value);
                     }
-                    (
-                        Property::ToDate | Property::FromDate,
-                        MaybePatchValue::Value(value @ Value::Date(_)),
-                    ) => {
+                    (Property::TextBody, MaybePatchValue::Value(Value::Text(value)))
+                        if value.len() < 2048 =>
+                    {
                         build_script = true;
-                        changes.append(property, value);
+                        vacation.text_body = Some(value);
+                    }
+                    (Property::FromDate, MaybePatchValue::Value(Value::Date(date))) => {
+                        vacation.from_date = Some(date.timestamp() as u64);
+                        build_script = true;
+                    }
+                    (Property::ToDate, MaybePatchValue::Value(Value::Date(date))) => {
+                        vacation.to_date = Some(date.timestamp() as u64);
+                        build_script = true;
                     }
                     (Property::IsEnabled, MaybePatchValue::Value(Value::Bool(value))) => {
                         is_active = value;
-                        changes.append(Property::IsActive, value);
                     }
                     (Property::IsEnabled, MaybePatchValue::Value(Value::Null)) => {
-                        changes.append(Property::IsActive, Value::Bool(false));
+                        is_active = false;
                     }
                     (
                         Property::Subject
@@ -177,8 +217,24 @@ impl VacationResponseSet for Server {
                     ) => {
                         if create_id.is_none() {
                             build_script = true;
-
-                            changes.append(property, Value::Null);
+                            match property {
+                                Property::Subject => {
+                                    vacation.subject = None;
+                                }
+                                Property::HtmlBody => {
+                                    vacation.html_body = None;
+                                }
+                                Property::TextBody => {
+                                    vacation.text_body = None;
+                                }
+                                Property::FromDate => {
+                                    vacation.from_date = None;
+                                }
+                                Property::ToDate => {
+                                    vacation.to_date = None;
+                                }
+                                _ => unreachable!(),
+                            }
                         }
                     }
                     _ => {
@@ -192,138 +248,60 @@ impl VacationResponseSet for Server {
                     }
                 }
             }
+            sieve.is_active = is_active;
 
-            // Add name and isActive
-            if create_id.is_some() {
-                changes.append(Property::Name, Value::Text("vacation".into()));
-                if !changes.properties.contains_key(&Property::IsActive) {
-                    changes.append(Property::IsActive, Value::Bool(false));
-                }
-            }
-
-            // Obtain current script
-            let document_id = self.get_vacation_sieve_script_id(account_id).await?;
-            let mut was_active = false;
-
-            let mut obj = ObjectIndexBuilder::new(SCHEMA)
-                .with_current_opt(if let Some(document_id) = document_id {
-                    self.get_property::<HashedValue<Object<Value>>>(
-                        account_id,
-                        Collection::SieveScript,
-                        document_id,
-                        Property::Value,
-                    )
-                    .await?
-                    .inspect(|value| {
-                        was_active = value.inner.properties.get(&Property::IsActive)
-                            == Some(&Value::Bool(true));
-                    })
-                    .ok_or_else(|| {
-                        trc::StoreEvent::NotFound
-                            .into_err()
-                            .caused_by(trc::location!())
-                    })?
-                    .into()
-                } else {
-                    None
-                })
-                .with_changes(changes);
+            let mut obj = ObjectIndexBuilder::new()
+                .with_current_opt(prev_sieve)
+                .with_changes(sieve)
+                .with_tenant_id(&resource_token);
 
             // Update id
-            if let Some(document_id) = document_id {
-                batch
-                    .update_document(document_id)
-                    .value(Property::EmailIds, (), F_VALUE | F_CLEAR)
-                    .log(Changes::update([document_id]));
+            let document_id = if let Some(document_id) = document_id {
+                batch.update_document(document_id);
+                document_id
             } else {
-                batch.create_document().log(LogInsert());
-            }
+                let document_id = self
+                    .store()
+                    .assign_document_ids(account_id, Collection::SieveScript, 1)
+                    .await
+                    .caused_by(trc::location!())?;
+                batch.create_document(document_id);
+                document_id
+            };
 
             // Create sieve script only if there are changes
             if build_script {
                 // Upload new blob
-                let hash = self
-                    .put_blob(account_id, &self.build_script(&mut obj)?, false)
+                obj.changes_mut().unwrap().blob_hash = self
+                    .put_blob(
+                        account_id,
+                        &self.build_script(obj.changes_mut().unwrap())?,
+                        false,
+                    )
                     .await?
                     .hash;
-                let blob_id = obj.changes_mut().unwrap().blob_id_mut().unwrap();
-                blob_id.hash = hash;
-
-                // Link blob
-                batch.set(
-                    BlobOp::Link {
-                        hash: blob_id.hash.clone(),
-                    },
-                    Vec::new(),
-                );
-
-                let script_size = blob_id.section.as_ref().unwrap().size as i64;
-
-                if let Some(current) = obj.current() {
-                    let current_blob_id = current.inner.blob_id().ok_or_else(|| {
-                        trc::StoreEvent::NotFound
-                            .into_err()
-                            .caused_by(trc::location!())
-                            .document_id(document_id.unwrap_or(u32::MAX))
-                    })?;
-
-                    // Unlink previous blob
-                    batch.clear(BlobOp::Link {
-                        hash: current_blob_id.hash.clone(),
-                    });
-
-                    // Update quota
-                    let current_script_size = current_blob_id.section.as_ref().unwrap().size as i64;
-                    let quota = match script_size.cmp(&current_script_size) {
-                        std::cmp::Ordering::Greater => script_size - current_script_size,
-                        std::cmp::Ordering::Less => -current_script_size + script_size,
-                        std::cmp::Ordering::Equal => 0,
-                    };
-                    if quota != 0 {
-                        batch.add(DirectoryClass::UsedQuota(account_id), quota);
-
-                        // Update tenant quota
-                        #[cfg(feature = "enterprise")]
-                        if self.core.is_enterprise_edition() {
-                            if let Some(tenant) = resource_token.tenant {
-                                batch.add(DirectoryClass::UsedQuota(tenant.id), quota);
-                            }
-                        }
-                    }
-                } else {
-                    batch.add(DirectoryClass::UsedQuota(account_id), script_size);
-
-                    // Update tenant quota
-                    #[cfg(feature = "enterprise")]
-                    if self.core.is_enterprise_edition() {
-                        if let Some(tenant) = resource_token.tenant {
-                            batch.add(DirectoryClass::UsedQuota(tenant.id), script_size);
-                        }
-                    }
-                }
             };
 
             // Write changes
-            batch.custom(obj);
-            let document_id = if !batch.is_empty() {
-                let ids = self
-                    .store()
-                    .write(batch)
-                    .await
-                    .caused_by(trc::location!())?;
-                response.new_state = Some(change_id.into());
-                match document_id {
-                    Some(document_id) => document_id,
-                    None => ids.last_document_id()?,
-                }
-            } else {
-                document_id.unwrap_or(u32::MAX)
-            };
+            batch.custom(obj).caused_by(trc::location!())?;
+            if !batch.is_empty() {
+                response.new_state = Some(
+                    self.commit_batch(batch)
+                        .await
+                        .and_then(|ids| ids.last_change_id(account_id))
+                        .caused_by(trc::location!())?
+                        .into(),
+                );
+            }
 
             // Deactivate other sieve scripts
             if !was_active && is_active {
-                self.sieve_activate_script(account_id, document_id.into())
+                let (change_id, _) = self
+                    .sieve_activate_script(account_id, document_id.into())
                     .await?;
+                if change_id > 0 {
+                    response.new_state = Some(change_id.into());
+                }
             }
 
             // Add result
@@ -340,9 +318,8 @@ impl VacationResponseSet for Server {
                 if id.is_singleton() {
                     if let Some(document_id) = self.get_vacation_sieve_script_id(account_id).await?
                     {
-                        self.sieve_script_delete(&resource_token, document_id, false)
+                        self.sieve_script_delete(&resource_token, document_id, false, &mut batch)
                             .await?;
-                        batch.log(Changes::delete([document_id]));
                         response.destroyed.push(id);
                         continue;
                     }
@@ -353,41 +330,47 @@ impl VacationResponseSet for Server {
 
             // Write changes
             if !batch.is_empty() {
-                self.store()
-                    .write(batch)
-                    .await
-                    .caused_by(trc::location!())?;
-                response.new_state = Some(change_id.into());
+                response.new_state = Some(
+                    self.commit_batch(batch)
+                        .await
+                        .and_then(|ids| ids.last_change_id(account_id))
+                        .caused_by(trc::location!())?
+                        .into(),
+                );
             }
         }
 
         Ok(response)
     }
 
-    fn build_script(&self, obj: &mut ObjectIndexBuilder) -> trc::Result<Vec<u8>> {
+    fn build_script(&self, obj: &mut SieveScript) -> trc::Result<Vec<u8>> {
         // Build Sieve script
         let mut script = Vec::with_capacity(1024);
         script.extend_from_slice(b"require [\"vacation\", \"relational\", \"date\"];\r\n\r\n");
         let mut num_blocks = 0;
 
         // Add start date
-        if let Value::Date(value) = obj.get(&Property::FromDate) {
+        if let Some(value) = obj.vacation_response.as_ref().and_then(|v| v.from_date) {
             script.extend_from_slice(b"if currentdate :value \"ge\" \"iso8601\" \"");
-            script.extend_from_slice(value.to_string().as_bytes());
+            script.extend_from_slice(UTCDate::from(value).to_string().as_bytes());
             script.extend_from_slice(b"\" {\r\n");
             num_blocks += 1;
         }
 
         // Add end date
-        if let Value::Date(value) = obj.get(&Property::ToDate) {
+        if let Some(value) = obj.vacation_response.as_ref().and_then(|v| v.to_date) {
             script.extend_from_slice(b"if currentdate :value \"le\" \"iso8601\" \"");
-            script.extend_from_slice(value.to_string().as_bytes());
+            script.extend_from_slice(UTCDate::from(value).to_string().as_bytes());
             script.extend_from_slice(b"\" {\r\n");
             num_blocks += 1;
         }
 
         script.extend_from_slice(b"vacation :mime ");
-        if let Value::Text(value) = obj.get(&Property::Subject) {
+        if let Some(value) = obj
+            .vacation_response
+            .as_ref()
+            .and_then(|v| v.subject.as_ref())
+        {
             script.extend_from_slice(b":subject \"");
             for &ch in value.as_bytes().iter() {
                 match ch {
@@ -404,12 +387,20 @@ impl VacationResponseSet for Server {
             script.extend_from_slice(b"\" ");
         }
 
-        let mut text_body = if let Value::Text(value) = obj.get(&Property::TextBody) {
+        let mut text_body = if let Some(value) = obj
+            .vacation_response
+            .as_ref()
+            .and_then(|v| v.text_body.as_ref())
+        {
             Cow::from(value.as_str()).into()
         } else {
             None
         };
-        let html_body = if let Value::Text(value) = obj.get(&Property::HtmlBody) {
+        let html_body = if let Some(value) = obj
+            .vacation_response
+            .as_ref()
+            .and_then(|v| v.html_body.as_ref())
+        {
             Cow::from(value.as_str()).into()
         } else {
             None
@@ -454,13 +445,15 @@ impl VacationResponseSet for Server {
         match self.core.sieve.untrusted_compiler.compile(&script) {
             Ok(compiled_script) => {
                 // Update blob length
-                obj.set(
-                    Property::BlobId,
-                    BlobId::default().with_section_size(script.len()).into(),
-                );
+                obj.size = script.len() as u32;
 
                 // Serialize script
-                script.extend(bincode::serialize(&compiled_script).unwrap_or_default());
+                script.extend(
+                    Archiver::new(compiled_script)
+                        .untrusted()
+                        .serialize()
+                        .caused_by(trc::location!())?,
+                );
 
                 Ok(script)
             }

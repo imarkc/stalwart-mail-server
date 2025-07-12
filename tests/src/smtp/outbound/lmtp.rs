@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -7,12 +7,16 @@
 use std::time::{Duration, Instant};
 
 use crate::smtp::{
-    inbound::TestMessage,
-    session::{TestSession, VerifyResponse},
     DnsCache, TestSMTP,
+    inbound::TestMessage,
+    queue::QueuedEvents,
+    session::{TestSession, VerifyResponse},
 };
-use common::{config::server::ServerProtocol, ipc::QueueEvent};
-use smtp::queue::spool::SmtpSpool;
+use common::{
+    config::{server::ServerProtocol, smtp::queue::QueueName},
+    ipc::QueueEvent,
+};
+use smtp::queue::spool::{QUEUE_REFRESH, SmtpSpool};
 use store::write::now;
 
 const REMOTE: &str = "
@@ -27,9 +31,11 @@ dsn = true
 ";
 
 const LOCAL: &str = r#"
-[queue.outbound]
-next-hop = [{if = "rcpt_domain = 'foobar.org'", then = "'lmtp'"},
-            {else = false}]
+[queue.strategy]
+gateway = [{if = "rcpt_domain = 'foobar.org'", then = "'lmtp'"},
+            {else = "'mx'"}]
+schedule = [{if = "rcpt_domain = 'foobar.org'", then = "'foobar'"},
+            {else = "'default'"}]
 
 [session.rcpt]
 relay = true
@@ -38,23 +44,30 @@ max-recipients = 100
 [session.extensions]
 dsn = true
 
-[queue.schedule]
+[queue.schedule.default]
 retry = "1s"
-notify = [{if = "rcpt_domain = 'foobar.org'", then = "[1s, 2s]"},
-          {else = [1s]}]
-expire = [{if = "rcpt_domain = 'foobar.org'", then = "4s"},
-          {else = "5s"}]
+notify = "1s"
+expire = "5s"
+queue-name = "default"
 
-[queue.outbound.timeouts]
+[queue.schedule.foobar]
+retry = "1s"
+notify = ["1s", "2s"]
+expire = "4s"
+queue-name = "default"
+
+[queue.connection.default.timeout]
+connect = "1s"
 data = "50ms"
 
-[remote.lmtp]
+[queue.gateway.lmtp]
+type = "relay"
 address = lmtp.foobar.org
 port = 9924
 protocol = 'lmtp'
 concurrency = 5
 
-[remote.lmtp.tls]
+[queue.gateway.lmtp.tls]
 implicit = true
 allow-invalid-certs = true
 "#;
@@ -81,7 +94,7 @@ async fn lmtp_delivery() {
     );
 
     let mut session = local.new_session();
-    session.data.remote_ip_str = "10.0.0.1".to_string();
+    session.data.remote_ip_str = "10.0.0.1".into();
     session.eval_session_params().await;
     session.ehlo("mx.test.org").await;
     session
@@ -108,23 +121,27 @@ async fn lmtp_delivery() {
     loop {
         match local.queue_receiver.try_read_event().await {
             Some(QueueEvent::Refresh | QueueEvent::WorkerDone { .. }) => {}
-            Some(QueueEvent::Paused(_)) => unreachable!(),
+            Some(QueueEvent::Paused(_)) | Some(QueueEvent::ReloadSettings) => unreachable!(),
             None | Some(QueueEvent::Stop) => break,
         }
 
-        let events = core.next_event().await;
-        if events.is_empty() {
-            break;
-        }
-        let now = now();
-        for event in events {
-            if event.due > now {
-                tokio::time::sleep(Duration::from_secs(event.due - now)).await;
+        let mut events = core.all_queued_messages().await;
+        if events.messages.is_empty() {
+            let now = now();
+            if events.next_refresh < now + QUEUE_REFRESH {
+                tokio::time::sleep(Duration::from_secs(events.next_refresh - now)).await;
+                events = core.all_queued_messages().await;
+            } else {
+                break;
             }
-
-            let message = core.read_message(event.queue_id).await.unwrap();
-            if message.return_path.is_empty() {
-                message.clone().remove(&core, event.due).await;
+        }
+        for event in events.messages {
+            let message = core
+                .read_message(event.queue_id, QueueName::default())
+                .await
+                .unwrap();
+            if message.message.return_path.is_empty() {
+                message.clone().remove(&core, event.due.into()).await;
                 dsn.push(message);
             } else {
                 event.try_deliver(core.clone());
@@ -173,6 +190,7 @@ async fn lmtp_delivery() {
             .queue_receiver
             .expect_message()
             .await
+            .message
             .recipients
             .into_iter()
             .map(|r| r.address)

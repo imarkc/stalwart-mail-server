@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,13 +11,14 @@ use std::{
 };
 
 use ahash::AHashSet;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
+
 use hyper::{
-    header::{HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
     HeaderMap,
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue},
 };
 use smtp_proto::*;
-use utils::config::{utils::ParseValue, Config};
+use utils::config::{Config, utils::ParseValue};
 
 use crate::{
     config::CONNECTION_VARS,
@@ -202,15 +203,11 @@ impl SessionConfig {
         session.rcpt.subaddressing = AddressMapping::parse(config, "session.rcpt.sub-addressing");
         session.milters = config
             .sub_keys("session.milter", ".hostname")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|id| parse_milter(config, &id, &has_rcpt_vars))
             .collect();
         session.hooks = config
             .sub_keys("session.hook", ".url")
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
             .into_iter()
             .filter_map(|id| parse_hooks(config, &id, &has_rcpt_vars))
             .collect();
@@ -461,7 +458,7 @@ fn parse_milter(config: &mut Config, id: &str, token_map: &TokenMap) -> Option<M
             .unwrap_or_else(|| {
                 IfBlock::new::<()>(format!("session.milter.{id}.enable"), [], "false")
             }),
-        id: id.to_string().into(),
+        id: Arc::new(id.into()),
         addrs: format!("{}:{}", hostname, port)
             .to_socket_addrs()
             .map_err(|err| {
@@ -666,8 +663,11 @@ impl Default for SessionConfig {
                 mechanisms: IfBlock::new::<Mechanism>(
                     "session.auth.mechanisms",
                     [
-                        ("local_port != 25 && is_tls", "[plain, login, oauthbearer]"),
-                        ("local_port != 25", "[oauthbearer]"),
+                        (
+                            "local_port != 25 && is_tls",
+                            "[plain, login, oauthbearer, xoauth2]",
+                        ),
+                        ("local_port != 25", "[oauthbearer, xoauth2]"),
                     ],
                     "false",
                 ),
@@ -914,7 +914,7 @@ impl<'x> TryFrom<Variable<'x>> for MtPriority {
                 4 => Ok(MtPriority::Nsep),
                 _ => Err(()),
             },
-            Variable::String(value) => MtPriority::parse_value(&value).map_err(|_| ()),
+            Variable::String(value) => MtPriority::parse_value(value.as_str()).map_err(|_| ()),
             _ => Err(()),
         }
     }

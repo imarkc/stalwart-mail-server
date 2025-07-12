@@ -1,12 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use aes_gcm_siv::{
-    aead::{generic_array::GenericArray, Aead},
     AeadInPlace, Aes256GcmSiv, KeyInit, Nonce,
+    aead::{Aead, generic_array::GenericArray},
 };
 use store::blake3;
 

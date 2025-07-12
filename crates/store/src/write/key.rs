@@ -1,26 +1,26 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::convert::TryInto;
-use utils::{codec::leb128::Leb128_, BLOB_HASH_LEN};
+use utils::{BLOB_HASH_LEN, codec::leb128::Leb128_};
 
 use crate::{
-    BitmapKey, Deserialize, IndexKey, IndexKeyPrefix, Key, LogKey, ValueKey, SUBSPACE_ACL,
+    BitmapKey, Deserialize, IndexKey, IndexKeyPrefix, Key, LogKey, SUBSPACE_ACL,
     SUBSPACE_BITMAP_ID, SUBSPACE_BITMAP_TAG, SUBSPACE_BITMAP_TEXT, SUBSPACE_BLOB_LINK,
     SUBSPACE_BLOB_RESERVE, SUBSPACE_COUNTER, SUBSPACE_DIRECTORY, SUBSPACE_FTS_INDEX,
-    SUBSPACE_INDEXES, SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_IN_MEMORY_VALUE, SUBSPACE_LOGS,
+    SUBSPACE_IN_MEMORY_COUNTER, SUBSPACE_IN_MEMORY_VALUE, SUBSPACE_INDEXES, SUBSPACE_LOGS,
     SUBSPACE_PROPERTY, SUBSPACE_QUEUE_EVENT, SUBSPACE_QUEUE_MESSAGE, SUBSPACE_QUOTA,
     SUBSPACE_REPORT_IN, SUBSPACE_REPORT_OUT, SUBSPACE_SETTINGS, SUBSPACE_TASK_QUEUE,
-    SUBSPACE_TELEMETRY_INDEX, SUBSPACE_TELEMETRY_METRIC, SUBSPACE_TELEMETRY_SPAN, U32_LEN, U64_LEN,
-    WITH_SUBSPACE,
+    SUBSPACE_TELEMETRY_INDEX, SUBSPACE_TELEMETRY_METRIC, SUBSPACE_TELEMETRY_SPAN, U16_LEN, U32_LEN,
+    U64_LEN, ValueKey, WITH_SUBSPACE,
 };
 
 use super::{
-    AnyKey, AssignedIds, BitmapClass, BlobOp, DirectoryClass, InMemoryClass, QueueClass,
-    ReportClass, ReportEvent, ResolveId, TagValue, TaskQueueClass, TelemetryClass, ValueClass,
+    AnyKey, BitmapClass, BlobOp, DirectoryClass, InMemoryClass, QueueClass, ReportClass,
+    ReportEvent, TagValue, TaskQueueClass, TelemetryClass, ValueClass,
 };
 
 pub struct KeySerializer {
@@ -32,6 +32,7 @@ pub trait KeySerialize {
 }
 
 pub trait DeserializeBigEndian {
+    fn deserialize_be_u16(&self, index: usize) -> trc::Result<u16>;
     fn deserialize_be_u32(&self, index: usize) -> trc::Result<u32>;
     fn deserialize_be_u64(&self, index: usize) -> trc::Result<u64>;
 }
@@ -101,6 +102,23 @@ impl KeySerialize for u64 {
 }
 
 impl DeserializeBigEndian for &[u8] {
+    fn deserialize_be_u16(&self, index: usize) -> trc::Result<u16> {
+        self.get(index..index + U16_LEN)
+            .ok_or_else(|| {
+                trc::StoreEvent::DataCorruption
+                    .caused_by(trc::location!())
+                    .ctx(trc::Key::Value, *self)
+            })
+            .and_then(|bytes| {
+                bytes.try_into().map_err(|_| {
+                    trc::StoreEvent::DataCorruption
+                        .caused_by(trc::location!())
+                        .ctx(trc::Key::Value, *self)
+                })
+            })
+            .map(u16::from_be_bytes)
+    }
+
     fn deserialize_be_u32(&self, index: usize) -> trc::Result<u32> {
         self.get(index..index + U32_LEN)
             .ok_or_else(|| {
@@ -136,13 +154,13 @@ impl DeserializeBigEndian for &[u8] {
     }
 }
 
-impl<T: AsRef<ValueClass<u32>>> ValueKey<T> {
+impl<T: AsRef<ValueClass>> ValueKey<T> {
     pub fn property(
         account_id: u32,
         collection: impl Into<u8>,
         document_id: u32,
         field: impl Into<u8>,
-    ) -> ValueKey<ValueClass<u32>> {
+    ) -> ValueKey<ValueClass> {
         ValueKey {
             account_id,
             collection: collection.into(),
@@ -210,30 +228,25 @@ impl Key for LogKey {
     }
 }
 
-impl<T: AsRef<ValueClass<u32>> + Sync + Send + Clone> Key for ValueKey<T> {
+impl<T: AsRef<ValueClass> + Sync + Send + Clone> Key for ValueKey<T> {
     fn subspace(&self) -> u8 {
         self.class.as_ref().subspace(self.collection)
     }
 
     fn serialize(&self, flags: u32) -> Vec<u8> {
-        self.class.as_ref().serialize(
-            self.account_id,
-            self.collection,
-            self.document_id,
-            flags,
-            None,
-        )
+        self.class
+            .as_ref()
+            .serialize(self.account_id, self.collection, self.document_id, flags)
     }
 }
 
-impl<T: ResolveId> ValueClass<T> {
+impl ValueClass {
     pub fn serialize(
         &self,
         account_id: u32,
         collection: u8,
         document_id: u32,
         flags: u32,
-        assigned_ids: Option<&AssignedIds>,
     ) -> Vec<u8> {
         let serializer = if (flags & WITH_SUBSPACE) != 0 {
             KeySerializer::new(self.serialized_size() + 2).write(self.subspace(collection))
@@ -268,22 +281,49 @@ impl<T: ResolveId> ValueClass<T> {
                 .write(collection)
                 .write(document_id),
             ValueClass::TaskQueue(task) => match task {
-                TaskQueueClass::IndexEmail { seq, hash } => serializer
-                    .write(*seq)
+                TaskQueueClass::IndexEmail { due, hash } => serializer
+                    .write(*due)
                     .write(account_id)
                     .write(0u8)
                     .write(document_id)
                     .write::<&[u8]>(hash.as_ref()),
                 TaskQueueClass::BayesTrain {
-                    seq,
+                    due,
                     hash,
                     learn_spam,
                 } => serializer
-                    .write(*seq)
+                    .write(*due)
                     .write(account_id)
                     .write(if *learn_spam { 1u8 } else { 2u8 })
                     .write(document_id)
                     .write::<&[u8]>(hash.as_ref()),
+                TaskQueueClass::SendAlarm {
+                    due,
+                    event_id,
+                    alarm_id,
+                } => serializer
+                    .write(*due)
+                    .write(account_id)
+                    .write(3u8)
+                    .write(document_id)
+                    .write(*event_id)
+                    .write(*alarm_id),
+                TaskQueueClass::SendImip { due, is_payload } => {
+                    if !*is_payload {
+                        serializer
+                            .write(*due)
+                            .write(account_id)
+                            .write(4u8)
+                            .write(document_id)
+                    } else {
+                        serializer
+                            .write(u64::MAX)
+                            .write(account_id)
+                            .write(5u8)
+                            .write(document_id)
+                            .write(*due)
+                    }
+                }
             },
             ValueClass::Blob(op) => match op {
                 BlobOp::Reserve { hash, until } => serializer
@@ -314,30 +354,30 @@ impl<T: ResolveId> ValueClass<T> {
             ValueClass::Directory(directory) => match directory {
                 DirectoryClass::NameToId(name) => serializer.write(0u8).write(name.as_slice()),
                 DirectoryClass::EmailToId(email) => serializer.write(1u8).write(email.as_slice()),
-                DirectoryClass::Principal(uid) => serializer
-                    .write(2u8)
-                    .write_leb128(uid.resolve_id(assigned_ids)),
+                DirectoryClass::Principal(uid) => serializer.write(2u8).write_leb128(*uid),
                 DirectoryClass::UsedQuota(uid) => serializer.write(4u8).write_leb128(*uid),
                 DirectoryClass::MemberOf {
                     principal_id,
                     member_of,
-                } => serializer
-                    .write(5u8)
-                    .write(principal_id.resolve_id(assigned_ids))
-                    .write(member_of.resolve_id(assigned_ids)),
+                } => serializer.write(5u8).write(*principal_id).write(*member_of),
                 DirectoryClass::Members {
                     principal_id,
                     has_member,
                 } => serializer
                     .write(6u8)
-                    .write(principal_id.resolve_id(assigned_ids))
-                    .write(has_member.resolve_id(assigned_ids)),
+                    .write(*principal_id)
+                    .write(*has_member),
+                DirectoryClass::Index { word, principal_id } => serializer
+                    .write(7u8)
+                    .write(word.as_slice())
+                    .write(*principal_id),
             },
             ValueClass::Queue(queue) => match queue {
                 QueueClass::Message(queue_id) => serializer.write(*queue_id),
-                QueueClass::MessageEvent(event) => {
-                    serializer.write(event.due).write(event.queue_id)
-                }
+                QueueClass::MessageEvent(event) => serializer
+                    .write(event.due)
+                    .write(event.queue_id)
+                    .write(event.queue_name.as_slice()),
                 QueueClass::DmarcReportHeader(event) => serializer
                     .write(0u8)
                     .write(event.due)
@@ -392,6 +432,8 @@ impl<T: ResolveId> ValueClass<T> {
                     .write_leb128(*metric_id)
                     .write_leb128(*node_id),
             },
+            ValueClass::DocumentId => serializer.write(account_id).write(collection),
+            ValueClass::ChangeId => serializer.write(account_id),
             ValueClass::Any(any) => serializer.write(any.key.as_slice()),
         }
         .finalize()
@@ -422,23 +464,19 @@ impl<T: AsRef<[u8]> + Sync + Send + Clone> Key for IndexKey<T> {
     }
 }
 
-impl<T: AsRef<BitmapClass<u32>> + Sync + Send + Clone> Key for BitmapKey<T> {
+impl<T: AsRef<BitmapClass> + Sync + Send + Clone> Key for BitmapKey<T> {
     fn subspace(&self) -> u8 {
         self.class.as_ref().subspace()
     }
 
     fn serialize(&self, flags: u32) -> Vec<u8> {
-        self.class.as_ref().serialize(
-            self.account_id,
-            self.collection,
-            self.document_id,
-            flags,
-            None,
-        )
+        self.class
+            .as_ref()
+            .serialize(self.account_id, self.collection, self.document_id, flags)
     }
 }
 
-impl<T: ResolveId> BitmapClass<T> {
+impl BitmapClass {
     pub fn subspace(&self) -> u8 {
         match self {
             BitmapClass::DocumentIds => SUBSPACE_BITMAP_ID,
@@ -453,7 +491,6 @@ impl<T: ResolveId> BitmapClass<T> {
         collection: u8,
         document_id: u32,
         flags: u32,
-        assigned_ids: Option<&AssignedIds>,
     ) -> Vec<u8> {
         const BM_MARKER: u8 = 1 << 7;
 
@@ -474,7 +511,7 @@ impl<T: ResolveId> BitmapClass<T> {
                 .write(account_id)
                 .write(collection)
                 .write(*field)
-                .write_leb128(id.resolve_id(assigned_ids)),
+                .write_leb128(*id),
                 TagValue::Text(text) => if (flags & WITH_SUBSPACE) != 0 {
                     KeySerializer::new(U32_LEN + 4 + text.len()).write(SUBSPACE_BITMAP_TAG)
                 } else {
@@ -530,7 +567,7 @@ impl<T: AsRef<[u8]> + Sync + Send + Clone> Key for AnyKey<T> {
     }
 }
 
-impl<T> ValueClass<T> {
+impl ValueClass {
     pub fn serialized_size(&self) -> usize {
         match self {
             ValueClass::Property(_) => U32_LEN * 2 + 3,
@@ -548,6 +585,7 @@ impl<T> ValueClass<T> {
                 DirectoryClass::NameToId(v) | DirectoryClass::EmailToId(v) => v.len(),
                 DirectoryClass::Principal(_) | DirectoryClass::UsedQuota(_) => U32_LEN,
                 DirectoryClass::Members { .. } | DirectoryClass::MemberOf { .. } => U32_LEN * 2,
+                DirectoryClass::Index { word, .. } => word.len() + U32_LEN,
             },
             ValueClass::Blob(op) => match op {
                 BlobOp::Reserve { .. } => BLOB_HASH_LEN + U64_LEN + U32_LEN + 1,
@@ -555,10 +593,22 @@ impl<T> ValueClass<T> {
                     BLOB_HASH_LEN + U32_LEN * 2 + 2
                 }
             },
-            ValueClass::TaskQueue { .. } => BLOB_HASH_LEN + U64_LEN * 2,
+            ValueClass::TaskQueue(e) => match e {
+                TaskQueueClass::IndexEmail { .. } | TaskQueueClass::BayesTrain { .. } => {
+                    (BLOB_HASH_LEN + U64_LEN * 2) + 1
+                }
+                TaskQueueClass::SendAlarm { .. } => U64_LEN + (U32_LEN * 3) + 1,
+                TaskQueueClass::SendImip { is_payload, .. } => {
+                    if *is_payload {
+                        (U64_LEN * 2) + (U32_LEN * 2) + 1
+                    } else {
+                        U64_LEN + (U32_LEN * 2) + 1
+                    }
+                }
+            },
             ValueClass::Queue(q) => match q {
                 QueueClass::Message(_) => U64_LEN,
-                QueueClass::MessageEvent(_) => U64_LEN * 2,
+                QueueClass::MessageEvent(_) => U64_LEN * 3,
                 QueueClass::DmarcReportEvent(event) | QueueClass::TlsReportEvent(event) => {
                     event.domain.len() + U64_LEN * 3
                 }
@@ -573,6 +623,8 @@ impl<T> ValueClass<T> {
                 TelemetryClass::Index { value, .. } => U64_LEN + value.len() + 1,
                 TelemetryClass::Metric { .. } => U64_LEN * 2 + 1,
             },
+            ValueClass::DocumentId => U32_LEN + 1,
+            ValueClass::ChangeId => U32_LEN,
             ValueClass::Any(v) => v.key.len(),
         }
     }
@@ -619,6 +671,7 @@ impl<T> ValueClass<T> {
                 TelemetryClass::Index { .. } => SUBSPACE_TELEMETRY_INDEX,
                 TelemetryClass::Metric { .. } => SUBSPACE_TELEMETRY_METRIC,
             },
+            ValueClass::DocumentId | ValueClass::ChangeId => SUBSPACE_COUNTER,
             ValueClass::Any(any) => any.subspace,
         }
     }
@@ -627,15 +680,17 @@ impl<T> ValueClass<T> {
         match self {
             ValueClass::Directory(DirectoryClass::UsedQuota(_))
             | ValueClass::InMemory(InMemoryClass::Counter(_))
-            | ValueClass::Queue(QueueClass::QuotaCount(_) | QueueClass::QuotaSize(_)) => true,
+            | ValueClass::Queue(QueueClass::QuotaCount(_) | QueueClass::QuotaSize(_))
+            | ValueClass::DocumentId
+            | ValueClass::ChangeId => true,
             ValueClass::Property(84) if collection == 1 => true, // TODO: Find a more elegant way to do this
             _ => false,
         }
     }
 }
 
-impl From<ValueClass<u32>> for ValueKey<ValueClass<u32>> {
-    fn from(class: ValueClass<u32>) -> Self {
+impl From<ValueClass> for ValueKey<ValueClass> {
+    fn from(class: ValueClass) -> Self {
         ValueKey {
             account_id: 0,
             collection: 0,
@@ -645,8 +700,8 @@ impl From<ValueClass<u32>> for ValueKey<ValueClass<u32>> {
     }
 }
 
-impl From<DirectoryClass<u32>> for ValueKey<ValueClass<u32>> {
-    fn from(value: DirectoryClass<u32>) -> Self {
+impl From<DirectoryClass> for ValueKey<ValueClass> {
+    fn from(value: DirectoryClass) -> Self {
         ValueKey {
             account_id: 0,
             collection: 0,
@@ -656,13 +711,13 @@ impl From<DirectoryClass<u32>> for ValueKey<ValueClass<u32>> {
     }
 }
 
-impl<U> From<DirectoryClass<U>> for ValueClass<U> {
-    fn from(value: DirectoryClass<U>) -> Self {
+impl From<DirectoryClass> for ValueClass {
+    fn from(value: DirectoryClass) -> Self {
         ValueClass::Directory(value)
     }
 }
 
-impl<U> From<BlobOp> for ValueClass<U> {
+impl From<BlobOp> for ValueClass {
     fn from(value: BlobOp) -> Self {
         ValueClass::Blob(value)
     }

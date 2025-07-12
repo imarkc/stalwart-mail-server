@@ -1,18 +1,19 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::{sync::Arc, time::Instant};
 
-use common::{auth::AccessToken, Server};
+use common::{Server, auth::AccessToken};
+use http_proto::HttpSessionData;
 use jmap_proto::{
     method::{
         get, query,
         set::{self},
     },
-    request::{method::MethodName, Call, Request, RequestMethod},
+    request::{Call, Request, RequestMethod, method::MethodName},
     response::{Response, ResponseMethod},
     types::collection::Collection,
 };
@@ -22,8 +23,8 @@ use crate::{
     blob::{copy::BlobCopy, get::BlobOperations, upload::BlobUpload},
     changes::{get::ChangesLookup, query::QueryChanges},
     email::{
-        copy::EmailCopy, get::EmailGet, import::EmailImport, parse::EmailParse, query::EmailQuery,
-        set::EmailSet, snippet::EmailSearchSnippet,
+        copy::JmapEmailCopy, get::EmailGet, import::EmailImport, parse::EmailParse,
+        query::EmailQuery, set::EmailSet, snippet::EmailSearchSnippet,
     },
     identity::{get::IdentityGet, set::IdentitySet},
     mailbox::{get::MailboxGet, query::MailboxQuery, set::MailboxSet},
@@ -39,11 +40,10 @@ use crate::{
     vacation::{get::VacationResponseGet, set::VacationResponseSet},
 };
 
-use super::http::HttpSessionData;
 use std::future::Future;
 
 pub trait RequestHandler: Sync + Send {
-    fn handle_request(
+    fn handle_jmap_request(
         &self,
         request: Request,
         access_token: Arc<AccessToken>,
@@ -61,7 +61,8 @@ pub trait RequestHandler: Sync + Send {
 }
 
 impl RequestHandler for Server {
-    async fn handle_request(
+    #![allow(clippy::large_futures)]
+    async fn handle_jmap_request(
         &self,
         request: Request,
         access_token: Arc<AccessToken>,
@@ -105,26 +106,10 @@ impl RequestHandler for Server {
                             ResponseMethod::Set(set_response) => {
                                 // Add created ids
                                 set_response.update_created_ids(&mut response);
-
-                                // Publish state changes
-                                if let Some(state_change) = set_response.state_change.take() {
-                                    self.broadcast_state_change(state_change).await;
-                                }
                             }
                             ResponseMethod::ImportEmail(import_response) => {
                                 // Add created ids
                                 import_response.update_created_ids(&mut response);
-
-                                // Publish state changes
-                                if let Some(state_change) = import_response.state_change.take() {
-                                    self.broadcast_state_change(state_change).await;
-                                }
-                            }
-                            ResponseMethod::Copy(copy_response) => {
-                                // Publish state changes
-                                if let Some(state_change) = copy_response.state_change.take() {
-                                    self.broadcast_state_change(state_change).await;
-                                }
                             }
                             ResponseMethod::UploadBlob(upload_response) => {
                                 // Add created blobIds
@@ -138,10 +123,12 @@ impl RequestHandler for Server {
                     Err(error) => {
                         let method_error = error.clone();
 
-                        trc::error!(error
-                            .span_id(session.session_id)
-                            .ctx_unique(trc::Key::AccountId, access_token.primary_id())
-                            .caused_by(method_name));
+                        trc::error!(
+                            error
+                                .span_id(session.session_id)
+                                .ctx_unique(trc::Key::AccountId, access_token.primary_id())
+                                .caused_by(method_name)
+                        );
 
                         response.push_error(call.id, method_error);
                     }

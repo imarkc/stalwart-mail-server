@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -35,7 +35,7 @@ impl SpamFilterAnalyzeRecipient for Server {
                         .input
                         .message
                         .raw_message()
-                        .get(header.offset_start..header.offset_end)
+                        .get(header.offset_start as usize..header.offset_end as usize)
                         .unwrap_or_default();
                     match header.name {
                         HeaderName::To => to_raw = raw,
@@ -153,7 +153,7 @@ impl SpamFilterAnalyzeRecipient for Server {
         for rcpt in &unique_recipients {
             // Validate name
             if let Some(rcpt_name) = &rcpt.name {
-                if rcpt_name == &rcpt.email.address {
+                if rcpt_name == rcpt.email.address {
                     to_dn_eq_addr_count += 1;
                 } else {
                     to_dn_count += 1;
@@ -167,10 +167,13 @@ impl SpamFilterAnalyzeRecipient for Server {
 
             // Check if the local part is present in the subject
             if !rcpt.email.local_part.is_empty() {
-                if ctx.output.subject_lc.contains(&rcpt.email.address) {
+                if ctx.output.subject_lc.contains(rcpt.email.address.as_str()) {
                     ctx.result.add_tag("RCPT_IN_SUBJECT");
                 } else if rcpt.email.local_part.len() > 3
-                    && ctx.output.subject_lc.contains(&rcpt.email.local_part)
+                    && ctx
+                        .output
+                        .subject_lc
+                        .contains(rcpt.email.local_part.as_str())
                 {
                     ctx.result.add_tag("RCPT_LOCAL_IN_SUBJECT");
                 }

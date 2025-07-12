@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -8,11 +8,11 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::{borrow::Cow, future::Future, time::Duration};
 
-use common::config::spamfilter::{Element, IpResolver, Location};
-use common::scripts::functions::unicode::CharUtils;
-use common::scripts::IsMixedCharset;
 use common::Server;
-use hyper::{header::LOCATION, Uri};
+use common::config::spamfilter::{Element, IpResolver, Location};
+use common::scripts::IsMixedCharset;
+use common::scripts::functions::unicode::CharUtils;
+use hyper::{Uri, header::LOCATION};
 use nlp::tokenizers::types::TokenType;
 use reqwest::redirect::Policy;
 
@@ -20,11 +20,11 @@ use crate::modules::dnsbl::check_dnsbl;
 use crate::modules::expression::StringResolver;
 use crate::modules::html::SRC;
 use crate::{
-    modules::html::{HtmlToken, A, HREF},
     Hostname, SpamFilterContext, TextPart,
+    modules::html::{A, HREF, HtmlToken},
 };
 
-use super::{is_trusted_domain, is_url_redirector, ElementLocation};
+use super::{ElementLocation, is_trusted_domain, is_url_redirector};
 
 pub trait SpamFilterAnalyzeUrl: Sync + Send {
     fn spam_filter_analyze_url(
@@ -58,6 +58,7 @@ impl SpamFilterAnalyzeUrl for Server {
                 _ => None,
             }));
         for (part_id, part) in ctx.output.text_parts.iter().enumerate() {
+            let part_id = part_id as u32;
             let is_body = ctx.input.message.text_body.contains(&part_id)
                 || ctx.input.message.html_body.contains(&part_id);
 

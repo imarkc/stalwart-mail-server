@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -11,6 +11,7 @@ use crate::Store;
 pub mod blob;
 pub mod fts;
 pub mod lookup;
+pub mod pubsub;
 pub mod store;
 
 impl Store {

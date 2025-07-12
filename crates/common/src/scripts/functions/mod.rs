@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -13,7 +13,7 @@ pub mod text;
 pub mod unicode;
 pub mod url;
 
-use sieve::{runtime::Variable, FunctionMap};
+use sieve::{FunctionMap, runtime::Variable};
 
 use self::{array::*, email::*, header::*, image::*, misc::*, text::*, unicode::*, url::*};
 

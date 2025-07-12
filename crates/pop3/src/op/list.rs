@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,7 +9,7 @@ use std::time::Instant;
 use common::listener::SessionStream;
 use directory::Permission;
 
-use crate::{protocol::response::Response, Session};
+use crate::{Session, protocol::response::Response};
 
 impl<T: SessionStream> Session<T> {
     pub async fn handle_list(&mut self, msg: Option<u32>) -> trc::Result<()> {

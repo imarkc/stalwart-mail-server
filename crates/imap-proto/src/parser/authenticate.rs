@@ -1,13 +1,15 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use compact_str::ToCompactString;
+
 use crate::{
-    protocol::authenticate::{self, Mechanism},
-    receiver::{bad, Request},
     Command,
+    protocol::authenticate::{self, Mechanism},
+    receiver::{Request, bad},
 };
 
 impl Request<Command> {
@@ -16,7 +18,7 @@ impl Request<Command> {
             let mut tokens = self.tokens.into_iter();
             Ok(authenticate::Arguments {
                 mechanism: Mechanism::parse(&tokens.next().unwrap().unwrap_bytes())
-                    .map_err(|v| bad(self.tag.to_string(), v))?,
+                    .map_err(|v| bad(self.tag.to_compact_string(), v))?,
                 params: tokens
                     .filter_map(|token| token.unwrap_string().ok())
                     .collect(),
@@ -69,15 +71,15 @@ mod tests {
             (
                 "a002 AUTHENTICATE \"EXTERNAL\" {16+}\r\nfred@example.com\r\n",
                 authenticate::Arguments {
-                    tag: "a002".to_string(),
+                    tag: "a002".into(),
                     mechanism: Mechanism::External,
-                    params: vec!["fred@example.com".to_string()],
+                    params: vec!["fred@example.com".into()],
                 },
             ),
             (
                 "A01 AUTHENTICATE PLAIN\r\n",
                 authenticate::Arguments {
-                    tag: "A01".to_string(),
+                    tag: "A01".into(),
                     mechanism: Mechanism::Plain,
                     params: vec![],
                 },

@@ -1,39 +1,37 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
+use super::{
+    PrincipalAction, PrincipalField, PrincipalInfo, PrincipalSet, PrincipalUpdate, PrincipalValue,
+    SpecialSecrets, lookup::DirectoryStore,
+};
+use crate::{
+    MemberOf, Permission, PermissionGrant, Permissions, Principal, PrincipalData, PrincipalQuota,
+    QueryBy, ROLE_ADMIN, ROLE_TENANT_ADMIN, ROLE_USER, Type, backend::RcptType,
+    core::principal::build_search_index,
+};
 use ahash::{AHashMap, AHashSet};
+use compact_str::CompactString;
 use jmap_proto::types::collection::Collection;
+use nlp::tokenizers::word::WordTokenizer;
 use store::{
-    Deserialize, IterateParams, Serialize, Store, U32_LEN, ValueKey,
+    Deserialize, IterateParams, Serialize, SerializeInfallible, Store, U32_LEN, ValueKey,
+    backend::MAX_TOKEN_LENGTH,
+    roaring::RoaringBitmap,
     write::{
-        AssignedIds, BatchBuilder, DirectoryClass, MaybeDynamicId, MaybeDynamicValue,
-        SerializeWithId, ValueClass, assert::HashedValue, key::DeserializeBigEndian,
+        AlignedBytes, Archive, Archiver, BatchBuilder, DirectoryClass, ValueClass,
+        key::DeserializeBigEndian,
     },
 };
 use trc::AddContext;
 use utils::sanitize_email;
 
-use crate::{
-    MAX_TYPE_ID, Permission, Permissions, Principal, QueryBy, ROLE_ADMIN, ROLE_TENANT_ADMIN,
-    ROLE_USER, Type, backend::RcptType,
-};
-
-use super::{
-    PrincipalAction, PrincipalField, PrincipalInfo, PrincipalUpdate, PrincipalValue,
-    SpecialSecrets, lookup::DirectoryStore,
-};
-
-pub struct MemberOf {
-    pub principal_id: u32,
-    pub typ: Type,
-}
-
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct PrincipalList {
-    pub items: Vec<Principal>,
+pub struct PrincipalList<T> {
+    pub items: Vec<T>,
     pub total: u64,
 }
 
@@ -67,11 +65,12 @@ pub trait ManageDirectory: Sized {
     async fn get_principal_info(&self, name: &str) -> trc::Result<Option<PrincipalInfo>>;
     async fn get_or_create_principal_id(&self, name: &str, typ: Type) -> trc::Result<u32>;
     async fn get_principal(&self, principal_id: u32) -> trc::Result<Option<Principal>>;
+    async fn get_principal_name(&self, principal_id: u32) -> trc::Result<Option<String>>;
     async fn get_member_of(&self, principal_id: u32) -> trc::Result<Vec<MemberOf>>;
     async fn get_members(&self, principal_id: u32) -> trc::Result<Vec<u32>>;
     async fn create_principal(
         &self,
-        principal: Principal,
+        principal: PrincipalSet,
         tenant_id: Option<u32>,
         allowed_permissions: Option<&Permissions>,
     ) -> trc::Result<CreatedPrincipal>;
@@ -83,21 +82,21 @@ pub trait ManageDirectory: Sized {
         filter: Option<&str>,
         tenant_id: Option<u32>,
         types: &[Type],
-        fields: &[PrincipalField],
+        fetch: bool,
         page: usize,
         limit: usize,
-    ) -> trc::Result<PrincipalList>;
+    ) -> trc::Result<PrincipalList<Principal>>;
     async fn count_principals(
         &self,
         filter: Option<&str>,
         typ: Option<Type>,
         tenant_id: Option<u32>,
     ) -> trc::Result<u64>;
-    async fn map_field_ids(
+    async fn map_principal(
         &self,
-        principal: &mut Principal,
+        principal: Principal,
         fields: &[PrincipalField],
-    ) -> trc::Result<()>;
+    ) -> trc::Result<PrincipalSet>;
 }
 
 #[allow(async_fn_in_trait)]
@@ -112,17 +111,40 @@ trait ValidateDirectory: Sized {
 
 impl ManageDirectory for Store {
     async fn get_principal(&self, principal_id: u32) -> trc::Result<Option<Principal>> {
-        self.get_value::<Principal>(ValueKey::from(ValueClass::Directory(
-            DirectoryClass::Principal(principal_id),
-        )))
-        .await
-        .caused_by(trc::location!())
-        .map(|v| {
-            v.map(|mut v| {
-                v.id = principal_id;
-                v
-            })
-        })
+        let archive = self
+            .get_value::<Archive<AlignedBytes>>(ValueKey::from(ValueClass::Directory(
+                DirectoryClass::Principal(principal_id),
+            )))
+            .await
+            .caused_by(trc::location!())?;
+
+        if let Some(archive) = archive {
+            let mut principal = archive
+                .deserialize::<Principal>()
+                .caused_by(trc::location!())?;
+            principal.id = principal_id;
+            Ok(Some(principal))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_principal_name(&self, principal_id: u32) -> trc::Result<Option<String>> {
+        let archive = self
+            .get_value::<Archive<AlignedBytes>>(ValueKey::from(ValueClass::Directory(
+                DirectoryClass::Principal(principal_id),
+            )))
+            .await
+            .caused_by(trc::location!())?;
+
+        if let Some(archive) = archive {
+            let principal = archive
+                .unarchive::<Principal>()
+                .caused_by(trc::location!())?;
+            Ok(Some(principal.name.as_str().into()))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn get_principal_id(&self, name: &str) -> trc::Result<Option<u32>> {
@@ -140,6 +162,7 @@ impl ManageDirectory for Store {
     async fn get_or_create_principal_id(&self, name: &str, typ: Type) -> trc::Result<u32> {
         let mut try_count = 0;
         let name = name.to_lowercase();
+        let mut principal_id = None;
 
         loop {
             // Try to obtain ID
@@ -151,6 +174,21 @@ impl ManageDirectory for Store {
                 return Ok(principal_id);
             }
 
+            let principal_id = if let Some(principal_id) = principal_id {
+                principal_id
+            } else {
+                let principal_id_ = self
+                    .assign_document_ids(u32::MAX, Collection::Principal, 1)
+                    .await
+                    .caused_by(trc::location!())?;
+                principal_id = Some(principal_id_);
+                principal_id_
+            };
+
+            // Prepare principal
+            let mut principal = Principal::new(principal_id, typ);
+            principal.name = name.as_str().into();
+
             // Write principal ID
             let name_key =
                 ValueClass::Directory(DirectoryClass::NameToId(name.as_bytes().to_vec()));
@@ -159,15 +197,18 @@ impl ManageDirectory for Store {
                 .with_account_id(u32::MAX)
                 .with_collection(Collection::Principal)
                 .assert_value(name_key.clone(), ())
-                .create_document()
-                .set(name_key, DynamicPrincipalInfo::new(typ, None))
+                .create_document(principal_id);
+            build_search_index(&mut batch, principal_id, None, Some(&principal));
+            batch
                 .set(
-                    ValueClass::Directory(DirectoryClass::Principal(MaybeDynamicId::Dynamic(0))),
-                    Principal {
-                        typ,
-                        ..Default::default()
-                    }
-                    .with_field(PrincipalField::Name, name.to_string()),
+                    name_key,
+                    PrincipalInfo::new(principal_id, typ, None).serialize(),
+                )
+                .set(
+                    ValueClass::Directory(DirectoryClass::Principal(principal_id)),
+                    Archiver::new(principal)
+                        .serialize()
+                        .caused_by(trc::location!())?,
                 );
 
             // Add default user role
@@ -175,26 +216,22 @@ impl ManageDirectory for Store {
                 batch
                     .set(
                         ValueClass::Directory(DirectoryClass::MemberOf {
-                            principal_id: MaybeDynamicId::Dynamic(0),
-                            member_of: MaybeDynamicId::Static(ROLE_USER),
+                            principal_id,
+                            member_of: ROLE_USER,
                         }),
                         vec![Type::Role as u8],
                     )
                     .set(
                         ValueClass::Directory(DirectoryClass::Members {
-                            principal_id: MaybeDynamicId::Static(ROLE_USER),
-                            has_member: MaybeDynamicId::Dynamic(0),
+                            principal_id: ROLE_USER,
+                            has_member: principal_id,
                         }),
                         vec![],
                     );
             }
 
-            match self
-                .write(batch.build())
-                .await
-                .and_then(|r| r.last_document_id())
-            {
-                Ok(principal_id) => {
+            match self.write(batch.build_all()).await {
+                Ok(_) => {
                     return Ok(principal_id);
                 }
                 Err(err) => {
@@ -211,19 +248,19 @@ impl ManageDirectory for Store {
 
     async fn create_principal(
         &self,
-        mut principal: Principal,
+        mut principal_set: PrincipalSet,
         mut tenant_id: Option<u32>,
         allowed_permissions: Option<&Permissions>,
     ) -> trc::Result<CreatedPrincipal> {
         // Make sure the principal has a name
-        let name = principal.name().to_lowercase();
+        let name = principal_set.name().to_lowercase();
         if name.is_empty() {
             return Err(err_missing(PrincipalField::Name));
         }
         let mut valid_domains: AHashSet<String> = AHashSet::new();
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         // Validate tenant
@@ -242,14 +279,12 @@ impl ManageDirectory for Store {
 
             // Enforce tenant quotas
             if let Some(limit) = tenant
-                .get_int_array(PrincipalField::Quota)
-                .and_then(|quotas| quotas.get(principal.typ() as usize + 1))
-                .copied()
+                .principal_quota(&principal_set.typ())
                 .filter(|q| *q > 0)
             {
                 // Obtain number of principals
                 let total = self
-                    .count_principals(None, principal.typ().into(), tenant_id.into())
+                    .count_principals(None, principal_set.typ().into(), tenant_id.into())
                     .await
                     .caused_by(trc::location!())?;
 
@@ -258,7 +293,7 @@ impl ManageDirectory for Store {
                         trc::LimitEvent::TenantQuota
                             .into_err()
                             .details("Tenant principal quota exceeded")
-                            .ctx(trc::Key::Details, principal.typ().as_str())
+                            .ctx(trc::Key::Details, principal_set.typ().as_str())
                             .ctx(trc::Key::Limit, limit)
                             .ctx(trc::Key::Total, total)
                     );
@@ -278,13 +313,17 @@ impl ManageDirectory for Store {
             return Err(err_exists(PrincipalField::Name, name));
         }
 
+        let mut principal_create = Principal::new(0, principal_set.typ());
+
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         // Obtain tenant id, only if no default tenant is provided
         #[cfg(feature = "enterprise")]
-        if let (Some(tenant_name), None) = (principal.take_str(PrincipalField::Tenant), tenant_id) {
+        if let (Some(tenant_name), None) =
+            (principal_set.take_str(PrincipalField::Tenant), tenant_id)
+        {
             tenant_id = self
                 .get_principal_info(&tenant_name)
                 .await
@@ -298,16 +337,16 @@ impl ManageDirectory for Store {
         // Tenants must provide principal names including a valid domain
         #[cfg(feature = "enterprise")]
         if let Some(tenant_id) = tenant_id {
-            if matches!(principal.typ, Type::Tenant) {
+            if matches!(principal_set.typ, Type::Tenant) {
                 return Err(error(
                     "Invalid field",
                     "Tenants cannot contain a tenant field".into(),
                 ));
             }
 
-            principal.set(PrincipalField::Tenant, tenant_id);
+            principal_create.tenant = tenant_id.into();
 
-            if !matches!(principal.typ, Type::Tenant | Type::Domain) {
+            if !matches!(principal_create.typ, Type::Tenant | Type::Domain) {
                 if let Some(domain) = name.split('@').nth(1) {
                     if self
                         .get_principal_info(domain)
@@ -316,7 +355,7 @@ impl ManageDirectory for Store {
                         .filter(|v| v.typ == Type::Domain && v.has_tenant_access(tenant_id.into()))
                         .is_some()
                     {
-                        valid_domains.insert(domain.to_string());
+                        valid_domains.insert(domain.into());
                     }
                 }
 
@@ -330,7 +369,46 @@ impl ManageDirectory for Store {
         }
         // SPDX-SnippetEnd
 
-        principal.set(PrincipalField::Name, name);
+        // Set fields
+        principal_create.name = name;
+        principal_create.description = principal_set.take_str(PrincipalField::Description);
+        principal_create.secrets = principal_set
+            .take_str_array(PrincipalField::Secrets)
+            .unwrap_or_default();
+        if let Some(picture) = principal_set.take_str(PrincipalField::Picture) {
+            principal_create.data.push(PrincipalData::Picture(picture));
+        }
+        if let Some(picture) = principal_set.take_str(PrincipalField::Locale) {
+            principal_create.data.push(PrincipalData::Locale(picture));
+        }
+        if let Some(urls) = principal_set.take_str_array(PrincipalField::Urls) {
+            principal_create.data.push(PrincipalData::Urls(urls));
+        }
+        if let Some(urls) = principal_set.take_str_array(PrincipalField::ExternalMembers) {
+            principal_create
+                .data
+                .push(PrincipalData::ExternalMembers(urls));
+        }
+        if let Some(quotas) = principal_set.take_int_array(PrincipalField::Quota) {
+            let mut principal_quotas = Vec::new();
+
+            for (idx, quota) in quotas.into_iter().take(Type::MAX_ID + 2).enumerate() {
+                if idx != 0 {
+                    principal_quotas.push(PrincipalQuota {
+                        quota,
+                        typ: Type::from_u8((idx - 1) as u8),
+                    });
+                } else if quota != 0 {
+                    principal_create.quota = Some(quota);
+                }
+            }
+
+            if !principal_quotas.is_empty() {
+                principal_create
+                    .data
+                    .push(PrincipalData::PrincipalQuota(principal_quotas));
+            }
+        }
 
         // Map member names
         let mut members = Vec::new();
@@ -342,7 +420,7 @@ impl ManageDirectory for Store {
             (PrincipalField::Lists, Some(Type::List)),
             (PrincipalField::Roles, Some(Type::Role)),
         ] {
-            if let Some(names) = principal.take_str_array(field) {
+            if let Some(names) = principal_set.take_str_array(field) {
                 let list = if field == PrincipalField::Members {
                     &mut members
                 } else {
@@ -383,29 +461,28 @@ impl ManageDirectory for Store {
         }
 
         // Map permissions
+        let mut permissions = AHashMap::new();
         for field in [
             PrincipalField::EnabledPermissions,
             PrincipalField::DisabledPermissions,
         ] {
-            if let Some(names) = principal.take_str_array(field) {
-                let mut permissions = Vec::with_capacity(names.len());
+            let is_disabled = field == PrincipalField::DisabledPermissions;
+            if let Some(names) = principal_set.take_str_array(field) {
                 for name in names {
-                    let permission = Permission::from_name(&name)
-                        .ok_or_else(|| {
-                            error(
-                                format!("Invalid {} value", field.as_str()),
-                                format!("Permission {name:?} is invalid").into(),
-                            )
-                        })?
-                        .id() as u64;
+                    let permission = Permission::from_name(&name).ok_or_else(|| {
+                        error(
+                            format!("Invalid {} value", field.as_str()),
+                            format!("Permission {name:?} is invalid").into(),
+                        )
+                    })?;
 
-                    if !permissions.contains(&permission) {
+                    if !permissions.contains_key(&permission) {
                         if allowed_permissions
                             .as_ref()
                             .is_none_or(|p| p.get(permission as usize))
-                            || field == PrincipalField::DisabledPermissions
+                            || is_disabled
                         {
-                            permissions.push(permission);
+                            permissions.insert(permission, is_disabled);
                         } else {
                             return Err(error(
                                 "Invalid permission",
@@ -414,22 +491,32 @@ impl ManageDirectory for Store {
                         }
                     }
                 }
-
-                if !permissions.is_empty() {
-                    principal.set(field, permissions);
-                }
             }
+        }
+        if !permissions.is_empty() {
+            principal_create.data.push(PrincipalData::Permissions(
+                permissions
+                    .into_iter()
+                    .map(|(k, v)| PermissionGrant {
+                        permission: k,
+                        grant: !v,
+                    })
+                    .collect(),
+            ));
         }
 
         // Make sure the e-mail is not taken and validate domain
-        if principal.typ != Type::OauthClient {
-            for email in principal.iter_mut_str(PrincipalField::Emails) {
-                *email = email.to_lowercase();
-                if self.rcpt(email).await.caused_by(trc::location!())? != RcptType::Invalid {
+        if principal_create.typ != Type::OauthClient {
+            for email in principal_set
+                .take_str_array(PrincipalField::Emails)
+                .unwrap_or_default()
+            {
+                let email = email.to_lowercase();
+                if self.rcpt(&email).await.caused_by(trc::location!())? != RcptType::Invalid {
                     return Err(err_exists(PrincipalField::Emails, email.to_string()));
                 }
                 if let Some(domain) = email.split('@').nth(1) {
-                    if valid_domains.insert(domain.to_string()) {
+                    if valid_domains.insert(domain.into()) {
                         self.get_principal_info(domain)
                             .await
                             .caused_by(trc::location!())?
@@ -437,63 +524,69 @@ impl ManageDirectory for Store {
                             .ok_or_else(|| not_found(domain.to_string()))?;
                     }
                 }
+                principal_create.emails.push(email);
             }
         }
 
         // Write principal
+        let principal_id = self
+            .assign_document_ids(u32::MAX, Collection::Principal, 1)
+            .await
+            .caused_by(trc::location!())?;
+        principal_create.id = principal_id;
         let mut batch = BatchBuilder::new();
-        let pinfo_name = DynamicPrincipalInfo::new(principal.typ, tenant_id);
-        let pinfo_email = DynamicPrincipalInfo::new(principal.typ, None);
+        let pinfo_name = PrincipalInfo::new(principal_id, principal_create.typ, tenant_id);
+        let pinfo_email = PrincipalInfo::new(principal_id, principal_create.typ, None);
+
+        // Serialize
+        let archiver = Archiver::new(principal_create);
+        let principal_bytes = archiver.serialize().caused_by(trc::location!())?;
+        let principal_create = archiver.into_inner();
+
         batch
             .with_account_id(u32::MAX)
             .with_collection(Collection::Principal)
-            .create_document()
+            .create_document(principal_id)
             .assert_value(
                 ValueClass::Directory(DirectoryClass::NameToId(
-                    principal.name().to_string().into_bytes(),
+                    principal_create.name().as_bytes().to_vec(),
                 )),
                 (),
-            )
+            );
+        build_search_index(&mut batch, principal_id, None, Some(&principal_create));
+        batch
             .set(
-                ValueClass::Directory(DirectoryClass::Principal(MaybeDynamicId::Dynamic(0))),
-                (&principal).serialize(),
+                ValueClass::Directory(DirectoryClass::Principal(principal_id)),
+                principal_bytes,
             )
             .set(
                 ValueClass::Directory(DirectoryClass::NameToId(
-                    principal
-                        .take_str(PrincipalField::Name)
-                        .unwrap()
-                        .into_bytes(),
+                    principal_create.name.as_bytes().to_vec(),
                 )),
-                pinfo_name,
+                pinfo_name.serialize(),
             );
 
         // Write email to id mapping
-        if let Some(emails) = principal
-            .take(PrincipalField::Emails)
-            .map(|v| v.into_str_array())
-        {
-            for email in emails {
-                batch.set(
-                    ValueClass::Directory(DirectoryClass::EmailToId(email.into_bytes())),
-                    pinfo_email,
-                );
-            }
+        for email in principal_create.emails {
+            batch.set(
+                ValueClass::Directory(DirectoryClass::EmailToId(email.as_bytes().to_vec())),
+                pinfo_email.serialize(),
+            );
         }
 
         // Write membership
         for member_of in member_of {
             batch.set(
                 ValueClass::Directory(DirectoryClass::MemberOf {
-                    principal_id: MaybeDynamicId::Dynamic(0),
-                    member_of: MaybeDynamicId::Static(member_of.id),
+                    principal_id,
+                    member_of: member_of.id,
                 }),
                 vec![member_of.typ as u8],
             );
             batch.set(
                 ValueClass::Directory(DirectoryClass::Members {
-                    principal_id: MaybeDynamicId::Static(member_of.id),
-                    has_member: MaybeDynamicId::Dynamic(0),
+                    principal_id: member_of.id,
+                    has_member: principal_id,
                 }),
                 vec![],
             );
@@ -501,25 +594,24 @@ impl ManageDirectory for Store {
         for member in members {
             batch.set(
                 ValueClass::Directory(DirectoryClass::MemberOf {
-                    principal_id: MaybeDynamicId::Static(member.id),
-                    member_of: MaybeDynamicId::Dynamic(0),
+                    principal_id: member.id,
+                    member_of: principal_id,
                 }),
-                vec![principal.typ as u8],
+                vec![principal_create.typ as u8],
             );
             batch.set(
                 ValueClass::Directory(DirectoryClass::Members {
-                    principal_id: MaybeDynamicId::Dynamic(0),
-                    has_member: MaybeDynamicId::Static(member.id),
+                    principal_id,
+                    has_member: member.id,
                 }),
                 vec![],
             );
         }
 
-        self.write(batch.build())
+        self.write(batch.build_all())
             .await
-            .and_then(|r| r.last_document_id())
-            .map(|id| CreatedPrincipal {
-                id,
+            .map(|_| CreatedPrincipal {
+                id: principal_id,
                 changed_principals,
             })
     }
@@ -535,23 +627,33 @@ impl ManageDirectory for Store {
             QueryBy::Id(principal_id) => principal_id,
             QueryBy::Credentials(_) => unreachable!(),
         };
-        let mut principal = self
-            .get_principal(principal_id)
+
+        let principal_ = self
+            .get_value::<Archive<AlignedBytes>>(ValueKey::from(ValueClass::Directory(
+                DirectoryClass::Principal(principal_id),
+            )))
             .await
             .caused_by(trc::location!())?
             .ok_or_else(|| not_found(principal_id.to_string()))?;
+        let principal = principal_
+            .unarchive::<Principal>()
+            .caused_by(trc::location!())?;
+        let typ = Type::from(&principal.typ);
+
         let mut batch = BatchBuilder::new();
+        batch.with_account_id(u32::MAX);
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         // Make sure tenant has no data
+        let tenant = principal.tenant.as_ref().map(|t| t.to_native());
         #[cfg(feature = "enterprise")]
-        match principal.typ {
+        match typ {
             Type::Individual | Type::Group => {
                 // Update tenant quota
-                if let Some(tenant_id) = principal.tenant() {
+                if let Some(tenant_id) = tenant {
                     let quota = self
                         .get_counter(DirectoryClass::UsedQuota(principal_id))
                         .await
@@ -565,7 +667,7 @@ impl ManageDirectory for Store {
                 let tenant_members = self
                     .list_principals(
                         None,
-                        principal.id().into(),
+                        principal_id.into(),
                         &[
                             Type::Individual,
                             Type::Group,
@@ -577,7 +679,7 @@ impl ManageDirectory for Store {
                             Type::Domain,
                             Type::ApiKey,
                         ],
-                        &[PrincipalField::Name],
+                        false,
                         0,
                         0,
                     )
@@ -605,8 +707,8 @@ impl ManageDirectory for Store {
                 }
             }
             Type::Domain => {
-                if let Some(tenant_id) = principal.tenant() {
-                    let name = principal.name();
+                if let Some(tenant_id) = tenant {
+                    let name = principal.name.as_str();
                     let tenant_members = self
                         .list_principals(
                             None,
@@ -620,7 +722,7 @@ impl ManageDirectory for Store {
                                 Type::Other,
                                 Type::Location,
                             ],
-                            &[PrincipalField::Name],
+                            false,
                             0,
                             0,
                         )
@@ -684,29 +786,22 @@ impl ManageDirectory for Store {
         }
 
         // Delete principal data
-        self.purge_account(principal_id)
+        self.danger_destroy_account(principal_id)
             .await
             .caused_by(trc::location!())?;
 
         // Delete principal
         batch
-            .with_account_id(principal_id)
-            .clear(DirectoryClass::NameToId(
-                principal
-                    .take_str(PrincipalField::Name)
-                    .unwrap_or_default()
-                    .into_bytes(),
-            ))
-            .clear(DirectoryClass::Principal(MaybeDynamicId::Static(
-                principal_id,
-            )))
+            .delete_document(principal_id)
+            .clear(DirectoryClass::NameToId(principal.name.as_bytes().to_vec()))
+            .clear(DirectoryClass::Principal(principal_id))
             .clear(DirectoryClass::UsedQuota(principal_id));
 
-        if let Some(emails) = principal.take_str_array(PrincipalField::Emails) {
-            for email in emails {
-                batch.clear(DirectoryClass::EmailToId(email.into_bytes()));
-            }
+        for email in principal.emails.iter() {
+            batch.clear(DirectoryClass::EmailToId(email.as_bytes().to_vec()));
         }
+
+        build_search_index(&mut batch, principal_id, Some(principal), None);
 
         for member in self
             .get_member_of(principal_id)
@@ -716,19 +811,19 @@ impl ManageDirectory for Store {
             // Update changed principals
             changed_principals.add_member_change(
                 principal_id,
-                principal.typ,
+                typ,
                 member.principal_id,
                 member.typ,
             );
 
             // Remove memberOf
             batch.clear(DirectoryClass::MemberOf {
-                principal_id: MaybeDynamicId::Static(principal_id),
-                member_of: MaybeDynamicId::Static(member.principal_id),
+                principal_id,
+                member_of: member.principal_id,
             });
             batch.clear(DirectoryClass::Members {
-                principal_id: MaybeDynamicId::Static(member.principal_id),
-                has_member: MaybeDynamicId::Static(principal_id),
+                principal_id: member.principal_id,
+                has_member: principal_id,
             });
         }
 
@@ -743,30 +838,25 @@ impl ManageDirectory for Store {
                 .await
                 .caused_by(trc::location!())?
             {
-                changed_principals.add_member_change(
-                    member_id,
-                    member_info.typ,
-                    principal_id,
-                    principal.typ,
-                );
+                changed_principals.add_member_change(member_id, member_info.typ, principal_id, typ);
             }
 
             // Remove members
             batch.clear(DirectoryClass::MemberOf {
-                principal_id: MaybeDynamicId::Static(member_id),
-                member_of: MaybeDynamicId::Static(principal_id),
+                principal_id: member_id,
+                member_of: principal_id,
             });
             batch.clear(DirectoryClass::Members {
-                principal_id: MaybeDynamicId::Static(principal_id),
-                has_member: MaybeDynamicId::Static(member_id),
+                principal_id,
+                has_member: member_id,
             });
         }
 
-        self.write(batch.build())
+        self.write(batch.build_all())
             .await
             .caused_by(trc::location!())?;
 
-        changed_principals.add_deletion(principal_id, principal.typ);
+        changed_principals.add_deletion(principal_id, typ);
 
         Ok(changed_principals)
     }
@@ -788,15 +878,21 @@ impl ManageDirectory for Store {
         let tenant_id = params.tenant_id;
 
         // Fetch principal
-        let mut principal = self
-            .get_value::<HashedValue<Principal>>(ValueKey::from(ValueClass::Directory(
+        let principal_ = self
+            .get_value::<Archive<AlignedBytes>>(ValueKey::from(ValueClass::Directory(
                 DirectoryClass::Principal(principal_id),
             )))
             .await
             .caused_by(trc::location!())?
             .ok_or_else(|| not_found(principal_id))?;
-        principal.inner.id = principal_id;
-        let principal_type = principal.inner.typ;
+        let prev_principal = principal_
+            .to_unarchived::<Principal>()
+            .caused_by(trc::location!())?;
+        let mut principal = prev_principal
+            .deserialize::<Principal>()
+            .caused_by(trc::location!())?;
+        principal.id = principal_id;
+        let principal_type = principal.typ;
         let validate_emails = principal_type != Type::OauthClient;
 
         // Keep track of changed principals
@@ -815,7 +911,7 @@ impl ManageDirectory for Store {
         // Prepare changes
         let mut batch = BatchBuilder::new();
         let mut pinfo_name =
-            PrincipalInfo::new(principal_id, principal_type, principal.inner.tenant()).serialize();
+            PrincipalInfo::new(principal_id, principal_type, principal.tenant()).serialize();
         let pinfo_email = PrincipalInfo::new(principal_id, principal_type, None).serialize();
         let update_principal = !changes.is_empty()
             && !changes.iter().all(|c| {
@@ -828,19 +924,10 @@ impl ManageDirectory for Store {
                 )
             });
 
-        if update_principal {
-            batch.assert_value(
-                ValueClass::Directory(DirectoryClass::Principal(MaybeDynamicId::Static(
-                    principal_id,
-                ))),
-                &principal,
-            );
-        }
-
         let mut used_quota: Option<i64> = None;
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         // Obtain used quota
@@ -889,7 +976,7 @@ impl ManageDirectory for Store {
                 (PrincipalAction::Set, PrincipalField::Name, PrincipalValue::String(new_name)) => {
                     // Make sure new name is not taken
                     let new_name = new_name.to_lowercase();
-                    if principal.inner.name() != new_name {
+                    if principal.name() != new_name {
                         if tenant_id.is_some()
                             && !matches!(principal_type, Type::Tenant | Type::Domain)
                         {
@@ -925,15 +1012,16 @@ impl ManageDirectory for Store {
                         }
 
                         batch.clear(ValueClass::Directory(DirectoryClass::NameToId(
-                            principal.inner.name().as_bytes().to_vec(),
+                            principal.name().as_bytes().to_vec(),
                         )));
 
-                        principal.inner.set(PrincipalField::Name, new_name.clone());
-
                         batch.set(
-                            ValueClass::Directory(DirectoryClass::NameToId(new_name.into_bytes())),
+                            ValueClass::Directory(DirectoryClass::NameToId(
+                                new_name.as_bytes().to_vec(),
+                            )),
                             pinfo_name.clone(),
                         );
+                        principal.name = new_name;
 
                         // Name changed, update changed principals
                         changed_principals.add_change(principal_id, principal_type, change.field);
@@ -941,7 +1029,7 @@ impl ManageDirectory for Store {
                 }
 
                 // SPDX-SnippetBegin
-                // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+                // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
                 // SPDX-License-Identifier: LicenseRef-SEL
                 #[cfg(feature = "enterprise")]
                 (
@@ -963,13 +1051,13 @@ impl ManageDirectory for Store {
                             ));
                         }
 
-                        if principal.inner.tenant() == Some(tenant_info.id) {
+                        if principal.tenant() == Some(tenant_info.id) {
                             continue;
                         }
 
                         // Update quota
                         if let Some(used_quota) = used_quota {
-                            if let Some(old_tenant_id) = principal.inner.tenant() {
+                            if let Some(old_tenant_id) = principal.tenant() {
                                 batch.add(DirectoryClass::UsedQuota(old_tenant_id), -used_quota);
                             }
                             batch.add(DirectoryClass::UsedQuota(tenant_info.id), used_quota);
@@ -978,11 +1066,11 @@ impl ManageDirectory for Store {
                         // Tenant changed, update changed principals
                         changed_principals.add_change(principal_id, principal_type, change.field);
 
-                        principal.inner.set(PrincipalField::Tenant, tenant_info.id);
+                        principal.tenant = tenant_info.id.into();
                         pinfo_name =
                             PrincipalInfo::new(principal_id, principal_type, tenant_info.id.into())
                                 .serialize();
-                    } else if let Some(tenant_id) = principal.inner.tenant() {
+                    } else if let Some(tenant_id) = principal.tenant() {
                         // Update quota
                         if let Some(used_quota) = used_quota {
                             batch.add(DirectoryClass::UsedQuota(tenant_id), -used_quota);
@@ -991,7 +1079,7 @@ impl ManageDirectory for Store {
                         // Tenant changed, update changed principals
                         changed_principals.add_change(principal_id, principal_type, change.field);
 
-                        principal.inner.remove(PrincipalField::Tenant);
+                        principal.tenant = None;
                         pinfo_name =
                             PrincipalInfo::new(principal_id, principal_type, None).serialize();
                     } else {
@@ -1000,7 +1088,7 @@ impl ManageDirectory for Store {
 
                     batch.set(
                         ValueClass::Directory(DirectoryClass::NameToId(
-                            principal.inner.name().as_bytes().to_vec(),
+                            principal.name().as_bytes().to_vec(),
                         )),
                         pinfo_name.clone(),
                     );
@@ -1015,20 +1103,17 @@ impl ManageDirectory for Store {
                     // Password changed, update changed principals
                     changed_principals.add_change(principal_id, principal_type, change.field);
 
-                    principal.inner.set(PrincipalField::Secrets, value);
+                    principal.secrets = value.into_str_array();
                 }
                 (
                     PrincipalAction::AddItem,
                     PrincipalField::Secrets,
                     PrincipalValue::String(secret),
                 ) => {
-                    if !principal
-                        .inner
-                        .has_str_value(PrincipalField::Secrets, &secret)
-                    {
+                    if !principal.secrets.contains(&secret) {
                         if secret.is_otp_auth() {
                             // Add OTP Auth URLs to the beginning of the list
-                            principal.inner.prepend_str(PrincipalField::Secrets, secret);
+                            principal.secrets.insert(0, secret);
 
                             // Password changed, update changed principals
                             changed_principals.add_change(
@@ -1037,7 +1122,7 @@ impl ManageDirectory for Store {
                                 change.field,
                             );
                         } else {
-                            principal.inner.append_str(PrincipalField::Secrets, secret);
+                            principal.secrets.push(secret);
                             // Password changed, update changed principals
                             changed_principals.add_change(
                                 principal_id,
@@ -1056,28 +1141,40 @@ impl ManageDirectory for Store {
                     changed_principals.add_change(principal_id, principal_type, change.field);
 
                     if secret.is_app_password() || secret.is_otp_auth() {
-                        principal.inner.retain_str(PrincipalField::Secrets, |v| {
-                            *v != secret && !v.starts_with(&secret)
-                        });
+                        principal
+                            .secrets
+                            .retain(|v| *v != secret && !v.starts_with(secret.as_str()));
                     } else if !secret.is_empty() {
-                        principal
-                            .inner
-                            .retain_str(PrincipalField::Secrets, |v| *v != secret);
+                        principal.secrets.retain(|v| *v != secret);
                     } else {
-                        principal
-                            .inner
-                            .retain_str(PrincipalField::Secrets, |v| !v.is_password());
+                        principal.secrets.retain(|v| !v.is_password());
                     }
                 }
                 (
                     PrincipalAction::Set,
-                    PrincipalField::Description | PrincipalField::Picture,
+                    PrincipalField::Description,
                     PrincipalValue::String(value),
                 ) => {
                     if !value.is_empty() {
-                        principal.inner.set(change.field, value);
+                        principal.description = Some(value);
                     } else {
-                        principal.inner.remove(change.field);
+                        principal.description = None;
+                    }
+                }
+                (PrincipalAction::Set, PrincipalField::Picture, PrincipalValue::String(value)) => {
+                    principal
+                        .data
+                        .retain(|v| !matches!(v, PrincipalData::Picture(_)));
+                    if !value.is_empty() {
+                        principal.data.push(PrincipalData::Picture(value));
+                    }
+                }
+                (PrincipalAction::Set, PrincipalField::Locale, PrincipalValue::String(value)) => {
+                    principal
+                        .data
+                        .retain(|v| !matches!(v, PrincipalData::Locale(_)));
+                    if !value.is_empty() {
+                        principal.data.push(PrincipalData::Locale(value));
                     }
                 }
                 (PrincipalAction::Set, PrincipalField::Quota, PrincipalValue::Integer(quota))
@@ -1088,7 +1185,7 @@ impl ManageDirectory for Store {
                 {
                     // Quota changed, update changed principals
                     changed_principals.add_change(principal_id, principal_type, change.field);
-                    principal.inner.set(PrincipalField::Quota, quota);
+                    principal.quota = Some(quota);
                 }
                 (PrincipalAction::Set, PrincipalField::Quota, PrincipalValue::String(quota))
                     if matches!(
@@ -1098,17 +1195,38 @@ impl ManageDirectory for Store {
                 {
                     // Quota changed, update changed principals
                     changed_principals.add_change(principal_id, principal_type, change.field);
-
-                    principal.inner.remove(PrincipalField::Quota);
+                    principal.quota = None;
                 }
                 (
                     PrincipalAction::Set,
                     PrincipalField::Quota,
                     PrincipalValue::IntegerList(quotas),
                 ) if matches!(principal_type, Type::Tenant)
-                    && quotas.len() <= (MAX_TYPE_ID + 2) =>
+                    && quotas.len() <= (Type::MAX_ID + 2) =>
                 {
-                    principal.inner.set(PrincipalField::Quota, quotas);
+                    let mut new_quota = None;
+                    let mut principal_quotas = Vec::new();
+
+                    for (idx, quota) in quotas.into_iter().enumerate() {
+                        if idx != 0 {
+                            principal_quotas.push(PrincipalQuota {
+                                quota,
+                                typ: Type::from_u8((idx - 1) as u8),
+                            });
+                        } else if quota != 0 {
+                            new_quota = Some(quota);
+                        }
+                    }
+
+                    principal.quota = new_quota;
+                    principal
+                        .data
+                        .retain(|v| !matches!(v, PrincipalData::PrincipalQuota(_)));
+                    if !principal_quotas.is_empty() {
+                        principal
+                            .data
+                            .push(PrincipalData::PrincipalQuota(principal_quotas));
+                    }
                 }
 
                 // Emails
@@ -1123,7 +1241,7 @@ impl ManageDirectory for Store {
                         .map(|v| v.to_lowercase())
                         .collect::<Vec<_>>();
                     for email in &emails {
-                        if !principal.inner.has_str_value(PrincipalField::Emails, email) {
+                        if !principal.emails.contains(email) {
                             if validate_emails {
                                 self.validate_email(email, tenant_id, params.create_domains)
                                     .await?;
@@ -1137,7 +1255,7 @@ impl ManageDirectory for Store {
                         }
                     }
 
-                    for email in principal.inner.iter_str(PrincipalField::Emails) {
+                    for email in &principal.emails {
                         if !emails.contains(email) {
                             batch.clear(ValueClass::Directory(DirectoryClass::EmailToId(
                                 email.as_bytes().to_vec(),
@@ -1148,7 +1266,7 @@ impl ManageDirectory for Store {
                     // Emails changed, update changed principals
                     changed_principals.add_change(principal_id, principal_type, change.field);
 
-                    principal.inner.set(PrincipalField::Emails, emails);
+                    principal.emails = emails;
                 }
                 (
                     PrincipalAction::AddItem,
@@ -1156,10 +1274,7 @@ impl ManageDirectory for Store {
                     PrincipalValue::String(email),
                 ) => {
                     let email = email.to_lowercase();
-                    if !principal
-                        .inner
-                        .has_str_value(PrincipalField::Emails, &email)
-                    {
+                    if !principal.emails.contains(&email) {
                         if validate_emails {
                             self.validate_email(&email, tenant_id, params.create_domains)
                                 .await?;
@@ -1170,7 +1285,7 @@ impl ManageDirectory for Store {
                             )),
                             pinfo_email.clone(),
                         );
-                        principal.inner.append_str(PrincipalField::Emails, email);
+                        principal.emails.push(email);
 
                         // Emails changed, update changed principals
                         changed_principals.add_change(principal_id, principal_type, change.field);
@@ -1182,15 +1297,10 @@ impl ManageDirectory for Store {
                     PrincipalValue::String(email),
                 ) => {
                     let email = email.to_lowercase();
-                    if principal
-                        .inner
-                        .has_str_value(PrincipalField::Emails, &email)
-                    {
-                        principal
-                            .inner
-                            .retain_str(PrincipalField::Emails, |v| *v != email);
+                    if let Some(idx) = principal.emails.iter().position(|v| v == &email) {
+                        principal.emails.remove(idx);
                         batch.clear(ValueClass::Directory(DirectoryClass::EmailToId(
-                            email.into_bytes(),
+                            email.as_bytes().to_vec(),
                         )));
 
                         // Emails changed, update changed principals
@@ -1233,15 +1343,15 @@ impl ManageDirectory for Store {
 
                             batch.set(
                                 ValueClass::Directory(DirectoryClass::MemberOf {
-                                    principal_id: MaybeDynamicId::Static(principal_id),
-                                    member_of: MaybeDynamicId::Static(member_info.id),
+                                    principal_id,
+                                    member_of: member_info.id,
                                 }),
                                 vec![member_info.typ as u8],
                             );
                             batch.set(
                                 ValueClass::Directory(DirectoryClass::Members {
-                                    principal_id: MaybeDynamicId::Static(member_info.id),
-                                    has_member: MaybeDynamicId::Static(principal_id),
+                                    principal_id: member_info.id,
+                                    has_member: principal_id,
                                 }),
                                 vec![],
                             );
@@ -1267,12 +1377,12 @@ impl ManageDirectory for Store {
                             );
 
                             batch.clear(ValueClass::Directory(DirectoryClass::MemberOf {
-                                principal_id: MaybeDynamicId::Static(principal_id),
-                                member_of: MaybeDynamicId::Static(member.principal_id),
+                                principal_id,
+                                member_of: member.principal_id,
                             }));
                             batch.clear(ValueClass::Directory(DirectoryClass::Members {
-                                principal_id: MaybeDynamicId::Static(member.principal_id),
-                                has_member: MaybeDynamicId::Static(principal_id),
+                                principal_id: member.principal_id,
+                                has_member: principal_id,
                             }));
                         }
                     }
@@ -1311,16 +1421,16 @@ impl ManageDirectory for Store {
 
                         batch.set(
                             ValueClass::Directory(DirectoryClass::MemberOf {
-                                principal_id: MaybeDynamicId::Static(principal_id),
-                                member_of: MaybeDynamicId::Static(member_info.id),
+                                principal_id,
+                                member_of: member_info.id,
                             }),
                             vec![member_info.typ as u8],
                         );
 
                         batch.set(
                             ValueClass::Directory(DirectoryClass::Members {
-                                principal_id: MaybeDynamicId::Static(member_info.id),
-                                has_member: MaybeDynamicId::Static(principal_id),
+                                principal_id: member_info.id,
+                                has_member: principal_id,
                             }),
                             vec![],
                         );
@@ -1361,13 +1471,13 @@ impl ManageDirectory for Store {
                                 );
 
                                 batch.clear(ValueClass::Directory(DirectoryClass::MemberOf {
-                                    principal_id: MaybeDynamicId::Static(principal_id),
-                                    member_of: MaybeDynamicId::Static(member_info.id),
+                                    principal_id,
+                                    member_of: member_info.id,
                                 }));
 
                                 batch.clear(ValueClass::Directory(DirectoryClass::Members {
-                                    principal_id: MaybeDynamicId::Static(member_info.id),
-                                    has_member: MaybeDynamicId::Static(principal_id),
+                                    principal_id: member_info.id,
+                                    has_member: principal_id,
                                 }));
 
                                 member_of.remove(pos);
@@ -1418,15 +1528,15 @@ impl ManageDirectory for Store {
 
                             batch.set(
                                 ValueClass::Directory(DirectoryClass::MemberOf {
-                                    principal_id: MaybeDynamicId::Static(member_info.id),
-                                    member_of: MaybeDynamicId::Static(principal_id),
+                                    principal_id: member_info.id,
+                                    member_of: principal_id,
                                 }),
                                 vec![principal_type as u8],
                             );
                             batch.set(
                                 ValueClass::Directory(DirectoryClass::Members {
-                                    principal_id: MaybeDynamicId::Static(principal_id),
-                                    has_member: MaybeDynamicId::Static(member_info.id),
+                                    principal_id,
+                                    has_member: member_info.id,
                                 }),
                                 vec![],
                             );
@@ -1454,12 +1564,12 @@ impl ManageDirectory for Store {
                             }
 
                             batch.clear(ValueClass::Directory(DirectoryClass::MemberOf {
-                                principal_id: MaybeDynamicId::Static(*member_id),
-                                member_of: MaybeDynamicId::Static(principal_id),
+                                principal_id: *member_id,
+                                member_of: principal_id,
                             }));
                             batch.clear(ValueClass::Directory(DirectoryClass::Members {
-                                principal_id: MaybeDynamicId::Static(principal_id),
-                                has_member: MaybeDynamicId::Static(*member_id),
+                                principal_id,
+                                has_member: *member_id,
                             }));
                         }
                     }
@@ -1504,15 +1614,15 @@ impl ManageDirectory for Store {
 
                         batch.set(
                             ValueClass::Directory(DirectoryClass::MemberOf {
-                                principal_id: MaybeDynamicId::Static(member_info.id),
-                                member_of: MaybeDynamicId::Static(principal_id),
+                                principal_id: member_info.id,
+                                member_of: principal_id,
                             }),
                             vec![principal_type as u8],
                         );
                         batch.set(
                             ValueClass::Directory(DirectoryClass::Members {
-                                principal_id: MaybeDynamicId::Static(principal_id),
-                                has_member: MaybeDynamicId::Static(member_info.id),
+                                principal_id,
+                                has_member: member_info.id,
                             }),
                             vec![],
                         );
@@ -1540,12 +1650,12 @@ impl ManageDirectory for Store {
                                 );
 
                                 batch.clear(ValueClass::Directory(DirectoryClass::MemberOf {
-                                    principal_id: MaybeDynamicId::Static(member_info.id),
-                                    member_of: MaybeDynamicId::Static(principal_id),
+                                    principal_id: member_info.id,
+                                    member_of: principal_id,
                                 }));
                                 batch.clear(ValueClass::Directory(DirectoryClass::Members {
-                                    principal_id: MaybeDynamicId::Static(principal_id),
-                                    has_member: MaybeDynamicId::Static(member_info.id),
+                                    principal_id,
+                                    has_member: member_info.id,
                                 }));
                                 members.remove(pos);
                                 break;
@@ -1559,25 +1669,24 @@ impl ManageDirectory for Store {
                     PrincipalField::EnabledPermissions | PrincipalField::DisabledPermissions,
                     PrincipalValue::StringList(names),
                 ) => {
-                    let mut permissions = Vec::with_capacity(names.len());
+                    let is_disabled = change.field == PrincipalField::DisabledPermissions;
+                    let mut permissions = AHashSet::with_capacity(names.len());
                     for name in names {
-                        let permission = Permission::from_name(&name)
-                            .ok_or_else(|| {
-                                error(
-                                    format!("Invalid {} value", change.field.as_str()),
-                                    format!("Permission {name:?} is invalid").into(),
-                                )
-                            })?
-                            .id() as u64;
+                        let permission = Permission::from_name(&name).ok_or_else(|| {
+                            error(
+                                format!("Invalid {} value", change.field.as_str()),
+                                format!("Permission {name:?} is invalid").into(),
+                            )
+                        })?;
 
                         if !permissions.contains(&permission) {
                             if params
                                 .allowed_permissions
                                 .as_ref()
                                 .is_none_or(|p| p.get(permission as usize))
-                                || change.field == PrincipalField::DisabledPermissions
+                                || is_disabled
                             {
-                                permissions.push(permission);
+                                permissions.insert(permission);
                             } else {
                                 return Err(error(
                                     "Invalid permission",
@@ -1588,10 +1697,15 @@ impl ManageDirectory for Store {
                         }
                     }
 
+                    principal.remove_permissions(!is_disabled);
+
                     if !permissions.is_empty() {
-                        principal.inner.set(change.field, permissions);
-                    } else {
-                        principal.inner.remove(change.field);
+                        principal.add_permissions(permissions.into_iter().map(|permission| {
+                            PermissionGrant {
+                                permission,
+                                grant: !is_disabled,
+                            }
+                        }));
                     }
 
                     // Permissions changed, update changed principals
@@ -1602,14 +1716,12 @@ impl ManageDirectory for Store {
                     PrincipalField::EnabledPermissions | PrincipalField::DisabledPermissions,
                     PrincipalValue::String(name),
                 ) => {
-                    let permission = Permission::from_name(&name)
-                        .ok_or_else(|| {
-                            error(
-                                format!("Invalid {} value", change.field.as_str()),
-                                format!("Permission {name:?} is invalid").into(),
-                            )
-                        })?
-                        .id() as u64;
+                    let permission = Permission::from_name(&name).ok_or_else(|| {
+                        error(
+                            format!("Invalid {} value", change.field.as_str()),
+                            format!("Permission {name:?} is invalid").into(),
+                        )
+                    })?;
 
                     if params
                         .allowed_permissions
@@ -1617,7 +1729,10 @@ impl ManageDirectory for Store {
                         .is_none_or(|p| p.get(permission as usize))
                         || change.field == PrincipalField::DisabledPermissions
                     {
-                        principal.inner.append_int(change.field, permission);
+                        principal.add_permission(
+                            permission,
+                            change.field == PrincipalField::EnabledPermissions,
+                        );
 
                         // Permissions changed, update changed principals
                         changed_principals.add_change(principal_id, principal_type, change.field);
@@ -1633,50 +1748,57 @@ impl ManageDirectory for Store {
                     PrincipalField::EnabledPermissions | PrincipalField::DisabledPermissions,
                     PrincipalValue::String(name),
                 ) => {
-                    let permission = Permission::from_name(&name)
-                        .ok_or_else(|| {
-                            error(
-                                format!("Invalid {} value", change.field.as_str()),
-                                format!("Permission {name:?} is invalid").into(),
-                            )
-                        })?
-                        .id() as u64;
+                    let permission = Permission::from_name(&name).ok_or_else(|| {
+                        error(
+                            format!("Invalid {} value", change.field.as_str()),
+                            format!("Permission {name:?} is invalid").into(),
+                        )
+                    })?;
 
-                    principal
-                        .inner
-                        .retain_int(change.field, |v| *v != permission);
+                    principal.remove_permission(
+                        permission,
+                        change.field == PrincipalField::EnabledPermissions,
+                    );
 
                     // Permissions changed, update changed principals
                     changed_principals.add_change(principal_id, principal_type, change.field);
                 }
                 (
                     PrincipalAction::Set,
-                    PrincipalField::Urls | PrincipalField::ExternalMembers,
-                    PrincipalValue::StringList(mut items),
+                    PrincipalField::ExternalMembers,
+                    PrincipalValue::StringList(items),
                 ) => {
-                    if matches!(change.field, PrincipalField::ExternalMembers) {
-                        items = items
-                            .into_iter()
-                            .map(|item| {
-                                sanitize_email(&item).ok_or_else(|| {
-                                    error(
-                                        "Invalid email address",
-                                        format!(
-                                            "Invalid value {:?} for {}",
-                                            item,
-                                            change.field.as_str()
+                    principal
+                        .data
+                        .retain(|v| !matches!(v, PrincipalData::ExternalMembers(_)));
+                    if !items.is_empty() {
+                        principal.data.push(PrincipalData::ExternalMembers(
+                            items
+                                .into_iter()
+                                .map(|item| {
+                                    sanitize_email(&item).ok_or_else(|| {
+                                        error(
+                                            "Invalid email address",
+                                            format!(
+                                                "Invalid value {:?} for {}",
+                                                item,
+                                                change.field.as_str()
+                                            )
+                                            .into(),
                                         )
-                                        .into(),
-                                    )
+                                    })
                                 })
-                            })
-                            .collect::<trc::Result<_>>()?;
+                                .collect::<trc::Result<_>>()?,
+                        ));
                     }
+                }
+                (PrincipalAction::Set, PrincipalField::Urls, PrincipalValue::StringList(items)) => {
+                    principal
+                        .data
+                        .retain(|v| !matches!(v, PrincipalData::Urls(_)));
 
                     if !items.is_empty() {
-                        principal.inner.set(change.field, items);
-                    } else {
-                        principal.inner.remove(change.field);
+                        principal.data.push(PrincipalData::Urls(items));
                     }
                 }
                 (
@@ -1694,8 +1816,40 @@ impl ManageDirectory for Store {
                         })?
                     }
 
-                    if !principal.inner.has_str_value(change.field, &item) {
-                        principal.inner.append_str(change.field, item);
+                    let mut found = false;
+                    for data in &mut principal.data {
+                        match (data, change.field) {
+                            (PrincipalData::Urls(urls), PrincipalField::Urls) => {
+                                if !urls.contains(&item) {
+                                    urls.push(item.clone());
+                                }
+                                found = true;
+                                break;
+                            }
+                            (
+                                PrincipalData::ExternalMembers(emails),
+                                PrincipalField::ExternalMembers,
+                            ) => {
+                                if !emails.contains(&item) {
+                                    emails.push(item.clone());
+                                }
+                                found = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if !found {
+                        match change.field {
+                            PrincipalField::Urls => {
+                                principal.data.push(PrincipalData::Urls(vec![item]))
+                            }
+                            PrincipalField::ExternalMembers => principal
+                                .data
+                                .push(PrincipalData::ExternalMembers(vec![item])),
+                            _ => {}
+                        }
                     }
                 }
                 (
@@ -1703,8 +1857,21 @@ impl ManageDirectory for Store {
                     PrincipalField::Urls | PrincipalField::ExternalMembers,
                     PrincipalValue::String(item),
                 ) => {
-                    if principal.inner.has_str_value(change.field, &item) {
-                        principal.inner.retain_str(change.field, |v| *v != item);
+                    for data in &mut principal.data {
+                        match (data, change.field) {
+                            (PrincipalData::Urls(urls), PrincipalField::Urls) => {
+                                urls.retain(|v| *v != item);
+                                break;
+                            }
+                            (
+                                PrincipalData::ExternalMembers(emails),
+                                PrincipalField::ExternalMembers,
+                            ) => {
+                                emails.retain(|v| *v != item);
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
                 }
 
@@ -1718,15 +1885,27 @@ impl ManageDirectory for Store {
         }
 
         if update_principal {
-            batch.set(
-                ValueClass::Directory(DirectoryClass::Principal(MaybeDynamicId::Static(
-                    principal_id,
-                ))),
-                principal.inner.serialize(),
+            build_search_index(
+                &mut batch,
+                principal_id,
+                Some(prev_principal.inner),
+                Some(&principal),
             );
+
+            batch
+                .assert_value(
+                    ValueClass::Directory(DirectoryClass::Principal(principal_id)),
+                    prev_principal,
+                )
+                .set(
+                    ValueClass::Directory(DirectoryClass::Principal(principal_id)),
+                    Archiver::new(principal)
+                        .serialize()
+                        .caused_by(trc::location!())?,
+                );
         }
 
-        self.write(batch.build())
+        self.write(batch.build_all())
             .await
             .caused_by(trc::location!())?;
 
@@ -1738,28 +1917,95 @@ impl ManageDirectory for Store {
         filter: Option<&str>,
         tenant_id: Option<u32>,
         types: &[Type],
-        fields: &[PrincipalField],
+        fetch: bool,
         page: usize,
         limit: usize,
-    ) -> trc::Result<PrincipalList> {
+    ) -> trc::Result<PrincipalList<Principal>> {
+        let filter = if let Some(filter) = filter.filter(|f| !f.trim().is_empty()) {
+            let mut matches = RoaringBitmap::new();
+
+            for token in WordTokenizer::new(filter, MAX_TOKEN_LENGTH) {
+                let word_bytes = token.word.as_bytes();
+                let from_key = ValueKey::from(ValueClass::Directory(DirectoryClass::Index {
+                    word: word_bytes.to_vec(),
+                    principal_id: 0,
+                }));
+                let to_key = ValueKey::from(ValueClass::Directory(DirectoryClass::Index {
+                    word: word_bytes.to_vec(),
+                    principal_id: u32::MAX,
+                }));
+
+                let mut word_matches = RoaringBitmap::new();
+                self.iterate(
+                    IterateParams::new(from_key, to_key).no_values(),
+                    |key, _| {
+                        let id_pos = key.len() - U32_LEN;
+                        if key.get(1..id_pos).is_some_and(|v| v == word_bytes) {
+                            word_matches.insert(key.deserialize_be_u32(id_pos)?);
+                            Ok(true)
+                        } else {
+                            Ok(false)
+                        }
+                    },
+                )
+                .await
+                .caused_by(trc::location!())?;
+
+                if matches.is_empty() {
+                    matches = word_matches;
+                } else {
+                    matches &= word_matches;
+                    if matches.is_empty() {
+                        break;
+                    }
+                }
+            }
+
+            if !matches.is_empty() {
+                Some(matches)
+            } else {
+                return Ok(PrincipalList {
+                    total: 0,
+                    items: vec![],
+                });
+            }
+        } else {
+            None
+        };
+
         let from_key = ValueKey::from(ValueClass::Directory(DirectoryClass::NameToId(vec![])));
         let to_key = ValueKey::from(ValueClass::Directory(DirectoryClass::NameToId(vec![
             u8::MAX;
             10
         ])));
 
-        let mut results = Vec::new();
+        let max_items = if limit > 0 { limit } else { usize::MAX };
+        let mut offset = page.saturating_sub(1) * limit;
+        let mut result = PrincipalList {
+            items: Vec::new(),
+            total: 0,
+        };
         self.iterate(
             IterateParams::new(from_key, to_key).ascending(),
             |key, value| {
                 let pt = PrincipalInfo::deserialize(value).caused_by(trc::location!())?;
 
-                if (types.is_empty() || types.contains(&pt.typ)) && pt.has_tenant_access(tenant_id)
+                if (types.is_empty() || types.contains(&pt.typ))
+                    && pt.has_tenant_access(tenant_id)
+                    && filter.as_ref().is_none_or(|filter| filter.contains(pt.id))
                 {
-                    results.push(Principal::new(pt.id, pt.typ).with_field(
-                        PrincipalField::Name,
-                        String::from_utf8_lossy(key.get(1..).unwrap_or_default()).into_owned(),
-                    ));
+                    result.total += 1;
+                    if offset == 0 {
+                        if result.items.len() < max_items {
+                            let mut principal = Principal::new(pt.id, pt.typ);
+                            principal.name =
+                                String::from_utf8_lossy(key.get(1..).unwrap_or_default())
+                                    .into_owned();
+                            result.items.push(principal);
+                        }
+                    } else {
+                        offset -= 1;
+                    }
                 }
 
                 Ok(true)
@@ -1768,86 +2014,23 @@ impl ManageDirectory for Store {
         .await
         .caused_by(trc::location!())?;
 
-        if filter.is_none()
-            && !fields.is_empty()
-            && fields.iter().all(|f| matches!(f, PrincipalField::Name))
-        {
-            return Ok(PrincipalList {
-                total: results.len() as u64,
-                items: results
-                    .into_iter()
-                    .skip(page.saturating_sub(1) * limit)
-                    .take(if limit > 0 { limit } else { usize::MAX })
-                    .collect(),
-            });
+        if fetch && !result.items.is_empty() {
+            let mut items = Vec::with_capacity(result.items.len());
+
+            for principal in result.items {
+                items.push(
+                    self.query(QueryBy::Id(principal.id), fetch)
+                        .await
+                        .caused_by(trc::location!())?
+                        .ok_or_else(|| not_found(principal.name().to_string()))?,
+                );
+            }
+            result.items = items;
+
+            Ok(result)
+        } else {
+            Ok(result)
         }
-
-        let mut result = PrincipalList::default();
-        let filters = filter.and_then(|filter| {
-            let filters = filter
-                .split_whitespace()
-                .map(|r| r.to_lowercase())
-                .collect::<Vec<_>>();
-            if !filters.is_empty() {
-                Some(filters)
-            } else {
-                None
-            }
-        });
-
-        let mut offset = limit * page.saturating_sub(1);
-        let mut is_done = false;
-        let map_principals = fields.is_empty()
-            || fields.iter().any(|f| {
-                matches!(
-                    f,
-                    PrincipalField::Tenant
-                        | PrincipalField::MemberOf
-                        | PrincipalField::Lists
-                        | PrincipalField::Roles
-                        | PrincipalField::EnabledPermissions
-                        | PrincipalField::DisabledPermissions
-                        | PrincipalField::Members
-                        | PrincipalField::UsedQuota
-                )
-            });
-
-        for mut principal in results {
-            if !is_done || filters.is_some() {
-                principal = self
-                    .query(QueryBy::Id(principal.id), map_principals)
-                    .await
-                    .caused_by(trc::location!())?
-                    .ok_or_else(|| not_found(principal.name().to_string()))?;
-            }
-
-            if filters
-                .as_ref()
-                .is_none_or(|filters| filters.iter().all(|f| principal.find_str(f)))
-            {
-                result.total += 1;
-
-                if offset == 0 {
-                    if !is_done {
-                        if !fields.is_empty() {
-                            principal.fields.retain(|k, _| fields.contains(k));
-                        }
-
-                        if map_principals {
-                            self.map_field_ids(&mut principal, fields)
-                                .await
-                                .caused_by(trc::location!())?;
-                        }
-                        result.items.push(principal);
-                        is_done = limit != 0 && result.items.len() >= limit;
-                    }
-                } else {
-                    offset -= 1;
-                }
-            }
-        }
-
-        Ok(result)
     }
 
     async fn count_principals(
@@ -1932,44 +2115,113 @@ impl ManageDirectory for Store {
         Ok(results)
     }
 
-    async fn map_field_ids(
+    async fn map_principal(
         &self,
-        principal: &mut Principal,
+        principal: Principal,
         fields: &[PrincipalField],
-    ) -> trc::Result<()> {
-        // Map groups
-        for field in [
-            PrincipalField::MemberOf,
-            PrincipalField::Lists,
-            PrincipalField::Roles,
-        ] {
-            if let Some(member_of) = principal
-                .take_int_array(field)
-                .filter(|_| fields.is_empty() || fields.contains(&field))
-            {
-                for principal_id in member_of {
-                    match principal_id as u32 {
-                        ROLE_ADMIN if field == PrincipalField::Roles => {
-                            principal.append_str(field, "admin");
+    ) -> trc::Result<PrincipalSet> {
+        let mut result = PrincipalSet::new(principal.id, principal.typ);
+
+        let has_enabled = fields.is_empty() || fields.contains(&PrincipalField::EnabledPermissions);
+        let has_disabled =
+            fields.is_empty() || fields.contains(&PrincipalField::DisabledPermissions);
+        let mut principal_quotas = Vec::new();
+
+        for data in principal.data {
+            match data {
+                PrincipalData::MemberOf(items)
+                    if fields.is_empty() || fields.contains(&PrincipalField::MemberOf) =>
+                {
+                    for principal_id in items {
+                        if let Some(name) = self
+                            .get_principal_name(principal_id)
+                            .await
+                            .caused_by(trc::location!())?
+                        {
+                            result.append_str(PrincipalField::MemberOf, name);
                         }
-                        ROLE_TENANT_ADMIN if field == PrincipalField::Roles => {
-                            principal.append_str(field, "tenant-admin");
-                        }
-                        ROLE_USER if field == PrincipalField::Roles => {
-                            principal.append_str(field, "user");
-                        }
-                        principal_id => {
-                            if let Some(name) = self
-                                .get_principal(principal_id)
-                                .await
-                                .caused_by(trc::location!())?
-                                .and_then(|mut p| p.take_str(PrincipalField::Name))
-                            {
-                                principal.append_str(field, name);
+                    }
+                }
+                PrincipalData::Roles(items)
+                    if fields.is_empty() || fields.contains(&PrincipalField::Roles) =>
+                {
+                    for principal_id in items {
+                        match principal_id {
+                            ROLE_ADMIN => {
+                                result.append_str(PrincipalField::Roles, "admin");
+                            }
+                            ROLE_TENANT_ADMIN => {
+                                result.append_str(PrincipalField::Roles, "tenant-admin");
+                            }
+                            ROLE_USER => {
+                                result.append_str(PrincipalField::Roles, "user");
+                            }
+                            principal_id => {
+                                if let Some(name) = self
+                                    .get_principal_name(principal_id)
+                                    .await
+                                    .caused_by(trc::location!())?
+                                {
+                                    result.append_str(PrincipalField::Roles, name);
+                                }
                             }
                         }
                     }
                 }
+                PrincipalData::Lists(items)
+                    if fields.is_empty() || fields.contains(&PrincipalField::Lists) =>
+                {
+                    for principal_id in items {
+                        if let Some(name) = self
+                            .get_principal_name(principal_id)
+                            .await
+                            .caused_by(trc::location!())?
+                        {
+                            result.append_str(PrincipalField::Lists, name);
+                        }
+                    }
+                }
+                PrincipalData::Permissions(permission_grants) if has_enabled || has_disabled => {
+                    for grant in permission_grants {
+                        if grant.grant {
+                            if has_enabled {
+                                result.append_str(
+                                    PrincipalField::EnabledPermissions,
+                                    grant.permission.name(),
+                                );
+                            }
+                        } else if has_disabled {
+                            result.append_str(
+                                PrincipalField::DisabledPermissions,
+                                grant.permission.name(),
+                            );
+                        }
+                    }
+                }
+                PrincipalData::Picture(compact_string) => {
+                    if fields.is_empty() || fields.contains(&PrincipalField::Picture) {
+                        result.set(PrincipalField::Picture, compact_string);
+                    }
+                }
+                PrincipalData::Locale(compact_string) => {
+                    if fields.is_empty() || fields.contains(&PrincipalField::Locale) {
+                        result.set(PrincipalField::Locale, compact_string);
+                    }
+                }
+                PrincipalData::ExternalMembers(compact_strings) => {
+                    if fields.is_empty() || fields.contains(&PrincipalField::ExternalMembers) {
+                        result.set(PrincipalField::ExternalMembers, compact_strings);
+                    }
+                }
+                PrincipalData::Urls(compact_strings) => {
+                    if fields.is_empty() || fields.contains(&PrincipalField::Urls) {
+                        result.set(PrincipalField::Urls, compact_strings);
+                    }
+                }
+                PrincipalData::PrincipalQuota(principal_quotas_) => {
+                    principal_quotas = principal_quotas_;
+                }
+                _ => (),
             }
         }
 
@@ -1978,12 +2230,10 @@ impl ManageDirectory for Store {
             match principal.typ {
                 Type::Group | Type::List | Type::Role => {
                     for member_id in self.get_members(principal.id).await? {
-                        if let Some(mut member_principal) =
+                        if let Some(member_principal) =
                             self.query(QueryBy::Id(member_id), false).await?
                         {
-                            if let Some(name) = member_principal.take_str(PrincipalField::Name) {
-                                principal.append_str(PrincipalField::Members, name);
-                            }
+                            result.append_str(PrincipalField::Members, member_principal.name);
                         }
                     }
                 }
@@ -1993,7 +2243,7 @@ impl ManageDirectory for Store {
                     let to_key = ValueKey::from(ValueClass::Directory(DirectoryClass::EmailToId(
                         vec![u8::MAX; 10],
                     )));
-                    let domain_name = principal.name();
+                    let domain_name = &principal.name;
                     let mut total: u64 = 0;
                     self.iterate(
                         IterateParams::new(from_key, to_key).no_values(),
@@ -2010,7 +2260,7 @@ impl ManageDirectory for Store {
                     )
                     .await
                     .caused_by(trc::location!())?;
-                    principal.set(PrincipalField::Members, total);
+                    result.set(PrincipalField::Members, total);
                 }
                 Type::Tenant => {
                     let from_key =
@@ -2034,32 +2284,66 @@ impl ManageDirectory for Store {
                     .await
                     .caused_by(trc::location!())?;
 
-                    principal.set(PrincipalField::Members, total);
+                    result.set(PrincipalField::Members, total);
                 }
                 _ => {}
             }
         }
 
         // SPDX-SnippetBegin
-        // SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+        // SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
         // SPDX-License-Identifier: LicenseRef-SEL
 
         // Map tenant name
         #[cfg(feature = "enterprise")]
-        if let Some(tenant_id) = principal.take_int(PrincipalField::Tenant) {
+        if let Some(tenant_id) = principal.tenant {
             if fields.is_empty() || fields.contains(&PrincipalField::Tenant) {
                 if let Some(name) = self
-                    .get_principal(tenant_id as u32)
+                    .get_principal_name(tenant_id)
                     .await
                     .caused_by(trc::location!())?
-                    .and_then(|mut p| p.take_str(PrincipalField::Name))
                 {
-                    principal.set(PrincipalField::Tenant, name);
+                    result.set(PrincipalField::Tenant, name);
                 }
             }
         }
 
         // SPDX-SnippetEnd
+
+        // Map fields
+        for (name, value) in [
+            (PrincipalField::Name, Some(principal.name)),
+            (PrincipalField::Description, principal.description),
+        ] {
+            if let Some(value) = value {
+                if fields.is_empty() || fields.contains(&name) {
+                    result.set(name, value);
+                }
+            }
+        }
+        for (name, value) in [
+            (PrincipalField::Secrets, principal.secrets),
+            (PrincipalField::Emails, principal.emails),
+        ] {
+            if fields.is_empty() || fields.contains(&name) {
+                result.set(name, value);
+            }
+        }
+        if fields.is_empty() || fields.contains(&PrincipalField::Quota) {
+            if !principal_quotas.is_empty() {
+                let mut quotas = vec![0u64; Type::MAX_ID + 2];
+                if let Some(quota) = principal.quota {
+                    quotas[0] = quota;
+                }
+                for quota in principal_quotas {
+                    quotas[(quota.typ as usize) + 1] = quota.quota;
+                }
+
+                result.set(PrincipalField::Quota, quotas);
+            } else if let Some(quota) = principal.quota {
+                result.set(PrincipalField::Quota, quota);
+            }
+        }
 
         // Obtain used quota
         if matches!(principal.typ, Type::Individual | Type::Group | Type::Tenant)
@@ -2070,25 +2354,11 @@ impl ManageDirectory for Store {
                 .await
                 .caused_by(trc::location!())?;
             if quota > 0 {
-                principal.set(PrincipalField::UsedQuota, quota as u64);
+                result.set(PrincipalField::UsedQuota, quota as u64);
             }
         }
 
-        // Map permissions
-        for field in [
-            PrincipalField::EnabledPermissions,
-            PrincipalField::DisabledPermissions,
-        ] {
-            if let Some(permissions) = principal.take_int_array(field) {
-                for permission in permissions {
-                    if let Some(name) = Permission::from_id(permission as usize) {
-                        principal.append_str(field, name.name().to_string());
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        Ok(result)
     }
 }
 
@@ -2110,9 +2380,9 @@ impl ValidateDirectory for Store {
                 Some(v) if v.typ == Type::Domain && v.has_tenant_access(tenant_id) => Ok(()),
                 None if create_if_missing => self
                     .create_principal(
-                        Principal::new(0, Type::Domain)
-                            .with_field(PrincipalField::Name, domain.to_string())
-                            .with_field(PrincipalField::Description, domain.to_string()),
+                        PrincipalSet::new(0, Type::Domain)
+                            .with_field(PrincipalField::Name, domain)
+                            .with_field(PrincipalField::Description, domain),
                         tenant_id,
                         None,
                     )
@@ -2140,20 +2410,6 @@ impl PrincipalField {
     pub fn map_internal_roles(&self, name: &str) -> Option<PrincipalInfo> {
         self.map_internal_role_name(name)
             .map(|role_id| PrincipalInfo::new(role_id, Type::Role, None))
-    }
-}
-
-impl SerializeWithId for Principal {
-    fn serialize_with_id(&self, ids: &AssignedIds) -> trc::Result<Vec<u8>> {
-        let mut principal = self.clone();
-        principal.id = ids.last_document_id().caused_by(trc::location!())?;
-        Ok(principal.serialize())
-    }
-}
-
-impl From<Principal> for MaybeDynamicValue {
-    fn from(principal: Principal) -> Self {
-        MaybeDynamicValue::Dynamic(Box::new(principal))
     }
 }
 
@@ -2232,18 +2488,6 @@ fn validate_member_of(
         ))
     } else {
         Ok(())
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct DynamicPrincipalInfo {
-    typ: Type,
-    tenant: Option<u32>,
-}
-
-impl DynamicPrincipalInfo {
-    pub fn new(typ: Type, tenant: Option<u32>) -> Self {
-        Self { typ, tenant }
     }
 }
 
@@ -2381,19 +2625,6 @@ impl ChangedPrincipal {
     }
 }
 
-impl SerializeWithId for DynamicPrincipalInfo {
-    fn serialize_with_id(&self, ids: &AssignedIds) -> trc::Result<Vec<u8>> {
-        ids.last_document_id()
-            .map(|principal_id| PrincipalInfo::new(principal_id, self.typ, self.tenant).serialize())
-    }
-}
-
-impl From<DynamicPrincipalInfo> for MaybeDynamicValue {
-    fn from(value: DynamicPrincipalInfo) -> Self {
-        MaybeDynamicValue::Dynamic(Box::new(value))
-    }
-}
-
 pub fn err_missing(field: impl Into<trc::Value>) -> trc::Error {
     trc::ManageEvent::MissingParameter.ctx(trc::Key::Key, field)
 }
@@ -2424,6 +2655,6 @@ pub fn error(details: impl Into<trc::Value>, reason: Option<impl Into<trc::Value
 
 impl From<PrincipalField> for trc::Value {
     fn from(value: PrincipalField) -> Self {
-        trc::Value::Static(value.as_str())
+        trc::Value::String(CompactString::const_new(value.as_str()))
     }
 }

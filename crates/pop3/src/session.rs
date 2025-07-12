@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -13,11 +13,11 @@ use common::{
 use tokio_rustls::server::TlsStream;
 
 use crate::{
+    Pop3SessionManager, SERVER_GREETING, Session, State,
     protocol::{
         request::Parser,
         response::{Response, SerializeResponse},
     },
-    Pop3SessionManager, Session, State, SERVER_GREETING,
 };
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

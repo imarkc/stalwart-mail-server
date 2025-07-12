@@ -1,27 +1,25 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
-
-use std::{
-    borrow::Cow,
-    collections::hash_map::Entry,
-    io::{Cursor, Read},
-};
 
 use ahash::AHashMap;
 use common::Server;
 use mail_auth::{
     flate2::read::GzDecoder,
-    report::{tlsrpt::TlsReport, ActionDisposition, DmarcResult, Feedback, Report},
+    report::{ActionDisposition, DmarcResult, Feedback, Report, tlsrpt::TlsReport},
     zip,
 };
 use mail_parser::{Message, MimeHeaders, PartType};
-
+use std::{
+    borrow::Cow,
+    collections::hash_map::Entry,
+    io::{Cursor, Read},
+};
 use store::{
-    write::{now, BatchBuilder, Bincode, ReportClass, ValueClass},
     Serialize,
+    write::{Archiver, BatchBuilder, ReportClass, ValueClass, now},
 };
 use trc::IncomingReportEvent;
 
@@ -43,7 +41,9 @@ struct ReportData<'x> {
     data: &'x [u8],
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, serde::Serialize, serde::Deserialize,
+)]
 pub struct IncomingReport<T> {
     pub from: String,
     pub to: Vec<String>,
@@ -59,19 +59,19 @@ impl AnalyzeReport for Server {
     fn analyze_report(&self, message: Message<'static>, session_id: u64) {
         let core = self.clone();
         tokio::spawn(async move {
-            let from = message
+            let from: String = message
                 .from()
                 .and_then(|a| a.last())
                 .and_then(|a| a.address())
                 .unwrap_or_default()
-                .to_string();
-            let to = message.to().map_or_else(Vec::new, |a| {
+                .into();
+            let to: Vec<String> = message.to().map_or_else(Vec::new, |a| {
                 a.iter()
                     .filter_map(|a| a.address())
-                    .map(|a| a.to_string())
+                    .map(|a| a.into())
                     .collect()
             });
-            let subject = message.subject().unwrap_or_default().to_string();
+            let subject: String = message.subject().unwrap_or_default().into();
             let mut reports = Vec::new();
 
             for part in &message.parts {
@@ -274,53 +274,56 @@ impl AnalyzeReport for Server {
                 // Store report
                 if let Some(expires_in) = &core.core.smtp.report.analysis.store {
                     let expires = now() + expires_in.as_secs();
-                    let id = core.inner.data.queue_id_gen.generate().unwrap_or(expires);
+                    let id = core.inner.data.queue_id_gen.generate();
 
                     let mut batch = BatchBuilder::new();
                     match report {
                         Format::Dmarc(report) => {
                             batch.set(
                                 ValueClass::Report(ReportClass::Dmarc { id, expires }),
-                                Bincode::new(IncomingReport {
+                                Archiver::new(IncomingReport {
                                     from,
                                     to,
                                     subject,
                                     report,
                                 })
-                                .serialize(),
+                                .serialize()
+                                .unwrap_or_default(),
                             );
                         }
                         Format::Tls(report) => {
                             batch.set(
                                 ValueClass::Report(ReportClass::Tls { id, expires }),
-                                Bincode::new(IncomingReport {
+                                Archiver::new(IncomingReport {
                                     from,
                                     to,
                                     subject,
                                     report,
                                 })
-                                .serialize(),
+                                .serialize()
+                                .unwrap_or_default(),
                             );
                         }
                         Format::Arf(report) => {
                             batch.set(
                                 ValueClass::Report(ReportClass::Arf { id, expires }),
-                                Bincode::new(IncomingReport {
+                                Archiver::new(IncomingReport {
                                     from,
                                     to,
                                     subject,
                                     report,
                                 })
-                                .serialize(),
+                                .serialize()
+                                .unwrap_or_default(),
                             );
                         }
                     }
-                    let batch = batch.build();
-                    if let Err(err) = core.core.storage.data.write(batch).await {
-                        trc::error!(err
-                            .span_id(session_id)
-                            .caused_by(trc::location!())
-                            .details("Failed to write report"));
+                    if let Err(err) = core.core.storage.data.write(batch.build_all()).await {
+                        trc::error!(
+                            err.span_id(session_id)
+                                .caused_by(trc::location!())
+                                .details("Failed to write report")
+                        );
                     }
                 }
                 return;
@@ -471,15 +474,13 @@ impl LogReport for Feedback<'_> {
             Domain = self
                 .reported_domain()
                 .iter()
-                .map(|d| trc::Value::String(d.to_string()))
+                .map(|d| trc::Value::String(d.as_ref().into()))
                 .collect::<Vec<_>>(),
-            Hostname = self
-                .reporting_mta()
-                .map(|d| trc::Value::String(d.to_string())),
+            Hostname = self.reporting_mta().map(|d| trc::Value::String(d.into())),
             Url = self
                 .reported_uri()
                 .iter()
-                .map(|d| trc::Value::String(d.to_string()))
+                .map(|d| trc::Value::String(d.as_ref().into()))
                 .collect::<Vec<_>>(),
             RemoteIp = self.source_ip(),
             Total = self.incidents(),
@@ -487,7 +488,7 @@ impl LogReport for Feedback<'_> {
             Details = self
                 .authentication_results()
                 .iter()
-                .map(|d| trc::Value::String(d.to_string()))
+                .map(|d| trc::Value::String(d.as_ref().into()))
                 .collect::<Vec<_>>(),
         );
     }
@@ -497,7 +498,7 @@ impl<T> IncomingReport<T> {
     pub fn has_domain(&self, domain: &[String]) -> bool {
         self.to
             .iter()
-            .any(|to| domain.iter().any(|d| to.ends_with(d)))
-            || domain.iter().any(|d| self.from.ends_with(d))
+            .any(|to| domain.iter().any(|d| to.ends_with(d.as_str())))
+            || domain.iter().any(|d| self.from.ends_with(d.as_str()))
     }
 }

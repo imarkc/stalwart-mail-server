@@ -1,17 +1,17 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
 use std::time::Duration;
 
-use mysql_async::{prelude::Queryable, OptsBuilder, Pool, PoolConstraints, PoolOpts, SslOpts};
-use utils::config::{utils::AsKey, Config};
+use mysql_async::{OptsBuilder, Pool, PoolConstraints, PoolOpts, SslOpts, prelude::Queryable};
+use utils::config::{Config, utils::AsKey};
 
 use crate::*;
 
-use super::{into_error, MysqlStore};
+use super::{MysqlStore, into_error};
 
 impl MysqlStore {
     pub async fn open(

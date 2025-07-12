@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use imap_proto::{receiver::Request, Command};
+use imap_proto::{Command, receiver::Request};
 
 use crate::core::Session;
 use common::listener::SessionStream;
@@ -16,8 +16,8 @@ impl<T: SessionStream> Session<T> {
 
         self.authenticate(
             Credentials::Plain {
-                username: arguments.username,
-                secret: arguments.password,
+                username: arguments.username.to_string(),
+                secret: arguments.password.to_string(),
             },
             arguments.tag,
         )

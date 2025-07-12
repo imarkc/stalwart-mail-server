@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -10,12 +10,12 @@ use crate::core::Session;
 use common::listener::SessionStream;
 use directory::Permission;
 use imap_proto::{
+    Command, StatusResponse,
     protocol::{
-        capability::{Capability, Response},
         ImapResponse,
+        capability::{Capability, Response},
     },
     receiver::Request,
-    Command, StatusResponse,
 };
 
 impl<T: SessionStream> Session<T> {
@@ -64,9 +64,7 @@ impl<T: SessionStream> Session<T> {
                 .with_tag(request.tag)
                 .serialize(
                     concat!(
-                        "* ID (\"name\" \"Stalwart IMAP\" \"version\" \"",
-                        env!("CARGO_PKG_VERSION"),
-                        "\" \"vendor\" \"Stalwart Labs Ltd.\" ",
+                        "* ID (\"name\" \"Stalwart\" \"version\" \"1.0.0\" \"vendor\" \"Stalwart Labs LLC\" ",
                         "\"support-url\" \"https://stalw.art\")\r\n"
                     )
                     .as_bytes()

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -9,8 +9,9 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use common::{config::spamfilter::Location, Server};
-use mail_parser::{parsers::MessageStream, Header};
+use common::{Server, config::spamfilter::Location};
+use compact_str::CompactString;
+use mail_parser::{Header, parsers::MessageStream};
 
 use crate::{
     Recipient, SpamFilterContext, SpamFilterInput, SpamFilterOutput, SpamFilterResult, TextPart,
@@ -45,7 +46,7 @@ impl SpamFilterInput<'_> {
     pub fn header_as_address(&self, header: &Header<'_>) -> Option<Cow<'_, str>> {
         self.message
             .raw_message()
-            .get(header.offset_start..header.offset_end)
+            .get(header.offset_start as usize..header.offset_end as usize)
             .map(|bytes| MessageStream::new(bytes).parse_address())
             .and_then(|addr| addr.into_address())
             .and_then(|addr| addr.into_list().into_iter().next())
@@ -69,7 +70,7 @@ impl SpamFilterContext<'_> {
             .text_body
             .first()
             .or_else(|| self.input.message.html_body.first())
-            .and_then(|idx| self.output.text_parts.get(*idx))
+            .and_then(|idx| self.output.text_parts.get(*idx as usize))
             .and_then(|part| match part {
                 TextPart::Plain { text_body, .. } => Some(*text_body),
                 TextPart::Html { text_body, .. } => Some(text_body.as_str()),
@@ -79,7 +80,7 @@ impl SpamFilterContext<'_> {
 }
 
 impl SpamFilterResult {
-    pub fn add_tag(&mut self, tag: impl Into<String>) {
+    pub fn add_tag(&mut self, tag: impl Into<CompactString>) {
         self.tags.insert(tag.into());
     }
 

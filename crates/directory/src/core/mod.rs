@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -200,6 +200,57 @@ impl Permission {
             Permission::OauthClientDelete => "Remove OAuth clients",
             Permission::AiModelInteract => "Interact with AI models",
             Permission::Troubleshoot => "Perform troubleshooting",
+            Permission::DavSyncCollection => "Synchronize collection changes with client",
+            Permission::DavPrincipalAcl => "Set principal properties for access control",
+            Permission::DavPrincipalMatch => "Match principals based on specified criteria",
+            Permission::DavPrincipalSearch => "Search for principals by property values",
+            Permission::DavPrincipalSearchPropSet => "Define property sets for principal searches",
+            Permission::DavExpandProperty => "Expand properties that reference other resources",
+            Permission::DavPrincipalList => "List available principals in the system",
+            Permission::DavFilePropFind => "Retrieve properties of file resources",
+            Permission::DavFilePropPatch => "Modify properties of file resources",
+            Permission::DavFileGet => "Download file resources",
+            Permission::DavFileMkCol => "Create new file collections or directories",
+            Permission::DavFileDelete => "Remove file resources",
+            Permission::DavFilePut => "Upload or modify file resources",
+            Permission::DavFileCopy => "Copy file resources to new locations",
+            Permission::DavFileMove => "Move file resources to new locations",
+            Permission::DavFileLock => "Lock file resources to prevent concurrent modifications",
+            Permission::DavFileAcl => "Manage access control lists for file resources",
+            Permission::DavCardPropFind => "Retrieve properties of address book entries",
+            Permission::DavCardPropPatch => "Modify properties of address book entries",
+            Permission::DavCardGet => "Download address book entries",
+            Permission::DavCardMkCol => "Create new address book collections",
+            Permission::DavCardDelete => "Remove address book entries or collections",
+            Permission::DavCardPut => "Upload or modify address book entries",
+            Permission::DavCardCopy => "Copy address book entries to new locations",
+            Permission::DavCardMove => "Move address book entries to new locations",
+            Permission::DavCardLock => {
+                "Lock address book entries to prevent concurrent modifications"
+            }
+            Permission::DavCardAcl => "Manage access control lists for address book entries",
+            Permission::DavCardQuery => "Search for address book entries matching criteria",
+            Permission::DavCardMultiGet => {
+                "Retrieve multiple address book entries in a single request"
+            }
+            Permission::DavCalPropFind => "Retrieve properties of calendar entries",
+            Permission::DavCalPropPatch => "Modify properties of calendar entries",
+            Permission::DavCalGet => "Download calendar entries",
+            Permission::DavCalMkCol => "Create new calendar collections",
+            Permission::DavCalDelete => "Remove calendar entries or collections",
+            Permission::DavCalPut => "Upload or modify calendar entries",
+            Permission::DavCalCopy => "Copy calendar entries to new locations",
+            Permission::DavCalMove => "Move calendar entries to new locations",
+            Permission::DavCalLock => "Lock calendar entries to prevent concurrent modifications",
+            Permission::DavCalAcl => "Manage access control lists for calendar entries",
+            Permission::DavCalQuery => "Search for calendar entries matching criteria",
+            Permission::DavCalMultiGet => "Retrieve multiple calendar entries in a single request",
+            Permission::DavCalFreeBusyQuery => "Query free/busy time information for scheduling",
+            Permission::CalendarAlarms => "Receive calendar alarms via e-mail",
+            Permission::CalendarSchedulingSend => "Send calendar scheduling requests via e-mail",
+            Permission::CalendarSchedulingReceive => {
+                "Receive calendar scheduling requests via e-mail"
+            }
         }
     }
 }
@@ -213,7 +264,10 @@ mod test {
     fn print_permissions() {
         const CHECK: &str = ":white_check_mark:";
 
-        for permission in Permission::all() {
+        let mut permissions = Permission::all().collect::<Vec<_>>();
+        permissions.sort_by(|a, b| a.name().cmp(b.name()));
+
+        for permission in permissions {
             println!(
                 "|`{}`|{}|{}|{}|{}|",
                 permission.name(),

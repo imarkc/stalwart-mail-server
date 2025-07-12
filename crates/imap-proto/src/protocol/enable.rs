@@ -1,10 +1,10 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
 
-use super::{capability::Capability, ImapResponse};
+use super::{ImapResponse, capability::Capability};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arguments {

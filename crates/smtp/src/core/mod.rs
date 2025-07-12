@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2020 Stalwart Labs Ltd <hello@stalw.art>
+ * SPDX-FileCopyrightText: 2020 Stalwart Labs LLC <hello@stalw.art>
  *
  * SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-SEL
  */
@@ -17,6 +17,7 @@ use common::{
     config::smtp::auth::VerifyStrategy,
     listener::{ServerInstance, asn::AsnGeoLookupResult},
 };
+
 use directory::Directory;
 use mail_auth::{IprevOutput, SpfOutput};
 use smtp_proto::request::receiver::{
@@ -219,7 +220,7 @@ impl Session<common::listener::stream::NullIo> {
         data: SessionData,
     ) -> Self {
         Session {
-            hostname: "localhost".to_string(),
+            hostname: "localhost".into(),
             state: State::None,
             instance,
             server,
@@ -255,7 +256,7 @@ impl Session<common::listener::stream::NullIo> {
             let response = std::str::from_utf8(&self.stream.tx_buf)
                 .unwrap()
                 .trim()
-                .to_string();
+                .into();
             self.stream.tx_buf.clear();
             Some(response)
         }
@@ -264,6 +265,7 @@ impl Session<common::listener::stream::NullIo> {
 
 impl SessionData {
     pub fn local(
+        authenticated_as: Arc<AccessToken>,
         mail_from: Option<SessionAddress>,
         rcpt_to: Vec<SessionAddress>,
         message: Vec<u8>,
@@ -272,8 +274,8 @@ impl SessionData {
         SessionData {
             local_ip: IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             remote_ip: IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-            local_ip_str: "127.0.0.1".to_string(),
-            remote_ip_str: "127.0.0.1".to_string(),
+            local_ip_str: "127.0.0.1".into(),
+            remote_ip_str: "127.0.0.1".into(),
             remote_port: 0,
             local_port: 0,
             session_id,
@@ -284,7 +286,7 @@ impl SessionData {
             rcpt_errors: 0,
             rcpt_oks: 0,
             message,
-            authenticated_as: Some(Arc::new(AccessToken::from_id(0))),
+            authenticated_as: Some(authenticated_as),
             auth_errors: 0,
             priority: 0,
             delivery_by: 0,
@@ -302,7 +304,7 @@ impl SessionData {
 
 impl Default for SessionData {
     fn default() -> Self {
-        Self::local(None, vec![], vec![], 0)
+        Self::local(Arc::new(AccessToken::from_id(0)), None, vec![], vec![], 0)
     }
 }
 
@@ -310,7 +312,7 @@ impl SessionAddress {
     pub fn new(address: String) -> Self {
         let address_lcase = address.to_lowercase();
         SessionAddress {
-            domain: address_lcase.domain_part().to_string(),
+            domain: address_lcase.domain_part().into(),
             address_lcase,
             address,
             flags: 0,
